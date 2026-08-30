@@ -40,6 +40,68 @@ type prRef struct {
 	num  int
 }
 
+// ghPR reads a pull request over REST and reshapes it into the fields the
+// GraphQL view handed back, so its caller is unchanged.
+//
+// `gh pr view` is GraphQL, and that budget is SEPARATE from the REST one and
+// far smaller in practice: one call per candidate over a few passes of ~300
+// exhausted it while REST still read 5000/5000, and 23 pull requests came back
+// as "cannot read PR" -- a rate limit wearing the mask of a failure.
+//
+// REST reports mergeable as null while GitHub is still computing it, so an
+// unknown state is reported as UNKNOWN rather than guessed either way.
+func ghPR(repo string, num int) ([]byte, error) {
+	raw, err := gh("api", fmt.Sprintf("repos/%s/pulls/%d", repo, num))
+	if err != nil {
+		return nil, err
+	}
+	var pr struct {
+		Title     string `json:"title"`
+		Draft     bool   `json:"draft"`
+		Mergeable *bool  `json:"mergeable"`
+		Head      struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal(raw, &pr); err != nil {
+		return nil, err
+	}
+	mergeable := "UNKNOWN"
+	if pr.Mergeable != nil {
+		if *pr.Mergeable {
+			mergeable = "MERGEABLE"
+		} else {
+			mergeable = "CONFLICTING"
+		}
+	}
+
+	type roll struct {
+		Conclusion string `json:"conclusion"`
+		Status     string `json:"status"`
+		State      string `json:"state"`
+	}
+	rolls := []roll{}
+	if cr, err := gh("api", fmt.Sprintf("repos/%s/commits/%s/check-runs?per_page=100", repo, pr.Head.SHA)); err == nil {
+		var v struct {
+			CheckRuns []struct {
+				Conclusion string `json:"conclusion"`
+				Status     string `json:"status"`
+			} `json:"check_runs"`
+		}
+		if json.Unmarshal(cr, &v) == nil {
+			for _, c := range v.CheckRuns {
+				rolls = append(rolls, roll{Conclusion: strings.ToUpper(c.Conclusion), Status: strings.ToUpper(c.Status)})
+			}
+		}
+	}
+
+	return json.Marshal(map[string]any{
+		"headRefName": pr.Head.Ref, "mergeable": mergeable, "mergeStateStatus": "",
+		"isDraft": pr.Draft, "title": pr.Title, "statusCheckRollup": rolls,
+	})
+}
+
 // heldByOthers reads agentsync's leases. A fleet-wide sweep cannot claim a
 // hundred repositories -- that would block every other session -- so it does the
 // opposite: it looks at what someone else has claimed and stays out. This is the
@@ -157,8 +219,12 @@ func main() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			b, err := gh("pr", "view", fmt.Sprint(r.num), "--repo", r.repo, "--json",
-				"headRefName,mergeable,mergeStateStatus,isDraft,statusCheckRollup,title")
+			// REST, not `gh pr view`. That command is GraphQL, whose budget is
+			// SEPARATE from the REST one and far smaller in practice: one call
+			// per candidate across a few passes of ~300 candidates exhausted it
+			// while REST still showed 5000/5000, and 23 pull requests came back
+			// as "cannot read PR" -- a rate limit wearing the mask of a failure.
+			b, err := ghPR(r.repo, r.num)
 			if err != nil {
 				mu.Lock()
 				skipped["view-failed"]++
