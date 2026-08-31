@@ -103,7 +103,7 @@ func TestBrokenRunners(t *testing.T) {
 		}, NoRunner, false},
 		{"no .github repo at all", func(r *Runner) {
 			r.RepoExists = false
-		}, NoRunnerRepo, false},
+		}, NoRunner, false},
 		{"the API would not say", func(r *Runner) {
 			r.ReadError = "503"
 		}, Unreadable, true},

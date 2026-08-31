@@ -71,9 +71,49 @@ request can fix it), `disabled_inactivity` (re-enable -- and it expires again in
 simply stopped. Each section names its own fix.
 
 **Driven from the ORGANISATION list, not the runner list.** A recency check over
-runners structurally cannot see an organisation that has no runner to be quiet:
-one pass found 198 organisations holding a `.github` repository with no runner in
-it at all, and 9 with no such repository.
+runners structurally cannot see an organisation that has no runner to be quiet.
+
+## Attribution: the property belongs to whatever COVERS the repository
+
+The first version got its headline right and its informational output wrong, in
+two ways that were the same mistake twice.
+
+It reported `no_runner` for 199 organisations. They were not uncovered: a
+Renovate runner does not watch the repository it lives in, it watches whatever
+its `autodiscoverFilter` names, and `go-ruby-stdlib/renovate-runner` names
+`go-ruby-*/**` -- 204 organisations from one repository. And it warned that some
+twenty `go-ruby-*/.github` repositories were 53 days from a 60-day latch, when
+those repositories hold **no workflow at all**: there is no schedule there for
+GitHub to disable. The repository that actually carries that risk for all of
+them is the shared runner, and that is not where the warning pointed.
+
+So `quietscan` reads every runner's `autodiscoverFilter` and resolves coverage
+fleet-wide:
+
+- An organisation reached by a live runner's filter reads `covered`, **naming
+  the runner** -- a count by default, a list under `-all`. What is left in
+  `no_runner` is what the verdict was built for, and it is printed even at zero,
+  because "no organisation in this fleet is unwatched" is a strong statement and
+  a section that vanishes when empty cannot make it.
+- The idle/latch warning applies **only to a repository that holds a scheduled
+  workflow**, names the runner, and says how many organisations its silence
+  would take with it.
+- A **retired** runner covers nothing. `go-attest/renovate-runner` is
+  `disabled_manually`, so the organisations it used to watch are not covered by
+  it any more; the line says what it used to watch.
+- A filter that could not be read is reported as **unread, never as zero**.
+  `go-attest/renovate-runner` builds its filter with `mine.map((o) => ...)` over
+  a list sliced by an env var, and no string scan can know what that resolves
+  to. Treating it as no coverage would be the same mistake in a smaller coat.
+
+Both candidate repositories -- `.github` and `renovate-runner` -- are probed in
+every organisation, not just until one answers: `go-attest` holds an active own
+runner beside the retired shared one, and stopping at the first would have
+hidden the retirement.
+
+A watcher that prints 199 non-problems and a latch date that cannot arrive gets
+scrolled past, and then the one real page is scrolled past with it. That is the
+failure mode for an alerting tool -- not being wrong, but being ignored.
 
 ## The trap `quietscan` exists to catch before it latches
 
@@ -106,7 +146,7 @@ day. Any check that counts "a run" rather than "a scheduled run" calls all
 twelve healthy.
 
     quietscan                                    # the live fleet
-    quietscan -all                               # every runner, not just findings
+    quietscan -all                               # every runner, and every covered org
     quietscan -fixture cmd/quietscan/testdata/broken.json -all
 
 The fixture is how the watcher is proved: doctored copies of one real runner,
@@ -151,3 +191,9 @@ workflow` opens a browser. Until it is run, these pull requests wait.
 notices. The command around it is at 62%, with `read()` exercised against a
 stub `gh` on PATH -- a wrong field name there would make every runner in the
 fleet look healthy, silently.
+
+One pass costs about 1300 REST calls, roughly 26% of an hour's budget: two
+repository probes per organisation, then the workflow, its cron, its
+`config.js` and its last scheduled run per runner. An archived runner costs one
+call and a disabled one three -- their cron and run history decide nothing,
+though their filter still does.

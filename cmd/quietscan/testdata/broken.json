@@ -4,63 +4,135 @@
   "runners": [
     {
       "org": "healthy-control",
-      "repo_exists": true, "pushed_at": "2026-08-31T10:33:41Z",
-      "workflow_found": true, "workflow_state": "active",
-      "born": "2026-08-30T08:31:48Z", "crons": ["0 4 * * *"],
-      "last_run": "2026-08-31T10:32:36Z"
+      "repo_exists": true,
+      "pushed_at": "2026-08-31T10:33:41Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-08-30T08:31:48Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-08-31T10:32:36Z",
+      "repo": ".github",
+      "covers": [
+        "healthy-control/**"
+      ]
     },
     {
       "org": "doctored-overdue",
-      "repo_exists": true, "pushed_at": "2026-08-28T10:33:41Z",
-      "workflow_found": true, "workflow_state": "active",
-      "born": "2026-08-30T08:31:48Z", "crons": ["0 4 * * *"],
-      "last_run": "2026-08-28T10:32:36Z"
+      "repo_exists": true,
+      "pushed_at": "2026-08-28T10:33:41Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-08-30T08:31:48Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-08-28T10:32:36Z",
+      "repo": ".github",
+      "covers": [
+        "doctored-overdue/**"
+      ]
     },
     {
       "org": "doctored-never-fired",
-      "repo_exists": true, "pushed_at": "2026-08-24T10:33:41Z",
-      "workflow_found": true, "workflow_state": "active",
-      "born": "2026-08-24T08:31:48Z", "crons": ["0 4 * * *"],
-      "last_run": ""
+      "repo_exists": true,
+      "pushed_at": "2026-08-24T10:33:41Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-08-24T08:31:48Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "",
+      "repo": ".github",
+      "covers": [
+        "doctored-never-fired/**"
+      ]
     },
     {
       "org": "doctored-not-yet-due",
-      "repo_exists": true, "pushed_at": "2026-08-31T10:33:41Z",
-      "workflow_found": true, "workflow_state": "active",
-      "born": "2026-08-31T09:00:00Z", "crons": ["44 16 * * *"],
-      "last_run": ""
+      "repo_exists": true,
+      "pushed_at": "2026-08-31T10:33:41Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-08-31T09:00:00Z",
+      "crons": [
+        "44 16 * * *"
+      ],
+      "last_run": "",
+      "repo": ".github",
+      "covers": [
+        "doctored-not-yet-due/**"
+      ]
     },
     {
       "org": "doctored-archived",
-      "repo_exists": true, "archived": true, "pushed_at": "2026-06-01T10:33:41Z",
-      "workflow_found": true, "workflow_state": "active",
-      "born": "2026-08-30T08:31:48Z", "crons": ["0 4 * * *"],
-      "last_run": "2026-06-01T10:32:36Z"
+      "repo_exists": true,
+      "archived": true,
+      "pushed_at": "2026-06-01T10:33:41Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-08-30T08:31:48Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-06-01T10:32:36Z",
+      "repo": ".github",
+      "covers": [
+        "doctored-archived/**"
+      ]
     },
     {
       "org": "doctored-disabled-inactivity",
-      "repo_exists": true, "pushed_at": "2026-06-20T10:33:41Z",
-      "workflow_found": true, "workflow_state": "disabled_inactivity",
-      "born": "2026-05-30T08:31:48Z", "crons": ["0 4 * * *"],
-      "last_run": "2026-06-20T10:32:36Z"
+      "repo_exists": true,
+      "pushed_at": "2026-06-20T10:33:41Z",
+      "workflow_found": true,
+      "workflow_state": "disabled_inactivity",
+      "born": "2026-05-30T08:31:48Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-06-20T10:32:36Z",
+      "repo": ".github",
+      "covers": [
+        "doctored-disabled-inactivity/**"
+      ]
     },
     {
       "org": "doctored-disabled-manually",
-      "repo_exists": true, "pushed_at": "2026-08-01T10:33:41Z",
-      "workflow_found": true, "workflow_state": "disabled_manually",
-      "born": "2026-05-30T08:31:48Z", "crons": ["0 4 * * *"],
-      "last_run": "2026-08-01T10:32:36Z"
+      "repo_exists": true,
+      "pushed_at": "2026-08-01T10:33:41Z",
+      "workflow_found": true,
+      "workflow_state": "disabled_manually",
+      "born": "2026-05-30T08:31:48Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-08-01T10:32:36Z",
+      "repo": ".github",
+      "covers": [
+        "doctored-disabled-manually/**"
+      ]
     },
     {
       "org": "doctored-no-cron",
-      "repo_exists": true, "pushed_at": "2026-08-31T10:33:41Z",
-      "workflow_found": true, "workflow_state": "active",
-      "born": "2026-08-30T08:31:48Z", "crons": [],
-      "last_run": ""
+      "repo_exists": true,
+      "pushed_at": "2026-08-31T10:33:41Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-08-30T08:31:48Z",
+      "crons": [],
+      "last_run": "",
+      "repo": ".github",
+      "covers": [
+        "doctored-no-cron/**"
+      ]
     },
     {
       "org": "doctored-no-runner",
-      "repo_exists": true, "pushed_at": "2026-06-27T22:20:06Z",
+      "repo_exists": true,
+      "pushed_at": "2026-06-27T22:20:06Z",
       "workflow_found": false
     },
     {
@@ -73,10 +145,83 @@
     {
       "_comment": "The trap keyed on the wrong clock: a runner that stopped eleven days ago, whose workflow FILE was rewritten an hour ago by Renovate's own action bump. A monitor keyed on file mtime reads this as fresh; born is keyed on the workflow's creation, so it does not.",
       "org": "doctored-stale-run-fresh-file",
-      "repo_exists": true, "pushed_at": "2026-08-31T13:00:00Z",
-      "workflow_found": true, "workflow_state": "active",
-      "born": "2026-08-31T13:00:00Z", "crons": ["0 4 * * *"],
-      "last_run": "2026-08-20T10:32:36Z"
+      "repo_exists": true,
+      "pushed_at": "2026-08-31T13:00:00Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-08-31T13:00:00Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-08-20T10:32:36Z",
+      "repo": ".github",
+      "covers": [
+        "doctored-stale-run-fresh-file/**"
+      ]
+    },
+    {
+      "_comment": "The shared runner: lives in one org, watches 205 others. It is the repository whose idleness would silence the whole family, and the only one the latch warning should ever name for them.",
+      "org": "shared-stdlib",
+      "repo": "renovate-runner",
+      "repo_exists": true,
+      "pushed_at": "2026-07-10T00:00:00Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-07-08T13:48:04Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-08-31T10:04:00Z",
+      "covers": [
+        "doctored-fam-*/**"
+      ]
+    },
+    {
+      "_comment": "Matched by that filter: covered, not a missing runner. Idle for months and holding NO workflow, so it must produce no latch line at all.",
+      "org": "doctored-fam-alpha",
+      "repo_exists": true,
+      "pushed_at": "2026-05-01T00:00:00Z"
+    },
+    {
+      "_comment": "Matched by the filter, with no .github repository at all.",
+      "org": "doctored-fam-beta"
+    },
+    {
+      "_comment": "Matched by NO filter and holding no runner: the real gap the verdict was built for.",
+      "org": "doctored-uncovered"
+    },
+    {
+      "_comment": "A retired shared runner covers nothing. Its filter still names an org, and that org must still read no_runner.",
+      "org": "shared-retired",
+      "repo": "renovate-runner",
+      "repo_exists": true,
+      "pushed_at": "2026-08-29T00:00:00Z",
+      "workflow_found": true,
+      "workflow_state": "disabled_manually",
+      "born": "2026-08-29T19:42:33Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-08-29T10:04:00Z",
+      "covers": [
+        "doctored-uncovered/**"
+      ]
+    },
+    {
+      "_comment": "A shared runner whose autodiscoverFilter is computed in JavaScript. It claims no coverage and is reported as unread -- never as zero.",
+      "org": "shared-opaque",
+      "repo": "renovate-runner",
+      "repo_exists": true,
+      "pushed_at": "2026-08-31T00:00:00Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-08-01T00:00:00Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-08-31T10:04:00Z",
+      "covers": [],
+      "filter_note": "autodiscoverFilter is computed, not a literal array"
     }
   ]
 }

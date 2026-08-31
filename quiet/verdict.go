@@ -38,12 +38,18 @@ const (
 	// NoSchedule: the workflow exists but carries no cron -- dispatch-only, so
 	// nothing will ever start it on its own.
 	NoSchedule Verdict = "no_schedule"
-	// NoRunner: the organisation has a .github repository but no runner in it.
-	// A recency check over runners structurally cannot see this: there is no
-	// runner to be quiet.
+	// Covered: this organisation has no runner of its own and does not need
+	// one -- a shared runner's autodiscoverFilter reaches it. Reporting these
+	// as missing runners is how a watcher earns 199 lines nobody reads.
+	Covered Verdict = "covered"
+	// NoRunner: no runner reaches this organisation at all -- neither one of
+	// its own nor any shared runner's filter. A recency check over runners
+	// structurally cannot see this: there is no runner to be quiet.
+	//
+	// Whether the organisation holds an empty `.github` repository or none at
+	// all is a detail of the same gap, so it is said in the line and not split
+	// across two verdicts. One number that means one thing is the point.
 	NoRunner Verdict = "no_runner"
-	// NoRunnerRepo: the organisation has no .github repository at all.
-	NoRunnerRepo Verdict = "no_runner_repo"
 	// Unreadable: the API would not say. Reported, never silently counted as
 	// healthy -- a channel that cannot answer must not read as "fine".
 	Unreadable Verdict = "unreadable"
@@ -84,7 +90,11 @@ const DefaultPushWarn = 45 * 24 * time.Hour
 // Runner is everything read about one organisation's runner. Every field is
 // filled from a GET; nothing here can start a run.
 type Runner struct {
-	Org           string
+	Org string
+	// Repo is which repository holds the runner: `.github` for an
+	// organisation's own, `renovate-runner` for a shared one. Empty when the
+	// organisation holds no runner anywhere.
+	Repo          string
 	RepoExists    bool
 	Archived      bool
 	PushedAt      time.Time // .github repository's last push; drives the 60-day clock
@@ -94,7 +104,11 @@ type Runner struct {
 	BornSource    string // what Born was keyed on, so a wrong clock is visible
 	Schedule      Schedule
 	LastRun       time.Time // zero means: no scheduled run has ever completed
-	ReadError     string
+	// Covers is the runner's autodiscoverFilter: the organisations it watches,
+	// which are NOT the organisation it lives in.
+	Covers     []string
+	FilterNote string // why Covers could not be read, if it could not
+	ReadError  string
 }
 
 // Result is one runner's verdict and the numbers behind it.
@@ -114,6 +128,10 @@ type Result struct {
 	HasLag   bool
 	DaysIdle float64
 	PushWarn bool
+	// CoveredBy is the shared runner that reaches this organisation, filled in
+	// fleet-wide by ApplyCoverage.
+	CoveredBy        string
+	CoveredByVerdict Verdict
 }
 
 // Classify decides one runner's verdict.
@@ -127,7 +145,12 @@ func Classify(r Runner, now time.Time, slack, pushWarn time.Duration) Result {
 	res := Result{Runner: r}
 	if !r.PushedAt.IsZero() {
 		res.DaysIdle = now.Sub(r.PushedAt).Hours() / 24
-		res.PushWarn = now.Sub(r.PushedAt) >= pushWarn
+		// The 60-day rule disables SCHEDULED WORKFLOWS in the repository that
+		// holds them. A repository holding no workflow has no schedule to lose,
+		// so an idle one is not a latch risk however quiet it is -- and warning
+		// about twenty of those buries the one repository whose idleness would
+		// actually silence a whole family.
+		res.PushWarn = r.WorkflowFound && now.Sub(r.PushedAt) >= pushWarn
 	}
 
 	switch {
@@ -135,7 +158,7 @@ func Classify(r Runner, now time.Time, slack, pushWarn time.Duration) Result {
 		res.Verdict = Unreadable
 		return res
 	case !r.RepoExists:
-		res.Verdict = NoRunnerRepo
+		res.Verdict = NoRunner
 		return res
 	case r.Archived:
 		// Checked before the workflow: an archived repository accepts no push,

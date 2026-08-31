@@ -113,13 +113,13 @@ func counted(args ...string) ([]byte, error) {
 }
 
 var (
-	slack    = flag.Duration("slack", quiet.DefaultSlack, "how far behind its own cron a run may be before the runner counts as stopped")
-	pushWarn = flag.Int("push-warn", int(quiet.DefaultPushWarn/(24*time.Hour)), "warn when the runner repository has had no push for this many days")
-	repoName = flag.String("repo", ".github", "repository, in each organisation, that holds the runner")
-	wfFile   = flag.String("workflow", "renovate.yml", "runner workflow file name")
-	all      = flag.Bool("all", false, "list every runner, not only the findings")
-	fixture  = flag.String("fixture", "", "read runners from a JSON file instead of the API; makes no network call at all")
-	workers  = flag.Int("workers", 6, "concurrent API readers")
+	slack     = flag.Duration("slack", quiet.DefaultSlack, "how far behind its own cron a run may be before the runner counts as stopped")
+	pushWarn  = flag.Int("push-warn", int(quiet.DefaultPushWarn/(24*time.Hour)), "warn when the runner repository has had no push for this many days")
+	repoNames = flag.String("repos", ".github,renovate-runner", "comma-separated repositories, in each organisation, that may hold a runner")
+	wfFile    = flag.String("workflow", "renovate.yml", "runner workflow file name")
+	all       = flag.Bool("all", false, "list every runner, not only the findings")
+	fixture   = flag.String("fixture", "", "read runners from a JSON file instead of the API; makes no network call at all")
+	workers   = flag.Int("workers", 6, "concurrent API readers")
 )
 
 type wfEntry struct {
@@ -142,17 +142,56 @@ func parseTime(s string) time.Time {
 	return time.Time{}
 }
 
-// read gathers one organisation's runner. Every call here is a GET.
-func read(org string) quiet.Runner {
-	r := quiet.Runner{Org: org}
+// read gathers every runner an organisation holds. Every call here is a GET.
+//
+// Both candidate repositories are probed in every organisation, not just until
+// one answers. A shared runner lives in `renovate-runner` and an organisation
+// may hold BOTH -- go-attest holds an active `.github` runner and the retired
+// shared one, and stopping at the first would have hidden the retirement that
+// left 109 organisations to be re-covered.
+func read(org string) []quiet.Runner {
+	var found []quiet.Runner
+	var empty quiet.Runner
+	empty.Org = org
+	for _, name := range strings.Split(*repoNames, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		r, exists := readRepo(org, name)
+		if exists && !empty.RepoExists {
+			// Keep the facts of the first candidate that existed. Reporting
+			// "last push never" for a repository that is simply runner-less
+			// invents a fact rather than reading one.
+			empty.RepoExists = true
+			empty.PushedAt = r.PushedAt
+			empty.Repo = name
+		}
+		if r.WorkflowFound || r.ReadError != "" {
+			found = append(found, r)
+		}
+	}
+	if len(found) > 0 {
+		return found
+	}
+	// No runner anywhere in this organisation. Whether a candidate repository
+	// merely existed is still worth saying: an empty `.github` holding only a
+	// Renovate preset is a different thing from no repository at all.
+	return []quiet.Runner{empty}
+}
 
-	b, err := counted("api", fmt.Sprintf("repos/%s/%s", org, *repoName))
+// readRepo reads one candidate repository. The bool says whether it exists at
+// all, which is not the same as whether it holds a runner.
+func readRepo(org, name string) (quiet.Runner, bool) {
+	r := quiet.Runner{Org: org, Repo: name}
+
+	b, err := counted("api", fmt.Sprintf("repos/%s/%s", org, name))
 	if isNotFound(err) {
-		return r // no runner repository at all: a finding in its own right
+		return r, false
 	}
 	if err != nil {
 		r.ReadError = err.Error()
-		return r
+		return r, true
 	}
 	var repo struct {
 		Archived bool   `json:"archived"`
@@ -160,31 +199,33 @@ func read(org string) quiet.Runner {
 	}
 	if json.Unmarshal(b, &repo) != nil {
 		r.ReadError = "repo: unparseable"
-		return r
+		return r, true
 	}
 	r.RepoExists = true
 	r.Archived = repo.Archived
 	r.PushedAt = parseTime(repo.PushedAt)
 	if r.Archived {
 		// Nothing below this line can be fixed by a pull request, so nothing
-		// below this line is worth an API call.
-		return r
+		// below this line is worth an API call. An archived repository that
+		// holds a runner is still reported: it is frozen, not absent.
+		r.WorkflowFound = true
+		return r, true
 	}
 
-	b, err = counted("api", fmt.Sprintf("repos/%s/%s/actions/workflows?per_page=100", org, *repoName))
+	b, err = counted("api", fmt.Sprintf("repos/%s/%s/actions/workflows?per_page=100", org, name))
 	if isNotFound(err) {
-		return r
+		return r, true
 	}
 	if err != nil {
 		r.ReadError = err.Error()
-		return r
+		return r, true
 	}
 	var wfs struct {
 		Workflows []wfEntry `json:"workflows"`
 	}
 	if json.Unmarshal(b, &wfs) != nil {
 		r.ReadError = "workflows: unparseable"
-		return r
+		return r, true
 	}
 	var wf *wfEntry
 	for i := range wfs.Workflows {
@@ -195,7 +236,7 @@ func read(org string) quiet.Runner {
 		}
 	}
 	if wf == nil {
-		return r // repository exists, runner does not
+		return r, true // repository exists, runner does not
 	}
 	r.WorkflowFound = true
 	r.WorkflowState = wf.State
@@ -204,32 +245,45 @@ func read(org string) quiet.Runner {
 	// so a clock keyed on the file resets itself every time Renovate works.
 	r.Born = parseTime(wf.CreatedAt)
 	r.BornSource = "workflow.created_at"
+
+	// What this runner WATCHES, which is not the organisation it lives in.
+	// Read even for a disabled runner: knowing that the retired go-attest
+	// runner used to cover 109 organisations is the point of reading it.
+	if b, err := counted("api", "-H", "Accept: application/vnd.github.raw",
+		fmt.Sprintf("repos/%s/%s/contents/config.js", org, name)); err == nil {
+		r.Covers, r.FilterNote = quiet.ParseAutodiscoverFilter(string(b))
+	} else if isNotFound(err) {
+		r.FilterNote = "no config.js"
+	} else {
+		r.FilterNote = "config.js: " + err.Error()
+	}
+
 	if wf.State != "active" {
-		return r
+		return r, true
 	}
 
 	// The cron, from the workflow's own file: the fleet's runners are staggered
 	// across 24 hours, so there is no constant period to compare against.
 	if b, err := counted("api", "-H", "Accept: application/vnd.github.raw",
-		fmt.Sprintf("repos/%s/%s/contents/%s", org, *repoName, wf.Path)); err == nil {
+		fmt.Sprintf("repos/%s/%s/contents/%s", org, name, wf.Path)); err == nil {
 		sched, errs := quiet.ParseSchedule(string(b))
 		r.Schedule = sched
 		if len(sched) == 0 && len(errs) > 0 {
 			r.ReadError = errs[0].Error()
-			return r
+			return r, true
 		}
 	} else {
 		r.ReadError = "workflow file: " + err.Error()
-		return r
+		return r, true
 	}
 
 	// event=schedule, because a manual dispatch is not evidence the schedule
 	// still fires -- and a person poking a dead runner is exactly how this
 	// failure hides.
-	b, err = counted("api", fmt.Sprintf("repos/%s/%s/actions/workflows/%d/runs?event=schedule&per_page=1", org, *repoName, wf.ID))
+	b, err = counted("api", fmt.Sprintf("repos/%s/%s/actions/workflows/%d/runs?event=schedule&per_page=1", org, name, wf.ID))
 	if err != nil {
 		r.ReadError = "runs: " + err.Error()
-		return r
+		return r, true
 	}
 	var runs struct {
 		Runs []struct {
@@ -238,12 +292,12 @@ func read(org string) quiet.Runner {
 	}
 	if json.Unmarshal(b, &runs) != nil {
 		r.ReadError = "runs: unparseable"
-		return r
+		return r, true
 	}
 	if len(runs.Runs) > 0 {
 		r.LastRun = parseTime(runs.Runs[0].CreatedAt)
 	}
-	return r
+	return r, true
 }
 
 // fixtureFile is the doctored input a watcher needs to be provable. Nothing in
@@ -261,6 +315,9 @@ type fixtureFile struct {
 		Born          string   `json:"born"`
 		Crons         []string `json:"crons"`
 		LastRun       string   `json:"last_run"`
+		Repo          string   `json:"repo"`
+		Covers        []string `json:"covers"`
+		FilterNote    string   `json:"filter_note"`
 		ReadError     string   `json:"read_error"`
 	} `json:"runners"`
 }
@@ -289,6 +346,7 @@ func loadFixture(path string) ([]quiet.Runner, time.Time, error) {
 			PushedAt: parseTime(in.PushedAt), WorkflowFound: in.WorkflowFound,
 			WorkflowState: in.WorkflowState, Born: parseTime(in.Born),
 			BornSource: "fixture", LastRun: parseTime(in.LastRun),
+			Repo: in.Repo, Covers: in.Covers, FilterNote: in.FilterNote,
 			ReadError: in.ReadError,
 		}
 		for _, c := range in.Crons {
@@ -355,7 +413,7 @@ func main() {
 		// check over runners structurally cannot see an organisation that has
 		// no runner to be quiet.
 		fmt.Printf("orgs: %d   as of %s\n", len(list), stamp(now))
-		runners = make([]quiet.Runner, len(list))
+		per := make([][]quiet.Runner, len(list))
 		sem := make(chan struct{}, *workers)
 		var wg sync.WaitGroup
 		for i, o := range list {
@@ -364,17 +422,28 @@ func main() {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				runners[i] = read(o)
+				per[i] = read(o)
 			}(i, o)
 		}
 		wg.Wait()
+		for _, p := range per {
+			runners = append(runners, p...)
+		}
 	}
 
 	results := make([]quiet.Result, 0, len(runners))
 	for _, r := range runners {
 		results = append(results, quiet.Classify(r, now, *slack, time.Duration(*pushWarn)*24*time.Hour))
 	}
-	sort.Slice(results, func(i, j int) bool { return results[i].Org < results[j].Org })
+	// Fleet-wide, because coverage is not a property any single organisation
+	// can answer: it is decided by some OTHER organisation's runner filter.
+	results = quiet.ApplyCoverage(results)
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Org != results[j].Org {
+			return results[i].Org < results[j].Org
+		}
+		return results[i].Repo < results[j].Repo
+	})
 
 	by := map[quiet.Verdict][]quiet.Result{}
 	pages := 0
@@ -384,9 +453,17 @@ func main() {
 			pages++
 		}
 	}
-	withRunner := len(results) - len(by[quiet.NoRunner]) - len(by[quiet.NoRunnerRepo])
+	withRunner, shared := 0, 0
+	for _, r := range results {
+		if r.WorkflowFound {
+			withRunner++
+			if len(r.Covers) > 1 || (len(r.Covers) == 1 && !quiet.MatchesOrg(r.Covers[0], r.Org)) {
+				shared++
+			}
+		}
+	}
 	if *fixture == "" {
-		fmt.Printf("runners: %d   API calls: %d\n", withRunner, calls.n)
+		fmt.Printf("runners: %d (%d shared)   API calls: %d\n", withRunner, shared, calls.n)
 	}
 
 	// The observed lag, every pass. The threshold below is a measurement that
@@ -416,14 +493,17 @@ func main() {
 		{quiet.Unreadable, "the API would not answer; re-run before believing anything else"},
 		{quiet.DisabledManually, "someone switched it off; this may be entirely deliberate"},
 		{quiet.Archived, "no pull request can fix this; the repository is frozen"},
-		{quiet.NoRunner, "the repository exists but holds no runner"},
-		{quiet.NoRunnerRepo, "no runner repository in this organisation"},
+		{quiet.NoRunner, "NO runner reaches this organisation -- neither its own nor any shared filter"},
+		{quiet.Covered, "no runner of its own, and none needed: a shared runner's filter reaches it"},
 		{quiet.NotYetDue, "born, not yet due; nothing to do"},
 		{quiet.Healthy, ""},
 	}
 	for _, o := range order {
 		rs := by[o.v]
-		if len(rs) == 0 {
+		// no_runner is printed even at zero. "No organisation in this fleet is
+		// unwatched" is a strong statement and the only place it can be made;
+		// a section that vanishes when it is empty cannot make it.
+		if len(rs) == 0 && o.v != quiet.NoRunner {
 			continue
 		}
 		mark := " "
@@ -435,11 +515,14 @@ func main() {
 			fmt.Printf("   -- %s", o.fix)
 		}
 		fmt.Println()
-		if o.v == quiet.Healthy && !*all {
+		// Healthy and covered are counts, not lists, unless asked for. Two
+		// hundred lines saying "this is fine" is how the one line that is not
+		// gets scrolled past.
+		if (o.v == quiet.Healthy || o.v == quiet.Covered) && !*all {
 			continue
 		}
 		for _, r := range rs {
-			fmt.Println(strings.TrimRight(fmt.Sprintf("    %-38s %s", r.Org, detail(r)), " "))
+			fmt.Println(strings.TrimRight(fmt.Sprintf("    %-42s %s", label(r), detail(r)), " "))
 		}
 	}
 
@@ -447,19 +530,44 @@ func main() {
 	// repositories are public and receive no push except Renovate's own, so if
 	// Renovate stops the repository goes quiet, at day 60 GitHub disables the
 	// schedule, and the disablement makes the silence permanent.
+	// The 60-day latch, and WHERE it actually applies. GitHub disables the
+	// scheduled workflows of a quiet repository, so the risk belongs to the
+	// repository holding the schedule -- not to the organisations downstream of
+	// it. Warning about twenty idle `go-ruby-*/.github` repositories that hold
+	// no workflow at all buries the one repository whose idleness would silence
+	// all two hundred of them.
 	var idle []quiet.Result
 	for _, r := range results {
-		if r.PushWarn && r.RepoExists {
+		if r.PushWarn {
 			idle = append(idle, r)
 		}
 	}
 	if len(idle) > 0 {
 		sort.Slice(idle, func(i, j int) bool { return idle[i].DaysIdle > idle[j].DaysIdle })
-		fmt.Printf("\n! quiet repositories (no push for %d+ days; GitHub disables the schedule at %d): %d\n",
+		fmt.Printf("\n! runners going quiet (no push for %d+ days; GitHub disables the schedule at %d): %d\n",
 			*pushWarn, int(quiet.InactivityLimit/(24*time.Hour)), len(idle))
 		for _, r := range idle {
-			fmt.Printf("    %-38s %.0f days idle, latches %s\n", r.Org, r.DaysIdle,
+			line := fmt.Sprintf("    %-42s %.0f days idle, latches %s", label(r), r.DaysIdle,
 				r.PushedAt.Add(quiet.InactivityLimit).Format("2006-01-02"))
+			if n := coveredCount(results, r); n > 0 {
+				line += fmt.Sprintf("   -- would silence %d organisations", n)
+			}
+			fmt.Println(line)
+		}
+	}
+
+	// A filter that could not be read is reported, never counted as zero
+	// coverage: that is the same mistake as calling an unanswered API healthy.
+	var opaque []quiet.Result
+	for _, r := range results {
+		if r.WorkflowFound && r.FilterNote != "" {
+			opaque = append(opaque, r)
+		}
+	}
+	if len(opaque) > 0 {
+		fmt.Printf("\n  runners whose coverage could not be read: %d\n", len(opaque))
+		for _, r := range opaque {
+			fmt.Printf("    %-42s %s\n", label(r), r.FilterNote)
 		}
 	}
 
@@ -468,17 +576,53 @@ func main() {
 	}
 }
 
+// label names the runner, not the organisation -- but only when there IS one.
+// Printing "org/.github" for an organisation that holds no runner reads as a
+// runner that exists and is broken, which is the attribution mistake this whole
+// change is about.
+func label(r quiet.Result) string {
+	if r.Repo == "" || !r.WorkflowFound {
+		return r.Org
+	}
+	return r.Org + "/" + r.Repo
+}
+
+// coveredCount is the blast radius: how many organisations this runner is the
+// only live answer for.
+func coveredCount(all []quiet.Result, r quiet.Result) int {
+	name := label(r)
+	seen := map[string]bool{}
+	for _, o := range all {
+		if o.CoveredBy == name && !seen[o.Org] {
+			seen[o.Org] = true
+		}
+	}
+	return len(seen)
+}
+
 func detail(r quiet.Result) string {
 	switch r.Verdict {
 	case quiet.Unreadable:
 		return r.ReadError
-	case quiet.NoRunnerRepo, quiet.NoRunner:
-		if r.RepoExists {
-			return fmt.Sprintf("last push %s (%.0f days)", stamp(r.PushedAt), r.DaysIdle)
+	case quiet.Covered:
+		s := "covered by " + r.CoveredBy
+		if r.CoveredByVerdict.Pages() {
+			s += fmt.Sprintf(" -- WHICH IS ITSELF %s", strings.ToUpper(string(r.CoveredByVerdict)))
 		}
-		return ""
+		return s
+	case quiet.NoRunner:
+		if r.RepoExists {
+			return fmt.Sprintf("a repository, but no runner in it and no filter reaching it (last push %s)", stamp(r.PushedAt))
+		}
+		return "no runner repository and no filter reaching it"
 	case quiet.Archived, quiet.DisabledManually, quiet.DisabledInactivity:
-		return fmt.Sprintf("last run %s   last push %s", stamp(r.LastRun), stamp(r.PushedAt))
+		// No run history is fetched for a runner that cannot run, so none is
+		// claimed. "last run never" would be a fact nobody read.
+		s := fmt.Sprintf("last push %s", stamp(r.PushedAt))
+		if len(r.Covers) > 0 {
+			s += fmt.Sprintf("   used to watch %s", strings.Join(r.Covers, " "))
+		}
+		return s
 	case quiet.NoSchedule:
 		if len(r.Schedule) == 0 {
 			return "the workflow carries no cron at all"

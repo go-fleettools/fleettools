@@ -134,6 +134,24 @@ func withFakeGH(t *testing.T, script string) *string {
 	return &log
 }
 
+// onlyGithub narrows the probe to one candidate repository, so a stub that
+// answers every path does not yield the same runner twice.
+func onlyGithub(t *testing.T) {
+	t.Helper()
+	old := *repoNames
+	*repoNames = ".github"
+	t.Cleanup(func() { *repoNames = old })
+}
+
+// one asserts the organisation held exactly one runner and returns it.
+func one(t *testing.T, rs []quiet.Runner) quiet.Runner {
+	t.Helper()
+	if len(rs) != 1 {
+		t.Fatalf("got %d runners, want 1", len(rs))
+	}
+	return rs[0]
+}
+
 func callLog(t *testing.T, path string) []string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -176,8 +194,9 @@ esac`
 }
 
 func TestReadHappyPath(t *testing.T) {
+	onlyGithub(t)
 	log := withFakeGH(t, happyStub(stubRuns))
-	r := read("go-widgets")
+	r := one(t, read("go-widgets"))
 	if r.ReadError != "" {
 		t.Fatalf("ReadError = %q", r.ReadError)
 	}
@@ -224,8 +243,9 @@ func TestReadHappyPath(t *testing.T) {
 // An empty workflow_runs list is what a runner that has NEVER run returns. It
 // deserializes without error and must not be read as a run.
 func TestReadNeverRan(t *testing.T) {
+	onlyGithub(t)
 	withFakeGH(t, happyStub(`{"total_count":0,"workflow_runs":[]}`))
-	r := read("go-macos")
+	r := one(t, read("go-macos"))
 	if r.ReadError != "" || !r.WorkflowFound {
 		t.Fatalf("runner = %+v", r)
 	}
@@ -238,8 +258,9 @@ func TestReadNeverRan(t *testing.T) {
 }
 
 func TestReadNoRunnerRepo(t *testing.T) {
+	onlyGithub(t)
 	log := withFakeGH(t, `echo "gh: Not Found (HTTP 404)" >&2; exit 1`)
-	r := read("go-docutils")
+	r := one(t, read("go-docutils"))
 	if r.RepoExists || r.ReadError != "" {
 		t.Fatalf("runner = %+v", r)
 	}
@@ -249,8 +270,9 @@ func TestReadNoRunnerRepo(t *testing.T) {
 }
 
 func TestReadArchivedCostsOneCall(t *testing.T) {
+	onlyGithub(t)
 	log := withFakeGH(t, `echo '{"archived":true,"pushed_at":"2026-08-30T10:48:52Z"}'`)
-	r := read("go-iconoir")
+	r := one(t, read("go-iconoir"))
 	if !r.RepoExists || !r.Archived {
 		t.Fatalf("runner = %+v", r)
 	}
@@ -262,11 +284,12 @@ func TestReadArchivedCostsOneCall(t *testing.T) {
 }
 
 func TestReadRepoWithNoRunner(t *testing.T) {
+	onlyGithub(t)
 	withFakeGH(t, `case "$*" in
   *"/actions/workflows?"*) echo '{"total_count":0,"workflows":[]}' ;;
   *) echo '`+stubRepo+`' ;;
 esac`)
-	r := read("openweft")
+	r := one(t, read("openweft"))
 	if !r.RepoExists || r.WorkflowFound {
 		t.Fatalf("runner = %+v", r)
 	}
@@ -276,21 +299,31 @@ esac`)
 }
 
 func TestReadDisabledStopsEarly(t *testing.T) {
+	onlyGithub(t)
 	log := withFakeGH(t, `case "$*" in
   *"/actions/workflows?"*) echo '{"workflows":[{"id":1,"name":"Renovate","path":".github/workflows/renovate.yml","state":"disabled_inactivity","created_at":"2026-05-30T10:31:48.000+02:00"}]}' ;;
   *) echo '`+stubRepo+`' ;;
 esac`)
-	r := read("someorg")
+	r := one(t, read("someorg"))
 	if r.WorkflowState != "disabled_inactivity" {
 		t.Fatalf("state = %q", r.WorkflowState)
 	}
-	if n := len(callLog(t, *log)); n != 2 {
-		t.Errorf("calls = %d, want 2", n)
+	// Repo, workflows, config.js -- and no further. The cron and the run
+	// history of a disabled runner decide nothing; its FILTER still does,
+	// because what a retired runner used to watch is what now watches nothing.
+	if n := len(callLog(t, *log)); n != 3 {
+		t.Errorf("calls = %d, want 3", n)
+	}
+	for _, c := range callLog(t, *log) {
+		if strings.Contains(c, "/runs") {
+			t.Errorf("a disabled runner's run history was fetched: %s", c)
+		}
 	}
 }
 
 // A channel that cannot answer must never read as "fine".
 func TestReadErrorsAreNotSilence(t *testing.T) {
+	onlyGithub(t)
 	for _, tc := range []struct{ name, script string }{
 		{"repo unparseable", `echo 'not json'`},
 		{"workflows unparseable", `case "$*" in *"/actions/workflows?"*) echo 'not json' ;; *) echo '` + stubRepo + `' ;; esac`},
@@ -319,7 +352,7 @@ esac`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withFakeGH(t, tc.script)
-			r := read("someorg")
+			r := one(t, read("someorg"))
 			if r.ReadError == "" {
 				t.Fatalf("want a read error, got %+v", r)
 			}
@@ -330,7 +363,7 @@ esac`},
 	}
 	// A workflows listing that 404s is a missing runner, not an outage.
 	withFakeGH(t, `case "$*" in *"/actions/workflows?"*) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;; *) echo '`+stubRepo+`' ;; esac`)
-	if r := read("someorg"); r.ReadError != "" || r.WorkflowFound {
+	if r := one(t, read("someorg")); r.ReadError != "" || r.WorkflowFound {
 		t.Errorf("404 on workflows = %+v", r)
 	}
 }
@@ -360,10 +393,10 @@ func TestDetailNeverPanics(t *testing.T) {
 	for _, v := range []quiet.Verdict{
 		quiet.Healthy, quiet.NotYetDue, quiet.NeverFired, quiet.Overdue,
 		quiet.DisabledInactivity, quiet.DisabledManually, quiet.Archived,
-		quiet.NoSchedule, quiet.NoRunner, quiet.NoRunnerRepo, quiet.Unreadable,
+		quiet.NoSchedule, quiet.NoRunner, quiet.Covered, quiet.Unreadable,
 	} {
 		switch v {
-		case quiet.NoRunnerRepo, quiet.NoRunner, quiet.Unreadable:
+		case quiet.NoRunner, quiet.Unreadable:
 			continue // nothing to say beyond the verdict itself
 		}
 		if s := detail(quiet.Result{Verdict: v}); s == "" {
@@ -380,5 +413,151 @@ func TestDetailNeverPanics(t *testing.T) {
 	r.RepoExists = true
 	if s := detail(r); !strings.Contains(s, "last push") {
 		t.Errorf("no_runner detail = %q", s)
+	}
+}
+
+// An organisation may hold BOTH an own runner and a shared one. go-attest does:
+// an active `.github` runner beside the retired `renovate-runner` that used to
+// watch 109 organisations. Stopping at the first repository to answer would
+// have hidden the retirement.
+func TestReadFindsBothRunnersInOneOrg(t *testing.T) {
+	withFakeGH(t, `case "$*" in
+  *"repos/go-attest/renovate-runner/actions/workflows?"*) echo '{"workflows":[{"id":2,"name":"Renovate","path":".github/workflows/renovate.yml","state":"disabled_manually","created_at":"2026-08-29T21:42:33.000+02:00"}]}' ;;
+  *"repos/go-attest/renovate-runner/contents/config.js"*) printf "autodiscoverFilter: ['libfw/**'],\n" ;;
+  *"/actions/workflows/1/runs"*) echo '`+stubRuns+`' ;;
+  *"/contents/config.js"*) printf "autodiscoverFilter: ['go-attest/**'],\n" ;;
+  *"/contents/"*) cat <<'F'
+`+stubFile+`
+F
+  ;;
+  *"/actions/workflows?"*) echo '{"workflows":[{"id":1,"name":"Renovate","path":".github/workflows/renovate.yml","state":"active","created_at":"2026-08-30T10:31:48.000+02:00"}]}' ;;
+  *) echo '`+stubRepo+`' ;;
+esac`)
+	rs := read("go-attest")
+	if len(rs) != 2 {
+		t.Fatalf("got %d runners, want 2", len(rs))
+	}
+	byRepo := map[string]quiet.Runner{}
+	for _, r := range rs {
+		byRepo[r.Repo] = r
+	}
+	own, ok := byRepo[".github"]
+	if !ok || own.WorkflowState != "active" || len(own.Covers) != 1 || own.Covers[0] != "go-attest/**" {
+		t.Errorf("own runner = %+v", own)
+	}
+	shared, ok := byRepo["renovate-runner"]
+	if !ok || shared.WorkflowState != "disabled_manually" {
+		t.Fatalf("shared runner = %+v", shared)
+	}
+	// The filter of a DISABLED runner is still read: knowing what the retired
+	// runner used to watch is the point of reading it.
+	if len(shared.Covers) != 1 || shared.Covers[0] != "libfw/**" {
+		t.Errorf("retired runner's filter = %v", shared.Covers)
+	}
+	// And it must contribute no coverage.
+	out := quiet.ApplyCoverage([]quiet.Result{
+		quiet.Classify(shared, time.Now().UTC(), quiet.DefaultSlack, quiet.DefaultPushWarn),
+		{Runner: quiet.Runner{Org: "libfw"}, Verdict: quiet.NoRunner},
+	})
+	for _, r := range out {
+		if r.Org == "libfw" && r.Verdict != quiet.NoRunner {
+			t.Errorf("libfw = %s, want no_runner", r.Verdict)
+		}
+	}
+}
+
+func TestReadReportsAnUnreadableFilter(t *testing.T) {
+	onlyGithub(t)
+	withFakeGH(t, `case "$*" in
+  *"/contents/config.js"*) printf 'autodiscoverFilter: mine.map((o) => o),\n' ;;
+  *"/runs"*) echo '`+stubRuns+`' ;;
+  *"/contents/"*) cat <<'F'
+`+stubFile+`
+F
+  ;;
+  *"/actions/workflows?"*) echo '`+stubWorkflows+`' ;;
+  *) echo '`+stubRepo+`' ;;
+esac`)
+	r := one(t, read("go-attest"))
+	if len(r.Covers) != 0 || r.FilterNote == "" {
+		t.Fatalf("Covers = %v, note = %q -- an unread filter must say so", r.Covers, r.FilterNote)
+	}
+}
+
+func TestReadMissingConfigIsNoted(t *testing.T) {
+	onlyGithub(t)
+	withFakeGH(t, `case "$*" in
+  *"/contents/config.js"*) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  *"/runs"*) echo '`+stubRuns+`' ;;
+  *"/contents/"*) cat <<'F'
+`+stubFile+`
+F
+  ;;
+  *"/actions/workflows?"*) echo '`+stubWorkflows+`' ;;
+  *) echo '`+stubRepo+`' ;;
+esac`)
+	r := one(t, read("someorg"))
+	if r.FilterNote != "no config.js" || r.ReadError != "" {
+		t.Errorf("note = %q, err = %q", r.FilterNote, r.ReadError)
+	}
+}
+
+func TestLabelNamesTheRunnerOnlyWhenThereIsOne(t *testing.T) {
+	held := quiet.Result{Runner: quiet.Runner{Org: "go-ruby-stdlib", Repo: "renovate-runner", WorkflowFound: true}}
+	if got := label(held); got != "go-ruby-stdlib/renovate-runner" {
+		t.Errorf("label = %q", got)
+	}
+	// An organisation holding no runner must not be labelled as if it held one.
+	empty := quiet.Result{Runner: quiet.Runner{Org: "go-ruby-facter", Repo: ".github"}}
+	if got := label(empty); got != "go-ruby-facter" {
+		t.Errorf("label = %q, want the bare org", got)
+	}
+}
+
+func TestCoveredCount(t *testing.T) {
+	all := []quiet.Result{
+		{Runner: quiet.Runner{Org: "go-ruby-stdlib", Repo: "renovate-runner", WorkflowFound: true}},
+		{Runner: quiet.Runner{Org: "a"}, CoveredBy: "go-ruby-stdlib/renovate-runner"},
+		{Runner: quiet.Runner{Org: "b"}, CoveredBy: "go-ruby-stdlib/renovate-runner"},
+		{Runner: quiet.Runner{Org: "b"}, CoveredBy: "go-ruby-stdlib/renovate-runner"},
+		{Runner: quiet.Runner{Org: "c"}, CoveredBy: "other/renovate-runner"},
+	}
+	if n := coveredCount(all, all[0]); n != 2 {
+		t.Errorf("coveredCount = %d, want 2 distinct organisations", n)
+	}
+}
+
+// An organisation whose candidate repository exists but holds no runner must
+// still report that repository's push date. "last push never" for a repository
+// that was read and simply has no runner is a fact nobody read.
+func TestReadKeepsRepoFactsWhenThereIsNoRunner(t *testing.T) {
+	onlyGithub(t)
+	withFakeGH(t, `case "$*" in
+  *"/actions/workflows?"*) echo '{"total_count":0,"workflows":[]}' ;;
+  *) echo '`+stubRepo+`' ;;
+esac`)
+	r := one(t, read("openweft"))
+	if !r.RepoExists || r.WorkflowFound {
+		t.Fatalf("runner = %+v", r)
+	}
+	if got := r.PushedAt.Format(time.RFC3339); got != "2026-08-31T10:33:41Z" {
+		t.Errorf("PushedAt = %s, want the repository's real push date", got)
+	}
+}
+
+// A disabled or archived runner's run history is never fetched, so the line
+// must not say "last run never" -- it must say nothing about runs at all, and
+// say what the runner used to watch instead.
+func TestDetailClaimsNoUnreadRunHistory(t *testing.T) {
+	for _, v := range []quiet.Verdict{quiet.Archived, quiet.DisabledManually, quiet.DisabledInactivity} {
+		r := quiet.Result{Verdict: v}
+		r.Covers = []string{"libfw/**", "libhcl/**"}
+		got := detail(r)
+		if strings.Contains(got, "last run") {
+			t.Errorf("%s: %q claims a run history that was never fetched", v, got)
+		}
+		if !strings.Contains(got, "used to watch libfw/** libhcl/**") {
+			t.Errorf("%s: %q should say what it used to watch", v, got)
+		}
 	}
 }
