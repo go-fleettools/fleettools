@@ -37,7 +37,14 @@ func gh(args ...string) ([]byte, error) {
 			strings.Contains(msg, "connection reset") ||
 			strings.Contains(msg, "i/o timeout") ||
 			strings.Contains(msg, "TLS handshake timeout") ||
-			strings.Contains(msg, "EOF")
+			strings.Contains(msg, "EOF") ||
+			// gh's own wording, which the Go-level strings above do not cover.
+			// A DNS outage mid-sweep produced 109 of these and the retry never
+			// fired, because I matched the errors I had SEEN rather than the
+			// ones the tool actually emits.
+			strings.Contains(msg, "error connecting to") ||
+			strings.Contains(msg, "no such host") ||
+			strings.Contains(msg, "check your internet connection")
 		if attempt < 5 && (transient || strings.Contains(msg, "secondary rate") || strings.Contains(msg, "abuse") || strings.Contains(msg, "too quickly") || strings.Contains(msg, "rate limit")) {
 			time.Sleep(time.Duration(20*(attempt+1)) * time.Second)
 			continue
