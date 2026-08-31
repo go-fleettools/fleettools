@@ -68,6 +68,28 @@ type prRef struct {
 //
 // REST reports mergeable as null while GitHub is still computing it, so an
 // unknown state is reported as UNKNOWN rather than guessed either way.
+// refusalKind names why a merge was refused, because the causes need
+// different answers: a scope refusal waits on `gh auth refresh -s workflow`,
+// a conflict waits on Renovate rebasing, and a moved base only wants the sweep
+// run again.
+func refusalKind(err error) string {
+	m := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(m, "workflow` scope"), strings.Contains(m, "workflow scope"):
+		return "workflow-scope"
+	case strings.Contains(m, "merge conflicts"), strings.Contains(m, "not mergeable"):
+		return "conflict"
+	case strings.Contains(m, "base branch was modified"):
+		return "base-moved"
+	case strings.Contains(m, "--auto"), strings.Contains(m, "requirements have been met"):
+		return "requirements-unmet"
+	case strings.Contains(m, "review"):
+		return "review-required"
+	default:
+		return "other"
+	}
+}
+
 func ghPR(repo string, num int) ([]byte, error) {
 	raw, err := gh("api", fmt.Sprintf("repos/%s/pulls/%d", repo, num))
 	if err != nil {
@@ -328,7 +350,11 @@ func main() {
 
 			if _, err := gh("pr", "merge", fmt.Sprint(r.num), "--repo", r.repo, "--squash", "--delete-branch"); err != nil {
 				mu.Lock()
-				skipped["merge-refused"]++
+				// Break the refusals down. "merge-refused: 83" hid three
+				// unrelated causes behind one number, and twice today I read a
+				// conflict as a scope refusal because they print the same way
+				// in a summary.
+				skipped["merge-refused ("+refusalKind(err)+")"]++
 				mu.Unlock()
 				fmt.Printf("  REFUSED %s#%d: %v\n", r.repo, r.num, err)
 				return
