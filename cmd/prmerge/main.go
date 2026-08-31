@@ -210,6 +210,7 @@ func main() {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	merged, skipped := 0, map[string]int{}
+	reported := 0
 	detail := map[string][]string{}
 
 	for _, r := range refs {
@@ -228,6 +229,13 @@ func main() {
 			if err != nil {
 				mu.Lock()
 				skipped["view-failed"]++
+				// Report WHY, for the first few. A counter that says 186 failed
+				// without saying why is the same defect as a summary that counts
+				// lines: it looks like a measurement and is not one.
+				if reported < 5 {
+					reported++
+					fmt.Printf("  view-failed %s#%d: %v\n", r.repo, r.num, err)
+				}
 				mu.Unlock()
 				return
 			}

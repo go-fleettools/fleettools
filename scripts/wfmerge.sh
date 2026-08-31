@@ -14,17 +14,31 @@ trap 'rm -rf "$WORK"' EXIT
 land() {
     local repo="$1" num="$2"
     local meta head title
-    meta=$(gh pr view "$num" --repo "$repo" --json headRefName,title,mergeable,statusCheckRollup 2>/dev/null) || {
+    # REST, not `gh pr view`: that command is GraphQL, whose budget is separate
+    # from the REST one and runs out first at fleet scale. When it did, 23 pull
+    # requests reported "cannot read PR" while REST still read 5000/5000 -- a
+    # rate limit wearing the mask of a failure.
+    meta=$(gh api "repos/$repo/pulls/$num" 2>/dev/null) || {
         echo "  SKIP $repo#$num: cannot read PR"; return 1; }
-    head=$(printf '%s' "$meta" | jq -r .headRefName)
+    # Already merged or closed: say so rather than failing on the deleted branch,
+    # which reads as a defect and is not one.
+    local state merged
+    state=$(printf '%s' "$meta" | jq -r .state)
+    merged=$(printf '%s' "$meta" | jq -r .merged)
+    if [ "$merged" = "true" ]; then echo "  SKIP $repo#$num: already merged"; return 0; fi
+    if [ "$state" != "open" ]; then echo "  SKIP $repo#$num: $state"; return 0; fi
+
+    head=$(printf '%s' "$meta" | jq -r .head.ref)
     title=$(printf '%s' "$meta" | jq -r .title)
+    local sha
+    sha=$(printf '%s' "$meta" | jq -r .head.sha)
 
     # Green means checks ran and passed. No checks at all is not green.
     local bad
-    bad=$(printf '%s' "$meta" | jq -r '[.statusCheckRollup[]?|(.conclusion // .state // .status)]
-                                       | if length == 0 then ["NONE"] else . end
-                                       | map(select(. != "SUCCESS" and . != "NEUTRAL" and . != "SKIPPED"))
-                                       | join(",")')
+    bad=$(gh api "repos/$repo/commits/$sha/check-runs?per_page=100" 2>/dev/null         | jq -r '[.check_runs[]?|(.conclusion // .status)|ascii_upcase]
+                 | if length == 0 then ["NONE"] else . end
+                 | map(select(. != "SUCCESS" and . != "NEUTRAL" and . != "SKIPPED"))
+                 | join(",")')
     if [ -n "$bad" ]; then echo "  SKIP $repo#$num: not green ($bad)"; return 1; fi
 
     local dir="$WORK/$(basename "$repo")"
