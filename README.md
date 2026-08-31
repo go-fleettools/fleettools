@@ -10,7 +10,7 @@ that cost a wrong answer to learn.
 | `cmd/prscan` | Open pull requests across every org. Batches ~15 `org:` qualifiers per search query, so ~20 calls instead of 320 — the search API is rate-limited far more tightly than REST. |
 | `cmd/prmerge` | Merges dependency PRs that are mergeable **and** fully green. |
 | `scripts/tidyall.sh` | Runs `go mod tidy` on a PR branch and pushes only if it changed something AND the tree still builds. |
-| `scripts/wfmerge.sh` | Lands PRs that edit a workflow file, which `gh pr merge` cannot: the merge API refuses an OAuth app without the `workflow` scope. |
+| `scripts/wfmerge.sh` | **Refuses by default.** It lands workflow-touching PRs by pushing to the default branch, which `git-pre-push-guard` exists to stop. The fix is `gh auth refresh -s workflow`, once. |
 
 ## What is built into them, and why
 
@@ -41,5 +41,22 @@ Renovate writes the new `go.sum` lines and **leaves the superseded ones**, so an
 lane asserting `go mod tidy` produces no diff fails on `go.sum` alone — with the
 module itself perfectly fine. The message names no file. It hit 11 PRs at once
 across four organisations. `tidyall.sh` is the pass that fixes it.
+
+## The workflow-scope blocker
+
+`gh pr merge` cannot merge a pull request that edits `.github/workflows/*`: the
+merge API refuses an OAuth app without the `workflow` scope, and gh's keyring
+token carries `repo` but not `workflow`. On 2026-08-31 this was the single
+largest blocker in the fleet -- 64 green pull requests waiting on it in one
+pass, after 69 had already been landed by hand.
+
+`wfmerge.sh` was the workaround: squash locally, push to the default branch.
+That is exactly what `git-pre-push-guard` was installed to stop -- "a fix went
+straight onto main by habit, green, tested and reviewed by nobody" -- so the
+script now refuses unless someone says `WFMERGE_I_MEAN_IT=1` for a specific
+case.
+
+**The fix is one command, and it is not automatable**: `gh auth refresh -s
+workflow` opens a browser. Until it is run, these pull requests wait.
 
     go build ./... && go vet ./...

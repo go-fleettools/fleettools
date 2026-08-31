@@ -1,13 +1,54 @@
 #!/usr/bin/env bash
-# Lands dependency PRs that edit a workflow file.
+# Lands a dependency PR that edits a workflow file — BY PUSHING TO THE DEFAULT
+# BRANCH, which the global pre-push guard now refuses on purpose.
 #
-# `gh pr merge` cannot: the merge API refuses an OAuth app without the
-# `workflow` scope, and gh's keyring token does not carry it. The token that
-# does is ~/.github-token, which gitpush serves through a credential helper --
-# so it never reaches an argument list, an environment variable, or a URL.
+# STOP. Read this before setting the escape hatch.
 #
-# Usage: wfmerge.sh <owner/repo> <pr-number> [...]
+# `gh pr merge` cannot land these: the merge API refuses an OAuth app without
+# the `workflow` scope, and gh's keyring token does not carry it. So this
+# squash-merges locally and pushes to the default branch — exactly the shape
+# git-pre-push-guard was installed to stop, in its own words: "a fix went
+# straight onto main by habit -- green, tested and reviewed by nobody."
+#
+# The guard is right and this script is the thing it is aimed at. 69 pull
+# requests were landed this way before the guard existed; that was a
+# workaround repeated until it looked like a procedure.
+#
+# THE ACTUAL FIX is to give gh the scope, once:
+#
+#     gh auth refresh -s workflow
+#
+# after which `gh pr merge` handles these like any other pull request and this
+# script has no reason to exist.
+#
+# It therefore refuses unless WFMERGE_I_MEAN_IT=1 is set, so that using it is a
+# decision someone made rather than a habit a sweep fell into.
+#
+# Usage: WFMERGE_I_MEAN_IT=1 wfmerge.sh <owner/repo> <pr-number> [...]
 set -uo pipefail
+
+if [ "${WFMERGE_I_MEAN_IT:-}" != "1" ]; then
+    cat >&2 <<'MSG'
+wfmerge: refusing to run.
+
+  This lands pull requests by pushing to the DEFAULT BRANCH, which the global
+  pre-push guard refuses on purpose -- work is meant to arrive through a pull
+  request so the checks run and somebody can read it.
+
+  The reason it exists is that `gh pr merge` cannot land a PR touching
+  .github/workflows: the merge API refuses an OAuth app without the `workflow`
+  scope. Fix that instead, once:
+
+      gh auth refresh -s workflow
+
+  after which these merge like anything else and this script is unnecessary.
+
+  If a single one genuinely has nowhere else to go, say so on purpose:
+
+      WFMERGE_I_MEAN_IT=1 wfmerge.sh <owner/repo> <pr-number>
+MSG
+    exit 2
+fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
