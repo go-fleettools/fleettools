@@ -27,7 +27,18 @@ func gh(args ...string) ([]byte, error) {
 			return out, nil
 		}
 		msg := errb.String()
-		if attempt < 5 && (strings.Contains(msg, "secondary rate") || strings.Contains(msg, "abuse") || strings.Contains(msg, "too quickly") || strings.Contains(msg, "rate limit")) {
+		// A transient network fault is worth retrying too, not just a rate
+		// limit. One pass lost 186 of 460 candidates to "no route to host"
+		// while the machine's link flapped -- they were not bad pull requests,
+		// and giving up on the first dial error turned a blip into a silent
+		// hole in the sweep.
+		transient := strings.Contains(msg, "no route to host") ||
+			strings.Contains(msg, "operation timed out") ||
+			strings.Contains(msg, "connection reset") ||
+			strings.Contains(msg, "i/o timeout") ||
+			strings.Contains(msg, "TLS handshake timeout") ||
+			strings.Contains(msg, "EOF")
+		if attempt < 5 && (transient || strings.Contains(msg, "secondary rate") || strings.Contains(msg, "abuse") || strings.Contains(msg, "too quickly") || strings.Contains(msg, "rate limit")) {
 			time.Sleep(time.Duration(20*(attempt+1)) * time.Second)
 			continue
 		}
