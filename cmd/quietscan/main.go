@@ -683,7 +683,7 @@ func main() {
 		{quiet.DisabledManually, "someone switched it off; this may be entirely deliberate"},
 		{quiet.Archived, "no pull request can fix this; the repository is frozen"},
 		{quiet.NoRunner, "NOTHING reaches this organisation: no runner of its own, no filter, no App"},
-		{quiet.CoverageUnknown, "no runner and no filter, and the App installation could not be read"},
+		{quiet.CoverageUnknown, "coverage could not be ESTABLISHED -- an unread filter or an unread App installation, not an absent one"},
 		{quiet.Covered, "no runner of its own, and none needed: a shared runner's filter reaches it"},
 		{quiet.NotYetDue, "born, not yet due; nothing to do"},
 		{quiet.Healthy, ""},

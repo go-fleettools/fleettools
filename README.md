@@ -205,11 +205,18 @@ twelve healthy.
     quietscan                                    # the live fleet
     quietscan -all                               # every runner, and every covered org
     quietscan -fixture cmd/quietscan/testdata/broken.json -all
+    quietscan -fixture cmd/quietscan/testdata/unread-filter.json -all
 
-The fixture is how the watcher is proved: doctored copies of one real runner,
+The fixtures are how the watcher is proved: doctored copies of one real runner,
 each changed in exactly one way, so the verdict names what was changed. A
 watcher that has never fired in anger is not known to work, and this one's whole
 purpose is to speak when everything looks quiet.
+
+`broken.json` walks the verdict set. `unread-filter.json` is separate because it
+would swallow the first: a LIVE runner whose filter could not be read casts
+doubt on every organisation no readable filter reaches, so `no_runner` correctly
+drops to zero there and `coverage_unknown` takes its place. That is the rule
+working, and it is easier to see on its own.
 
 ## The failure these were built for
 

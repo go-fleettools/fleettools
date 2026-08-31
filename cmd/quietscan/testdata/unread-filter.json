@@ -1,0 +1,43 @@
+{
+  "_comment": "The rule a rate-limit outage made concrete: a failed read must never become a verdict. A LIVE runner's filter could not be read, so an organisation 'no filter reaches' might in fact be reached by it -- and reads coverage_unknown, not no_runner.",
+  "now": "2026-08-31T14:00:00Z",
+  "runners": [
+    {
+      "org": "shared-live-unread",
+      "repo": "renovate-runner",
+      "repo_exists": true,
+      "pushed_at": "2026-08-31T00:00:00Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-07-08T13:48:04Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-08-31T10:04:00Z",
+      "covers": [],
+      "filter_note": "config.js: gh: API rate limit exceeded (HTTP 403)"
+    },
+    {
+      "_comment": "Might be covered by that unread filter. Not a gap: an unknown.",
+      "org": "maybe-covered",
+      "app": "absent"
+    },
+    {
+      "_comment": "Its own runner is fine; an unread filter elsewhere says nothing about it.",
+      "org": "has-own-runner",
+      "repo": ".github",
+      "repo_exists": true,
+      "pushed_at": "2026-08-31T10:33:41Z",
+      "workflow_found": true,
+      "workflow_state": "active",
+      "born": "2026-08-30T08:31:48Z",
+      "crons": [
+        "0 4 * * *"
+      ],
+      "last_run": "2026-08-31T10:32:36Z",
+      "covers": [
+        "has-own-runner/**"
+      ]
+    }
+  ]
+}

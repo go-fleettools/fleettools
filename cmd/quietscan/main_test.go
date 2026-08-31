@@ -765,3 +765,61 @@ func TestRateLimitedRecognisesTheShapes(t *testing.T) {
 		}
 	}
 }
+
+// The whole pipeline over a fixture, so the ORDER of the three coverage passes
+// is guarded and not just each pass in isolation.
+func TestPipelineOverFixtures(t *testing.T) {
+	pipeline := func(path string) map[string]quiet.Result {
+		t.Helper()
+		runners, now, app, err := loadFixture(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rs []quiet.Result
+		for _, r := range runners {
+			rs = append(rs, quiet.Classify(r, now, quiet.DefaultSlack, quiet.DefaultPushWarn))
+		}
+		rs = quiet.ApplyCoverage(rs)
+		rs = quiet.ApplyAppCoverage(rs, app)
+		rs = quiet.ApplyUncertainty(rs, quiet.UnreadFilters(rs))
+		out := map[string]quiet.Result{}
+		for _, r := range rs {
+			if _, dup := out[r.Org]; !dup || r.WorkflowFound {
+				out[r.Org] = r
+			}
+		}
+		return out
+	}
+
+	got := pipeline("testdata/broken.json")
+	for org, want := range map[string]quiet.Verdict{
+		"doctored-fam-alpha":   quiet.Covered, // a filter reaches it
+		"doctored-fam-beta":    quiet.Covered, // ditto, with no repo at all
+		"doctored-app-covered": quiet.Covered, // the Renovate App reaches it
+		"doctored-app-unread":  quiet.CoverageUnknown,
+		"doctored-uncovered":   quiet.NoRunner, // only a RETIRED filter named it
+		"shared-opaque":        quiet.DisabledManually,
+	} {
+		if got[org].Verdict != want {
+			t.Errorf("%s = %s, want %s", org, got[org].Verdict, want)
+		}
+	}
+	if by := got["doctored-app-covered"].CoveredBy; by != quiet.AppCoveredBy {
+		t.Errorf("app-covered by %q, want %q", by, quiet.AppCoveredBy)
+	}
+	// A retired runner's unread filter must not cast doubt on the gaps.
+	if got["doctored-uncovered"].Verdict != quiet.NoRunner {
+		t.Error("a retired runner's unread filter should raise no doubt")
+	}
+
+	got = pipeline("testdata/unread-filter.json")
+	if v := got["maybe-covered"].Verdict; v != quiet.CoverageUnknown {
+		t.Errorf("maybe-covered = %s, want coverage_unknown -- a failed read is not a verdict", v)
+	}
+	if !strings.Contains(got["maybe-covered"].UnknownWhy, "shared-live-unread") {
+		t.Errorf("UnknownWhy = %q", got["maybe-covered"].UnknownWhy)
+	}
+	if v := got["has-own-runner"].Verdict; v != quiet.Healthy {
+		t.Errorf("has-own-runner = %s -- an unread filter elsewhere says nothing about it", v)
+	}
+}

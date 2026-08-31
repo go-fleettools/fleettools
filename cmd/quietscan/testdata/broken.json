@@ -209,13 +209,13 @@
       ]
     },
     {
-      "_comment": "A shared runner whose autodiscoverFilter is computed in JavaScript. It claims no coverage and is reported as unread -- never as zero.",
+      "_comment": "A shared runner whose autodiscoverFilter is computed in JavaScript, and which is retired. Its filter is still reported as unread -- never as zero -- but a retired runner covers nothing either way, so it raises no doubt about the organisations no filter reaches. This is go-attest/renovate-runner.",
       "org": "shared-opaque",
       "repo": "renovate-runner",
       "repo_exists": true,
       "pushed_at": "2026-08-31T00:00:00Z",
       "workflow_found": true,
-      "workflow_state": "active",
+      "workflow_state": "disabled_manually",
       "born": "2026-08-01T00:00:00Z",
       "crons": [
         "0 4 * * *"
