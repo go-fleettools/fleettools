@@ -265,3 +265,26 @@ func ApplyUncertainty(rs []Result, unread []string) []Result {
 	}
 	return out
 }
+
+// NarrowedWhy is why a narrowed pass cannot answer "no runner reaches this".
+const NarrowedWhy = "narrowed pass: filters and Apps of organisations outside -orgs were not read"
+
+// ApplyNarrowed makes a narrowed pass safe by construction rather than safe if
+// someone reads the banner.
+//
+// Coverage is decided by OTHER organisations' runners, so a pass restricted to
+// a handful of organisations cannot establish that nothing reaches one of them:
+// `quietscan -orgs go-ruby-aasm` reads no_runner for an organisation that
+// go-ruby-stdlib/renovate-runner covers perfectly well. A fact not established
+// is not a fact, so the verdict becomes CoverageUnknown and says why.
+func ApplyNarrowed(rs []Result) []Result {
+	out := make([]Result, len(rs))
+	copy(out, rs)
+	for i := range out {
+		if out[i].Verdict == NoRunner {
+			out[i].Verdict = CoverageUnknown
+			out[i].UnknownWhy = NarrowedWhy
+		}
+	}
+	return out
+}

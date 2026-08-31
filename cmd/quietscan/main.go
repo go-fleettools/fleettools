@@ -164,6 +164,10 @@ var (
 	all       = flag.Bool("all", false, "list every runner, not only the findings")
 	fixture   = flag.String("fixture", "", "read runners from a JSON file instead of the API; makes no network call at all")
 	workers   = flag.Int("workers", 6, "concurrent API readers")
+	// A full pass is ~1300 calls, a quarter of an hour's budget, and this fleet
+	// routinely has eight sessions on it. Checking one organisation should not
+	// cost the same as checking all of them.
+	only = flag.String("orgs", "", "comma-separated organisations to check instead of the whole fleet")
 )
 
 type wfEntry struct {
@@ -557,10 +561,21 @@ func main() {
 		started = now
 		fmt.Printf("fixture: %s   as of %s\n", *fixture, stamp(now))
 	} else {
-		list, err := orgs()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "orgs:", err)
-			os.Exit(2)
+		var list []string
+		if *only != "" {
+			for _, o := range strings.Split(*only, ",") {
+				if o = strings.TrimSpace(o); o != "" {
+					list = append(list, o)
+				}
+			}
+			sort.Strings(list)
+			fmt.Printf("NARROWED to %d organisations: filters and Apps outside this list are NOT read, so no gap can be established here.\n", len(list))
+		} else {
+			var err error
+			if list, err = orgs(); err != nil {
+				fmt.Fprintln(os.Stderr, "orgs:", err)
+				os.Exit(2)
+			}
 		}
 		// Driven from the ORGANISATION list, not the runner list. A recency
 		// check over runners structurally cannot see an organisation that has
@@ -617,6 +632,10 @@ func main() {
 	// could not be read, an organisation "no filter reaches" might in fact be
 	// reached by it.
 	results = quiet.ApplyUncertainty(results, quiet.UnreadFilters(results))
+	if *only != "" {
+		// Safe by construction, not safe if someone read the banner.
+		results = quiet.ApplyNarrowed(results)
+	}
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].Org != results[j].Org {
 			return results[i].Org < results[j].Org

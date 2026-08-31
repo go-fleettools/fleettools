@@ -343,3 +343,23 @@ func TestUnreadFilterMakesCoverageUnknownNotAGap(t *testing.T) {
 		t.Errorf("a readable filter should raise no doubt: %v", u)
 	}
 }
+
+// A narrowed pass cannot see the filter that covers an organisation, so it must
+// not claim nothing does. `quietscan -orgs go-ruby-aasm` reads no_runner for an
+// organisation go-ruby-stdlib/renovate-runner covers perfectly well.
+func TestNarrowedPassCannotClaimAGap(t *testing.T) {
+	in := []Result{
+		{Runner: Runner{Org: "go-ruby-aasm"}, Verdict: NoRunner},
+		{Runner: Runner{Org: "openweft"}, Verdict: Covered, CoveredBy: AppCoveredBy},
+		{Runner: Runner{Org: "go-widgets", Repo: ".github", WorkflowFound: true}, Verdict: Healthy},
+	}
+	out := ApplyNarrowed(in)
+	if out[0].Verdict != CoverageUnknown || !contains(out[0].UnknownWhy, "outside -orgs") {
+		t.Errorf("gap = %s (%q), want coverage_unknown naming the narrowing", out[0].Verdict, out[0].UnknownWhy)
+	}
+	// An answer a narrowed pass CAN establish is untouched: an App installation
+	// and a runner's own health are properties of the organisation itself.
+	if out[1].Verdict != Covered || out[2].Verdict != Healthy {
+		t.Errorf("narrowing changed what it could actually see: %s %s", out[1].Verdict, out[2].Verdict)
+	}
+}

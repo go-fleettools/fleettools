@@ -180,7 +180,17 @@ cron and run history decide nothing, though their filter still does.
 **Twice a day is comfortable; a tighter loop is not.** Do not run it beside
 another fleet sweep -- `redscan` and `prmerge` walk 1800 repositories, and two of
 those in one hour will starve one or the other. Three sessions working this fleet
-concurrently exhausted the budget once already.
+concurrently exhausted the budget once already, and eight were holding leases on
+it the same evening.
+
+`-orgs a,b,c` checks a handful for about four calls each, which is how to
+re-check one organisation without spending a quarter of the hour. A narrowed
+pass **cannot establish a gap**, because coverage is decided by other
+organisations' runners: `-orgs go-ruby-aasm` alone cannot see the filter that
+covers it. So `no_runner` is unreachable under `-orgs` -- those organisations
+read `coverage_unknown` naming the narrowing. Safe by construction, not safe if
+you read the banner. What a narrowed pass CAN establish -- a runner's own
+health, an App installed on that organisation -- it still reports.
 
 ## Two things `quietscan` is not
 
