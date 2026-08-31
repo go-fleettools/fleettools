@@ -88,7 +88,10 @@ func gh(args ...string) ([]byte, error) {
 			strings.Contains(msg, "error connecting to") ||
 			strings.Contains(msg, "no such host") ||
 			strings.Contains(msg, "check your internet connection")
-		if attempt < 5 && (transient || strings.Contains(msg, "secondary rate") || strings.Contains(msg, "abuse") || strings.Contains(msg, "too quickly") || strings.Contains(msg, "rate limit")) {
+		// The core budget will not refill inside this pass's backoff, so a
+		// refusal for it fails fast and the verdict becomes "unreadable" --
+		// which is exactly what a watcher should say when it could not look.
+		if attempt < 5 && (transient || rateLimited(msg)) {
 			time.Sleep(time.Duration(20*(attempt+1)) * time.Second)
 			continue
 		}
@@ -96,13 +99,54 @@ func gh(args ...string) ([]byte, error) {
 	}
 }
 
+// isNotFound requires the 404 itself, not the words around it. A rate-limited
+// or forbidden response that happens to say "Not Found" must never be read as
+// "this organisation has no runner": that is a verdict derived from a call that
+// did not answer.
 func isNotFound(err error) bool {
-	return err != nil && (strings.Contains(err.Error(), "HTTP 404") || strings.Contains(err.Error(), "Not Found"))
+	return err != nil && strings.Contains(err.Error(), "404")
 }
 
 var calls struct {
 	sync.Mutex
-	n int
+	n       int
+	limited string // the first rate-limit refusal seen, verbatim
+}
+
+// rateLimited latches the first hard rate-limit refusal of the pass.
+//
+// /rate_limit cannot be trusted to notice: it was observed reporting core
+// 5000/5000 while a real request returned 403 with X-RateLimit-Remaining: 0. So
+// the budget is judged by what the API actually did, not by what it says about
+// itself. Once latched, calls stop sleeping through five retries each -- 1300
+// calls x 300 seconds of backoff is not a pass, it is a hang -- and the pass
+// reports itself as incomplete.
+// It returns whether to back off and retry, which is NOT the same question as
+// whether the budget is gone. A secondary rate limit is genuinely transient and
+// worth twenty seconds. The core budget is not: it refills on the hour, so
+// every one of 1300 calls would pay five sleeps to learn the same thing, and
+// what should be a pass becomes a hang.
+func rateLimited(msg string) (retry bool) {
+	low := strings.ToLower(msg)
+	switch {
+	case strings.Contains(low, "secondary rate") || strings.Contains(low, "abuse") ||
+		strings.Contains(low, "too quickly"):
+		return true
+	case strings.Contains(low, "rate limit") || strings.Contains(low, "ratelimit-remaining: 0"):
+		calls.Lock()
+		if calls.limited == "" {
+			calls.limited = strings.TrimSpace(msg)
+		}
+		calls.Unlock()
+		return false
+	}
+	return false
+}
+
+func budgetExhausted() string {
+	calls.Lock()
+	defer calls.Unlock()
+	return calls.limited
 }
 
 func counted(args ...string) ([]byte, error) {
@@ -300,6 +344,99 @@ func readRepo(org, name string) (quiet.Runner, bool) {
 	return r, true
 }
 
+// readApp asks whether the Renovate App is installed on an organisation.
+//
+// A GitHub App covers an organisation through a mechanism no workflow census
+// can see: no runner, no cron, no repository to be quiet, and pull requests all
+// the same. The read can be refused where the token cannot see installations,
+// and a refusal is AppUnread -- never AppAbsent.
+func readApp(org string) quiet.AppCoverage {
+	b, err := counted("api", fmt.Sprintf("orgs/%s/installations?per_page=100", org))
+	if err != nil {
+		return quiet.AppUnread
+	}
+	var v struct {
+		Installations []struct {
+			AppSlug string `json:"app_slug"`
+		} `json:"installations"`
+	}
+	if json.Unmarshal(b, &v) != nil {
+		return quiet.AppUnread
+	}
+	for _, in := range v.Installations {
+		if strings.Contains(strings.ToLower(in.AppSlug), "renovate") {
+			return quiet.AppPresent
+		}
+	}
+	return quiet.AppAbsent
+}
+
+// recheckCovering re-reads the state of every runner that other organisations
+// are counted as covered by, and re-resolves coverage if one moved.
+//
+// A coverage map is a snapshot, and a runner can leave the live set while the
+// pass that read it is still running: go-pdfkit/renovate-runner was retired
+// between two passes an evening apart, and nothing says it could not have been
+// retired between two calls of the same pass. Leaving an organisation counted
+// as covered by something that stopped covering it is the attribution mistake
+// this tool exists not to make.
+func recheckCovering(rs []quiet.Result, now time.Time) ([]quiet.Result, []string) {
+	covering := map[string]bool{}
+	for _, r := range rs {
+		if r.CoveredBy != "" && r.CoveredBy != quiet.AppCoveredBy {
+			covering[r.CoveredBy] = true
+		}
+	}
+	var moved []string
+	changed := false
+	out := make([]quiet.Result, len(rs))
+	copy(out, rs)
+	for i := range out {
+		if !covering[label(out[i])] {
+			continue
+		}
+		state, ok := readWorkflowState(out[i].Org, out[i].Repo)
+		if !ok || state == out[i].WorkflowState {
+			continue
+		}
+		moved = append(moved, fmt.Sprintf("%s  %s -> %s during the pass", label(out[i]), out[i].WorkflowState, state))
+		out[i].WorkflowState = state
+		out[i] = quiet.Classify(out[i].Runner, now, *slack, time.Duration(*pushWarn)*24*time.Hour)
+		changed = true
+	}
+	if !changed {
+		return rs, nil
+	}
+	// Coverage is resolved from scratch, not patched: a runner leaving the live
+	// set can hand its organisations to another runner that also reaches them.
+	for i := range out {
+		out[i].CoveredBy, out[i].CoveredByVerdict = "", ""
+		if out[i].Verdict == quiet.Covered {
+			out[i].Verdict = quiet.NoRunner
+		}
+	}
+	return quiet.ApplyCoverage(out), moved
+}
+
+func readWorkflowState(org, repo string) (string, bool) {
+	b, err := counted("api", fmt.Sprintf("repos/%s/%s/actions/workflows?per_page=100", org, repo))
+	if err != nil {
+		return "", false
+	}
+	var wfs struct {
+		Workflows []wfEntry `json:"workflows"`
+	}
+	if json.Unmarshal(b, &wfs) != nil {
+		return "", false
+	}
+	for _, w := range wfs.Workflows {
+		if strings.HasSuffix(w.Path, "/"+*wfFile) || w.Path == *wfFile {
+			return w.State, true
+		}
+	}
+	return "", false
+}
+
 // fixtureFile is the doctored input a watcher needs to be provable. Nothing in
 // it touches the network, so a runner can be made to look overdue, archived or
 // never-fired without doctoring a live organisation.
@@ -318,27 +455,29 @@ type fixtureFile struct {
 		Repo          string   `json:"repo"`
 		Covers        []string `json:"covers"`
 		FilterNote    string   `json:"filter_note"`
+		App           string   `json:"app"` // "present", "absent", "unread"
 		ReadError     string   `json:"read_error"`
 	} `json:"runners"`
 }
 
-func loadFixture(path string) ([]quiet.Runner, time.Time, error) {
+func loadFixture(path string) ([]quiet.Runner, time.Time, map[string]quiet.AppCoverage, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, time.Time{}, nil, err
 	}
 	var f fixtureFile
 	if err := json.Unmarshal(b, &f); err != nil {
-		return nil, time.Time{}, err
+		return nil, time.Time{}, nil, err
 	}
 	now := time.Now().UTC()
 	if f.Now != "" {
 		if t := parseTime(f.Now); !t.IsZero() {
 			now = t
 		} else {
-			return nil, time.Time{}, fmt.Errorf("fixture now=%q is not a timestamp", f.Now)
+			return nil, time.Time{}, nil, fmt.Errorf("fixture now=%q is not a timestamp", f.Now)
 		}
 	}
+	app := map[string]quiet.AppCoverage{}
 	var rs []quiet.Runner
 	for _, in := range f.Runners {
 		r := quiet.Runner{
@@ -352,13 +491,24 @@ func loadFixture(path string) ([]quiet.Runner, time.Time, error) {
 		for _, c := range in.Crons {
 			p, err := quiet.ParseCron(c)
 			if err != nil {
-				return nil, time.Time{}, fmt.Errorf("%s: %w", in.Org, err)
+				return nil, time.Time{}, nil, fmt.Errorf("%s: %w", in.Org, err)
 			}
 			r.Schedule = append(r.Schedule, p)
 		}
+		switch in.App {
+		case "present":
+			app[in.Org] = quiet.AppPresent
+		case "absent":
+			app[in.Org] = quiet.AppAbsent
+		case "unread":
+			app[in.Org] = quiet.AppUnread
+		case "":
+		default:
+			return nil, time.Time{}, nil, fmt.Errorf("%s: app=%q is not present/absent/unread", in.Org, in.App)
+		}
 		rs = append(rs, r)
 	}
-	return rs, now, nil
+	return rs, now, app, nil
 }
 
 func orgs() ([]string, error) {
@@ -392,16 +542,19 @@ func stamp(t time.Time) string {
 
 func main() {
 	flag.Parse()
-	now := time.Now().UTC()
+	started := time.Now().UTC()
+	now := started
 	var runners []quiet.Runner
+	app := map[string]quiet.AppCoverage{}
 
 	if *fixture != "" {
 		var err error
-		runners, now, err = loadFixture(*fixture)
+		runners, now, app, err = loadFixture(*fixture)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "fixture:", err)
 			os.Exit(2)
 		}
+		started = now
 		fmt.Printf("fixture: %s   as of %s\n", *fixture, stamp(now))
 	} else {
 		list, err := orgs()
@@ -412,7 +565,9 @@ func main() {
 		// Driven from the ORGANISATION list, not the runner list. A recency
 		// check over runners structurally cannot see an organisation that has
 		// no runner to be quiet.
-		fmt.Printf("orgs: %d   as of %s\n", len(list), stamp(now))
+		// A coverage map is a snapshot, so it carries the window it was read
+		// in. A runner can be retired between two calls of one pass.
+		fmt.Printf("orgs: %d   reading from %s\n", len(list), stamp(started))
 		per := make([][]quiet.Runner, len(list))
 		sem := make(chan struct{}, *workers)
 		var wg sync.WaitGroup
@@ -429,6 +584,7 @@ func main() {
 		for _, p := range per {
 			runners = append(runners, p...)
 		}
+		now = time.Now().UTC()
 	}
 
 	results := make([]quiet.Result, 0, len(runners))
@@ -438,6 +594,29 @@ func main() {
 	// Fleet-wide, because coverage is not a property any single organisation
 	// can answer: it is decided by some OTHER organisation's runner filter.
 	results = quiet.ApplyCoverage(results)
+
+	// A runner may have left the live set while this pass was reading. Confirm
+	// every runner that others are counted as covered by is still in the state
+	// it was read in, and re-resolve coverage from scratch if one moved.
+	var moved []string
+	if *fixture == "" {
+		results, moved = recheckCovering(results, now)
+
+		// The third form of coverage, asked only where it can change an answer:
+		// an organisation with no runner and no filter reaching it. The
+		// Renovate App leaves no workflow, no cron and no repository to be
+		// quiet, and opens pull requests all the same.
+		for _, r := range results {
+			if r.Verdict == quiet.NoRunner {
+				app[r.Org] = readApp(r.Org)
+			}
+		}
+	}
+	results = quiet.ApplyAppCoverage(results, app)
+	// A failed read must never become a verdict. If a live runner's filter
+	// could not be read, an organisation "no filter reaches" might in fact be
+	// reached by it.
+	results = quiet.ApplyUncertainty(results, quiet.UnreadFilters(results))
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].Org != results[j].Org {
 			return results[i].Org < results[j].Org
@@ -463,13 +642,23 @@ func main() {
 		}
 	}
 	if *fixture == "" {
-		fmt.Printf("runners: %d (%d shared)   API calls: %d\n", withRunner, shared, calls.n)
+		fmt.Printf("runners: %d (%d shared)   API calls: %d   snapshot closed %s\n",
+			withRunner, shared, calls.n, stamp(time.Now().UTC()))
+	}
+	for _, m := range moved {
+		fmt.Printf("  COVERAGE SNAPSHOT MOVED: %s -- coverage re-resolved\n", m)
 	}
 
 	// The observed lag, every pass. The threshold below is a measurement that
 	// has to keep being re-taken: GitHub's scheduler was 2.0 to 7.7 hours
 	// behind when this was written and still growing, and a slack that stops
 	// covering it pages on a fleet that is working perfectly.
+	if msg := budgetExhausted(); msg != "" {
+		fmt.Printf("\n! RATE LIMITED DURING THIS PASS -- the verdicts below are INCOMPLETE.\n"+
+			"  %s\n"+
+			"  Every refused call reads as `unreadable`, never as a stopped runner. Re-run when the budget refills.\n", msg)
+	}
+
 	l := quiet.Lags(results)
 	if l.N > 0 {
 		fmt.Printf("scheduler lag behind cron (n=%d): min %s  median %s  p90 %s  max %s   [slack %s]\n",
@@ -493,7 +682,8 @@ func main() {
 		{quiet.Unreadable, "the API would not answer; re-run before believing anything else"},
 		{quiet.DisabledManually, "someone switched it off; this may be entirely deliberate"},
 		{quiet.Archived, "no pull request can fix this; the repository is frozen"},
-		{quiet.NoRunner, "NO runner reaches this organisation -- neither its own nor any shared filter"},
+		{quiet.NoRunner, "NOTHING reaches this organisation: no runner of its own, no filter, no App"},
+		{quiet.CoverageUnknown, "no runner and no filter, and the App installation could not be read"},
 		{quiet.Covered, "no runner of its own, and none needed: a shared runner's filter reaches it"},
 		{quiet.NotYetDue, "born, not yet due; nothing to do"},
 		{quiet.Healthy, ""},
@@ -610,11 +800,16 @@ func detail(r quiet.Result) string {
 			s += fmt.Sprintf(" -- WHICH IS ITSELF %s", strings.ToUpper(string(r.CoveredByVerdict)))
 		}
 		return s
+	case quiet.CoverageUnknown:
+		if r.UnknownWhy != "" {
+			return r.UnknownWhy
+		}
+		return "coverage unknown (App visibility): orgs/" + r.Org + "/installations could not be read"
 	case quiet.NoRunner:
 		if r.RepoExists {
-			return fmt.Sprintf("a repository, but no runner in it and no filter reaching it (last push %s)", stamp(r.PushedAt))
+			return fmt.Sprintf("a repository, but no runner in it, no filter reaching it and no App (last push %s)", stamp(r.PushedAt))
 		}
-		return "no runner repository and no filter reaching it"
+		return "no runner repository, no filter reaching it and no App"
 	case quiet.Archived, quiet.DisabledManually, quiet.DisabledInactivity:
 		// No run history is fetched for a runner that cannot run, so none is
 		// claimed. "last run never" would be a fact nobody read.

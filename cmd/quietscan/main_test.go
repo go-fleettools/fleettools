@@ -71,7 +71,7 @@ func TestParseTime(t *testing.T) {
 }
 
 func TestLoadFixture(t *testing.T) {
-	rs, now, err := loadFixture("testdata/broken.json")
+	rs, now, app, err := loadFixture("testdata/broken.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,14 +81,22 @@ func TestLoadFixture(t *testing.T) {
 	if len(rs) == 0 {
 		t.Fatal("no runners")
 	}
-	if _, _, err := loadFixture("testdata/does-not-exist.json"); err == nil {
-		t.Error("missing file: want error")
+	if app["doctored-app-covered"] != quiet.AppPresent {
+		t.Errorf("app coverage = %v, want present", app["doctored-app-covered"])
 	}
-	if _, _, err := loadFixture("testdata/bad-cron.json"); err == nil || !strings.Contains(err.Error(), "cron") {
-		t.Errorf("bad cron: %v", err)
+	if app["doctored-app-unread"] != quiet.AppUnread {
+		t.Errorf("app coverage = %v, want unread", app["doctored-app-unread"])
 	}
-	if _, _, err := loadFixture("testdata/bad-now.json"); err == nil {
-		t.Error("bad now: want error")
+	if _, ok := app["doctored-uncovered"]; !ok || app["doctored-uncovered"] != quiet.AppAbsent {
+		t.Error("an org read as having no App must be recorded as absent, not missing")
+	}
+	for _, f := range []string{"does-not-exist", "bad-cron", "bad-now", "bad-app"} {
+		if _, _, _, err := loadFixture("testdata/" + f + ".json"); err == nil {
+			t.Errorf("%s: want error", f)
+		}
+	}
+	if _, _, _, err := loadFixture("testdata/bad-cron.json"); err == nil || !strings.Contains(err.Error(), "cron") {
+		t.Errorf("bad cron error should name the cron: %v", err)
 	}
 }
 
@@ -558,6 +566,202 @@ func TestDetailClaimsNoUnreadRunHistory(t *testing.T) {
 		}
 		if !strings.Contains(got, "used to watch libfw/** libhcl/**") {
 			t.Errorf("%s: %q should say what it used to watch", v, got)
+		}
+	}
+}
+
+func TestReadApp(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		want         quiet.AppCoverage
+	}{
+		{"installed", `echo '{"total_count":1,"installations":[{"app_slug":"renovate","app_id":2740}]}'`, quiet.AppPresent},
+		{"a different app only", `echo '{"total_count":1,"installations":[{"app_slug":"dependabot"}]}'`, quiet.AppAbsent},
+		{"none", `echo '{"total_count":0,"installations":[]}'`, quiet.AppAbsent},
+		// A refusal is UNREAD. Reading it as absent is how openweft -- which
+		// has the App and 16 open pull requests from it -- became a "gap".
+		{"refused", `echo 'gh: HTTP 403 (installations)' >&2; exit 1`, quiet.AppUnread},
+		{"unparseable", `echo 'not json'`, quiet.AppUnread},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := withFakeGH(t, tc.script)
+			if got := readApp("openweft"); got != tc.want {
+				t.Errorf("readApp = %v, want %v", got, tc.want)
+			}
+			for _, c := range callLog(t, *log) {
+				if !strings.Contains(c, "orgs/openweft/installations") {
+					t.Errorf("unexpected call: %s", c)
+				}
+			}
+		})
+	}
+}
+
+// A runner can be retired while the pass that read it is still running --
+// go-pdfkit/renovate-runner was, between two passes an evening apart. Leaving
+// an organisation counted as covered by something that stopped covering it is
+// the attribution mistake this whole tool exists not to make.
+func TestRecheckCoveringCatchesAMidPassRetirement(t *testing.T) {
+	sched, _ := quiet.ParseSchedule(stubFile)
+	shared := quiet.Runner{Org: "go-pdfkit", Repo: "renovate-runner", RepoExists: true,
+		WorkflowFound: true, WorkflowState: "active", Born: parseTime("2026-07-08T13:48:04Z"),
+		Schedule: sched, LastRun: parseTime("2026-08-31T10:04:00Z"),
+		Covers: []string{"go-gfx/**"}}
+	nowT := parseTime("2026-08-31T14:00:00Z")
+	rs := quiet.ApplyCoverage([]quiet.Result{
+		quiet.Classify(shared, nowT, quiet.DefaultSlack, quiet.DefaultPushWarn),
+		{Runner: quiet.Runner{Org: "go-gfx"}, Verdict: quiet.NoRunner},
+	})
+	if rs[1].Verdict != quiet.Covered {
+		t.Fatalf("before the retirement, go-gfx = %s", rs[1].Verdict)
+	}
+
+	// The re-read says it is now disabled.
+	withFakeGH(t, `echo '{"workflows":[{"id":1,"name":"Renovate","path":".github/workflows/renovate.yml","state":"disabled_manually","created_at":"2026-07-08T13:48:04Z"}]}'`)
+	out, moved := recheckCovering(rs, nowT)
+	if len(moved) != 1 || !strings.Contains(moved[0], "active -> disabled_manually") {
+		t.Fatalf("moved = %v", moved)
+	}
+	byOrg := map[string]quiet.Result{}
+	for _, r := range out {
+		byOrg[r.Org] = r
+	}
+	if byOrg["go-pdfkit"].Verdict != quiet.DisabledManually {
+		t.Errorf("go-pdfkit = %s", byOrg["go-pdfkit"].Verdict)
+	}
+	if byOrg["go-gfx"].Verdict != quiet.NoRunner || byOrg["go-gfx"].CoveredBy != "" {
+		t.Errorf("go-gfx = %s covered by %q -- a retired runner covers nothing",
+			byOrg["go-gfx"].Verdict, byOrg["go-gfx"].CoveredBy)
+	}
+
+	// An unchanged state, and an unreadable re-read, both leave the snapshot
+	// alone rather than inventing a move.
+	for _, script := range []string{
+		`echo '{"workflows":[{"id":1,"name":"Renovate","path":".github/workflows/renovate.yml","state":"active","created_at":"2026-07-08T13:48:04Z"}]}'`,
+		`echo 'gh: HTTP 500' >&2; exit 1`,
+		`echo '{"workflows":[]}'`,
+	} {
+		withFakeGH(t, script)
+		out, moved := recheckCovering(rs, nowT)
+		if len(moved) != 0 {
+			t.Errorf("moved = %v, want none", moved)
+		}
+		if out[1].Verdict != quiet.Covered {
+			t.Errorf("go-gfx = %s, want still covered", out[1].Verdict)
+		}
+	}
+}
+
+// Only runners that OTHERS are counted as covered by are re-read. An App
+// coverage answer names no repository, and must not be looked up as one.
+func TestRecheckSkipsAppCoverage(t *testing.T) {
+	log := withFakeGH(t, `echo '{"workflows":[]}'`)
+	rs := []quiet.Result{{Runner: quiet.Runner{Org: "openweft"}, Verdict: quiet.Covered,
+		CoveredBy: quiet.AppCoveredBy}}
+	if _, moved := recheckCovering(rs, time.Now().UTC()); len(moved) != 0 {
+		t.Errorf("moved = %v", moved)
+	}
+	if n := len(callLog(t, *log)); n != 0 {
+		t.Errorf("calls = %d, want 0", n)
+	}
+}
+
+// A rate-limited probe must produce "unknown", never "never fired" or
+// "overdue". That is the worst possible outcome for a watcher: an outage
+// wearing the mask of a stopped runner.
+func TestRateLimitedProbeIsUnknownNotASilentRunner(t *testing.T) {
+	onlyGithub(t)
+	const limit = `echo 'gh: API rate limit exceeded (HTTP 403)' >&2; exit 1`
+	for _, tc := range []struct{ name, script string }{
+		{"repo", limit},
+		{"workflows", `case "$*" in *"/actions/workflows?"*) ` + limit + ` ;; *) echo '` + stubRepo + `' ;; esac`},
+		{"workflow file", `case "$*" in
+  *"/contents/config.js"*) printf "autodiscoverFilter: ['x/**'],\n" ;;
+  *"/contents/"*) ` + limit + ` ;;
+  *"/actions/workflows?"*) echo '` + stubWorkflows + `' ;;
+  *) echo '` + stubRepo + `' ;;
+esac`},
+		{"runs", `case "$*" in
+  *"/runs"*) ` + limit + ` ;;
+  *"/contents/config.js"*) printf "autodiscoverFilter: ['x/**'],\n" ;;
+  *"/contents/"*) cat <<'F'
+` + stubFile + `
+F
+  ;;
+  *"/actions/workflows?"*) echo '` + stubWorkflows + `' ;;
+  *) echo '` + stubRepo + `' ;;
+esac`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakeGH(t, tc.script)
+			r := one(t, read("go-widgets"))
+			v := quiet.Classify(r, time.Now().UTC(), quiet.DefaultSlack, quiet.DefaultPushWarn).Verdict
+			if v != quiet.Unreadable {
+				t.Fatalf("verdict = %s, want unreadable -- an outage is not a stopped runner", v)
+			}
+			for _, bad := range []quiet.Verdict{quiet.NeverFired, quiet.Overdue, quiet.NoRunner, quiet.Healthy} {
+				if v == bad {
+					t.Fatalf("a refused call produced %s", bad)
+				}
+			}
+		})
+	}
+	// And the pass says it was rate limited rather than presenting an
+	// incomplete picture as a complete one.
+	if budgetExhausted() == "" {
+		t.Error("a hard rate-limit refusal must latch")
+	}
+	// One attempt, not six. The stub logs every invocation, so this asserts the
+	// fail-fast without measuring a clock.
+	log := withFakeGH(t, `echo 'gh: API rate limit exceeded (HTTP 403)' >&2; exit 1`)
+	if _, err := gh("api", "repos/x/.github"); err == nil {
+		t.Fatal("want an error")
+	}
+	if n := len(callLog(t, *log)); n != 1 {
+		t.Errorf("attempts = %d, want 1: the core budget does not refill inside a backoff", n)
+	}
+}
+
+// A 403 that happens to say "Not Found" must never read as a missing runner.
+func TestIsNotFoundNeedsTheCodeNotTheWords(t *testing.T) {
+	if isNotFound(errString("gh: Not Found (rate limited, HTTP 403)")) {
+		t.Error("a 403 must not read as not-found")
+	}
+	if !isNotFound(errString("gh: Not Found (HTTP 404)")) {
+		t.Error("a real 404 must read as not-found")
+	}
+}
+
+func TestRateLimitedRecognisesTheShapes(t *testing.T) {
+	// A secondary limit is transient and worth backing off for.
+	for _, m := range []string{
+		"You have exceeded a secondary rate limit",
+		"detected abuse",
+		"created too quickly",
+	} {
+		if !rateLimited(m) {
+			t.Errorf("rateLimited(%q) should retry", m)
+		}
+	}
+	// The core budget is NOT transient: it refills on the hour. It latches and
+	// fails fast instead of paying five sleeps per call, 1300 times.
+	calls.Lock()
+	calls.limited = ""
+	calls.Unlock()
+	for _, m := range []string{"API rate limit exceeded", "x-ratelimit-remaining: 0"} {
+		if rateLimited(m) {
+			t.Errorf("rateLimited(%q) should NOT retry", m)
+		}
+		if budgetExhausted() == "" {
+			t.Errorf("rateLimited(%q) should latch", m)
+		}
+		calls.Lock()
+		calls.limited = ""
+		calls.Unlock()
+	}
+	for _, m := range []string{"no such host", "HTTP 500", "Not Found (HTTP 404)"} {
+		if rateLimited(m) || budgetExhausted() != "" {
+			t.Errorf("rateLimited(%q) = true", m)
 		}
 	}
 }

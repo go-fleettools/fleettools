@@ -39,9 +39,14 @@ const (
 	// nothing will ever start it on its own.
 	NoSchedule Verdict = "no_schedule"
 	// Covered: this organisation has no runner of its own and does not need
-	// one -- a shared runner's autodiscoverFilter reaches it. Reporting these
-	// as missing runners is how a watcher earns 199 lines nobody reads.
+	// one -- a shared runner's autodiscoverFilter reaches it, or the Renovate
+	// App is installed on it. Reporting these as missing runners is how a
+	// watcher earns 199 lines nobody reads.
 	Covered Verdict = "covered"
+	// CoverageUnknown: no runner and no filter reaches it, and whether the
+	// Renovate App does could not be read. An unread installation is unread,
+	// not absent -- the same rule as an autodiscoverFilter that will not parse.
+	CoverageUnknown Verdict = "coverage_unknown"
 	// NoRunner: no runner reaches this organisation at all -- neither one of
 	// its own nor any shared runner's filter. A recency check over runners
 	// structurally cannot see this: there is no runner to be quiet.
@@ -73,12 +78,17 @@ const InactivityLimit = 60 * 24 * time.Hour
 // DefaultSlack is how far behind its own schedule a run may be before the
 // runner counts as stopped.
 //
-// Eight hours is not a round number chosen for comfort. GitHub's scheduler was
-// measured on this fleet running 2.0 to 7.7 hours behind its crons and still
-// growing; a one-hour tolerance would have paged on 91 runners that were
-// working perfectly. quietscan prints the observed lag distribution on every
-// pass so this number keeps being re-checked rather than trusted.
-const DefaultSlack = 8 * time.Hour
+// Twelve hours is not a round number chosen for comfort. GitHub's scheduler was
+// measured on this fleet running 1h59m to 7h56m behind its crons and still
+// growing; a one-hour tolerance would have paged on 113 runners that were
+// working perfectly, and eight hours left four minutes of headroom against the
+// worst lag observed. A pager that goes off on a fleet with nothing wrong is
+// the same failure as an informational section nobody reads, and it costs more.
+//
+// quietscan prints the observed lag distribution on every pass, and says so out
+// loud when the worst lag passes three quarters of this, so the number keeps
+// being re-measured rather than becoming folklore.
+const DefaultSlack = 12 * time.Hour
 
 // DefaultPushWarn is when to start warning about the 60-day clock. All runner
 // repositories here are public, and a .github repository whose only content is
@@ -132,6 +142,10 @@ type Result struct {
 	// fleet-wide by ApplyCoverage.
 	CoveredBy        string
 	CoveredByVerdict Verdict
+	// UnknownWhy says what could not be read, when the verdict is
+	// CoverageUnknown. A watcher that cannot say WHY it does not know is not
+	// much better than one that guesses.
+	UnknownWhy string
 }
 
 // Classify decides one runner's verdict.

@@ -251,3 +251,95 @@ func TestGlobMiddleWildcardAndRaggedQuotes(t *testing.T) {
 		t.Errorf("ragged quotes = %v %q", got, note)
 	}
 }
+
+// The third form of coverage. openweft has no runner, no filter reaches it, and
+// the Renovate App is installed with 16 open pull requests to show for it. A
+// census of workflows structurally cannot see that -- there is no workflow, no
+// cron and no repository to be quiet.
+func TestApplyAppCoverage(t *testing.T) {
+	in := []Result{
+		{Runner: Runner{Org: "openweft"}, Verdict: NoRunner},
+		{Runner: Runner{Org: "go-gitsafe"}, Verdict: NoRunner},
+		{Runner: Runner{Org: "go-gtk"}, Verdict: NoRunner},
+		{Runner: Runner{Org: "go-widgets", Repo: ".github", WorkflowFound: true}, Verdict: Healthy},
+	}
+	out := ApplyAppCoverage(in, map[string]AppCoverage{
+		"openweft":   AppPresent,
+		"go-gitsafe": AppAbsent,
+		"go-gtk":     AppUnread,
+	})
+	want := map[string]struct {
+		v  Verdict
+		by string
+	}{
+		"openweft":   {Covered, AppCoveredBy},
+		"go-gitsafe": {NoRunner, ""},        // read, and genuinely nothing
+		"go-gtk":     {CoverageUnknown, ""}, // refused: unread is not absent
+		"go-widgets": {Healthy, ""},
+	}
+	for _, r := range out {
+		w := want[r.Org]
+		if r.Verdict != w.v || r.CoveredBy != w.by {
+			t.Errorf("%s: %s by %q, want %s by %q", r.Org, r.Verdict, r.CoveredBy, w.v, w.by)
+		}
+	}
+	if CoverageUnknown.Pages() || CoverageUnknown.Live() {
+		t.Error("an unknown is a line to read, not a page, and covers nothing")
+	}
+}
+
+// The App is asked about ONLY where it can change an answer. An organisation
+// already covered by a filter is not re-labelled as covered by the App.
+func TestAppCoverageDoesNotOverrideAFilter(t *testing.T) {
+	in := []Result{{Runner: Runner{Org: "go-ruby-aasm"}, Verdict: Covered,
+		CoveredBy: "go-ruby-stdlib/renovate-runner", CoveredByVerdict: Healthy}}
+	out := ApplyAppCoverage(in, map[string]AppCoverage{"go-ruby-aasm": AppPresent})
+	if out[0].CoveredBy != "go-ruby-stdlib/renovate-runner" {
+		t.Errorf("covered by %q -- a filter answer must not be overwritten", out[0].CoveredBy)
+	}
+	// And an organisation never asked about is left exactly as it was.
+	in = []Result{{Runner: Runner{Org: "never-asked"}, Verdict: NoRunner}}
+	if out := ApplyAppCoverage(in, map[string]AppCoverage{}); out[0].Verdict != NoRunner {
+		t.Errorf("unasked = %s, want no_runner unchanged", out[0].Verdict)
+	}
+}
+
+// The rule the coordinator's rate-limit outage made concrete: a failed read
+// must never become a verdict. If a live runner's filter could not be read, an
+// organisation "no filter reaches" might in fact be reached by it.
+func TestUnreadFilterMakesCoverageUnknownNotAGap(t *testing.T) {
+	live := Result{Runner: Runner{Org: "go-ruby-stdlib", Repo: "renovate-runner",
+		WorkflowFound: true, FilterNote: "config.js: HTTP 403"}, Verdict: Healthy}
+	gap := Result{Runner: Runner{Org: "go-ruby-aasm"}, Verdict: NoRunner}
+
+	unread := UnreadFilters([]Result{live, gap})
+	if len(unread) != 1 || unread[0] != "go-ruby-stdlib/renovate-runner" {
+		t.Fatalf("UnreadFilters = %v", unread)
+	}
+	out := ApplyUncertainty([]Result{live, gap}, unread)
+	if out[1].Verdict != CoverageUnknown {
+		t.Fatalf("gap = %s, want coverage_unknown", out[1].Verdict)
+	}
+	if !contains(out[1].UnknownWhy, "go-ruby-stdlib/renovate-runner") {
+		t.Errorf("UnknownWhy = %q, should name what could not be read", out[1].UnknownWhy)
+	}
+
+	// A DISABLED runner's unread filter creates no doubt: it covers nothing
+	// either way, so the gap stays a gap and the strong statement survives.
+	dead := live
+	dead.Verdict = DisabledManually
+	if u := UnreadFilters([]Result{dead, gap}); len(u) != 0 {
+		t.Errorf("a retired runner's unread filter should raise no doubt: %v", u)
+	}
+	if out := ApplyUncertainty([]Result{dead, gap}, nil); out[1].Verdict != NoRunner {
+		t.Errorf("gap = %s, want no_runner", out[1].Verdict)
+	}
+
+	// A runner whose filter WAS read raises no doubt either.
+	ok := live
+	ok.FilterNote = ""
+	ok.Covers = []string{"go-ruby-*/**"}
+	if u := UnreadFilters([]Result{ok, gap}); len(u) != 0 {
+		t.Errorf("a readable filter should raise no doubt: %v", u)
+	}
+}

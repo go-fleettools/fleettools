@@ -188,7 +188,8 @@
     },
     {
       "_comment": "Matched by NO filter and holding no runner: the real gap the verdict was built for.",
-      "org": "doctored-uncovered"
+      "org": "doctored-uncovered",
+      "app": "absent"
     },
     {
       "_comment": "A retired shared runner covers nothing. Its filter still names an org, and that org must still read no_runner.",
@@ -222,6 +223,16 @@
       "last_run": "2026-08-31T10:04:00Z",
       "covers": [],
       "filter_note": "autodiscoverFilter is computed, not a literal array"
+    },
+    {
+      "_comment": "openweft: no runner, no filter, and the Renovate App installed. Covered by a mechanism no workflow census can see.",
+      "org": "doctored-app-covered",
+      "app": "present"
+    },
+    {
+      "_comment": "No runner, no filter, and the installations endpoint refused. An unread installation is unread, not absent.",
+      "org": "doctored-app-unread",
+      "app": "unread"
     }
   ]
 }

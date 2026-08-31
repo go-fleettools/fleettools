@@ -176,3 +176,92 @@ func orgsOf(rs []Result) []string {
 	}
 	return out
 }
+
+// AppCoverage is what a read of `orgs/<org>/installations` said. A GitHub App
+// installation covers an organisation through a mechanism no workflow census
+// can see: there is no runner, no cron and no repository to be quiet, and
+// Renovate opens pull requests all the same.
+type AppCoverage int
+
+const (
+	// AppUnread: the installations endpoint was not readable. The token may
+	// simply not see installations on this organisation.
+	AppUnread AppCoverage = iota
+	// AppAbsent: read, and no Renovate App is installed.
+	AppAbsent
+	// AppPresent: read, and the Renovate App is installed.
+	AppPresent
+)
+
+// AppCoveredBy is what the covered line says when an App is the reason.
+const AppCoveredBy = "the Renovate App"
+
+// ApplyAppCoverage is the third and last form of coverage, after an
+// organisation's own runner and another runner's autodiscoverFilter. It is
+// consulted ONLY for organisations still reading NoRunner, which is both
+// cheaper and the only place it can change an answer.
+//
+// An organisation whose installations could not be read does not become
+// "uncovered": it becomes CoverageUnknown, with a line of its own. Reading a
+// refusal as an absence is how openweft -- which has the App installed and 16
+// open pull requests from it -- was reported as a gap.
+func ApplyAppCoverage(rs []Result, app map[string]AppCoverage) []Result {
+	out := make([]Result, len(rs))
+	copy(out, rs)
+	for i := range out {
+		if out[i].Verdict != NoRunner {
+			continue
+		}
+		switch app[out[i].Org] {
+		case AppPresent:
+			out[i].Verdict = Covered
+			out[i].CoveredBy = AppCoveredBy
+			out[i].CoveredByVerdict = Healthy
+		case AppUnread:
+			if _, attempted := app[out[i].Org]; attempted {
+				out[i].Verdict = CoverageUnknown
+			}
+		}
+	}
+	return out
+}
+
+// UnreadFilters names every LIVE runner whose autodiscoverFilter could not be
+// read. A disabled runner's unread filter creates no doubt, because a disabled
+// runner covers nothing either way.
+func UnreadFilters(rs []Result) []string {
+	var out []string
+	for _, r := range rs {
+		if r.WorkflowFound && r.Verdict.Live() && r.FilterNote != "" {
+			out = append(out, r.Org+"/"+r.Repo)
+		}
+	}
+	return out
+}
+
+// ApplyUncertainty is the rule that a failed read must never become a verdict.
+//
+// If some live runner's filter could not be read, then an organisation "no
+// filter reaches" might in fact be reached by that filter, and calling it
+// no_runner is a verdict derived from a call that did not answer. It becomes
+// CoverageUnknown instead, naming what could not be read.
+//
+// This matters most exactly when it is least convenient: a rate-limited pass
+// fails many reads at once, and a watcher that turns those failures into
+// "nothing watches these 204 organisations" is worse than one that says
+// nothing at all.
+func ApplyUncertainty(rs []Result, unread []string) []Result {
+	if len(unread) == 0 {
+		return rs
+	}
+	why := "a live runner's filter could not be read: " + strings.Join(unread, ", ")
+	out := make([]Result, len(rs))
+	copy(out, rs)
+	for i := range out {
+		if out[i].Verdict == NoRunner {
+			out[i].Verdict = CoverageUnknown
+			out[i].UnknownWhy = why
+		}
+	}
+	return out
+}

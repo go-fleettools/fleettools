@@ -54,14 +54,23 @@ func TestHealthy(t *testing.T) {
 // remembered.
 func TestSlackTooTightPagesOnHealthy(t *testing.T) {
 	r := healthyRunner()
-	// 16:44 was due; the scheduler is 1h16m behind it, well inside the 2.0-7.7
-	// hours measured on this fleet.
+	// 16:44 was due; the scheduler is 1h16m behind it, well inside the
+	// 1h59m-7h56m measured on this fleet.
 	const late = "2026-08-31T18:00:00Z"
 	if v := Classify(r, at(late), time.Hour, DefaultPushWarn).Verdict; v != Overdue {
-		t.Fatalf("with 1h slack, verdict = %s; the 8h default is not idle", v)
+		t.Fatalf("with 1h slack, verdict = %s; the default is not idle", v)
 	}
 	if v := Classify(r, at(late), DefaultSlack, DefaultPushWarn).Verdict; v != Healthy {
-		t.Fatalf("with 8h slack, verdict = %s", v)
+		t.Fatalf("with the default slack, verdict = %s", v)
+	}
+	// Eight hours left four minutes of headroom against the worst lag observed.
+	// Twelve is the margin, and the lag distribution printed every pass is what
+	// keeps it under review rather than turning it into folklore.
+	if DefaultSlack != 12*time.Hour {
+		t.Errorf("DefaultSlack = %v, want 12h", DefaultSlack)
+	}
+	if worst := 7*time.Hour + 56*time.Minute; worst > DefaultSlack*3/4 {
+		t.Error("the measured worst lag should sit inside three quarters of the slack, or the NOTE fires on a healthy fleet")
 	}
 }
 
@@ -150,8 +159,12 @@ func TestNotYetDueIsNotNeverFired(t *testing.T) {
 	if v := classify(r, "2026-08-30T17:30:00Z").Verdict; v != NotYetDue {
 		t.Fatalf("45 minutes past the first cron: %s", v)
 	}
-	if v := classify(r, "2026-08-31T01:30:00Z").Verdict; v != NeverFired {
-		t.Fatalf("nine hours past the first cron: %s", v)
+	// Only once the whole slack has also passed does silence become a page.
+	if v := classify(r, "2026-08-31T04:00:00Z").Verdict; v != NotYetDue {
+		t.Fatalf("eleven hours past the first cron, inside the slack: %s", v)
+	}
+	if v := classify(r, "2026-08-31T06:00:00Z").Verdict; v != NeverFired {
+		t.Fatalf("thirteen hours past the first cron: %s", v)
 	}
 	// And the first-due time is reported, so "not yet due" can be checked.
 	got := classify(r, "2026-08-30T12:00:00Z")

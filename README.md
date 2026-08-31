@@ -43,10 +43,13 @@ and never compares it to anything: it branches on `conclusion` alone, and
 `status=completed&per_page=1` on a repository with zero runs returns `{}` -- so
 a runner that has NEVER run is invisible to it.
 
-**Eight hours of slack, and the observed lag printed every pass.** GitHub's
-scheduler was measured on this fleet running 1h59m to 7h43m behind its crons. A
-one-hour tolerance would have paged on ninety-three runners that were working
-perfectly. Because that number can drift, `quietscan` prints the distribution on
+**Twelve hours of slack, and the observed lag printed every pass.** GitHub's
+scheduler was measured on this fleet running 1h59m to 7h56m behind its crons. A
+one-hour tolerance would have paged on 113 runners that were working perfectly,
+and the eight hours this shipped with left **four minutes** of headroom against
+the worst lag observed on the second day. A pager that goes off on a fleet with
+nothing wrong is the same failure as an informational section nobody reads, and
+it costs more. Because the number drifts, `quietscan` prints the distribution on
 every pass and says so out loud when the worst lag passes three quarters of the
 slack -- the threshold is a measurement to re-take, not a constant to trust.
 
@@ -106,10 +109,27 @@ fleet-wide:
   a list sliced by an env var, and no string scan can know what that resolves
   to. Treating it as no coverage would be the same mistake in a smaller coat.
 
+**The Renovate App is the third form of coverage**, asked about only where it
+can change an answer -- an organisation with no runner and no filter reaching
+it. `openweft` has the App installed and 16 open pull requests from it, and no
+census of workflows can see that: there is no workflow, no cron and no
+repository to be quiet. A refused installations read is `coverage unknown (App
+visibility)` on a line of its own. **An unread installation is unread, not
+absent**, and that rule now runs the other way too: if a LIVE runner's filter
+could not be read, an organisation "no filter reaches" might in fact be reached
+by it, so it reads `coverage_unknown` rather than becoming a gap.
+
 Both candidate repositories -- `.github` and `renovate-runner` -- are probed in
 every organisation, not just until one answers: `go-attest` holds an active own
 runner beside the retired shared one, and stopping at the first would have
 hidden the retirement.
+
+**Coverage is a snapshot with a time on it.** `go-pdfkit/renovate-runner` was
+retired between two passes an evening apart, and nothing says it could not be
+retired between two calls of one pass. Every runner that others are counted as
+covered by is re-read at the end of the pass; if one moved, coverage is
+re-resolved from scratch and the move is printed. The header carries the window
+the runners were read in, not a single instant.
 
 A watcher that prints 199 non-problems and a latch date that cannot arrive gets
 scrolled past, and then the one real page is scrolled past with it. That is the
@@ -124,6 +144,43 @@ day 60 GitHub disables the schedule; and the disablement makes the silence
 permanent.** Re-enabling expires again. The durable answer is a working
 Renovate, which is why `quietscan` warns at 45 days -- fifteen days of margin --
 and prints the date each repository latches.
+
+## A failed call must never become a verdict
+
+The core budget was exhausted mid-evening with three sessions on the same fleet,
+and **`/rate_limit` reported `core 5000/5000` while a real request returned 403
+with `X-RateLimit-Remaining: 0`**. So the budget is judged by what the API did,
+never by what it says about itself.
+
+The worst possible outcome for a watcher is a verdict derived from a call that
+did not answer -- an outage wearing the mask of a stopped runner. Every refused
+read becomes `unreadable`, which pages, and never `never_fired`, `overdue` or
+`no_runner`. Three specific holes were closed:
+
+- `isNotFound` requires the **404 itself**, not the words around it. A 403 that
+  happens to say "Not Found" would otherwise have read as "this organisation has
+  no runner".
+- A failed `config.js` read used to leave only a note, silently removing a
+  runner's coverage and turning its 204 organisations into gaps. It now makes
+  them `coverage_unknown`, naming the runner that could not be read.
+- A **core** rate-limit refusal fails fast instead of backing off. It refills on
+  the hour, so it will not clear inside a pass, and 1300 calls x 5 sleeps is not
+  a pass but a hang. A **secondary** limit still backs off, because that one is
+  genuinely transient. A rate-limited pass prints a banner saying its verdicts
+  are incomplete.
+
+## What one pass costs, and when not to run it
+
+About **1300 REST calls, roughly 26% of an hour's core budget**: two repository
+probes per organisation, then the workflow, its cron, its `config.js` and its
+last scheduled run per runner, plus one installations read per otherwise-uncovered
+organisation. An archived runner costs one call and a disabled one three -- their
+cron and run history decide nothing, though their filter still does.
+
+**Twice a day is comfortable; a tighter loop is not.** Do not run it beside
+another fleet sweep -- `redscan` and `prmerge` walk 1800 repositories, and two of
+those in one hour will starve one or the other. Three sessions working this fleet
+concurrently exhausted the budget once already.
 
 ## Two things `quietscan` is not
 
@@ -192,8 +249,4 @@ notices. The command around it is at 62%, with `read()` exercised against a
 stub `gh` on PATH -- a wrong field name there would make every runner in the
 fleet look healthy, silently.
 
-One pass costs about 1300 REST calls, roughly 26% of an hour's budget: two
-repository probes per organisation, then the workflow, its cron, its
-`config.js` and its last scheduled run per runner. An archived runner costs one
-call and a disabled one three -- their cron and run history decide nothing,
-though their filter still does.
+See "What one pass costs" above before scheduling it beside another sweep.
