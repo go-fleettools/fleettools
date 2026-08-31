@@ -9,6 +9,7 @@ that cost a wrong answer to learn.
 | `cmd/redscan` | Every default branch whose last run failed. One pass: 1819 repositories, 44 red — **all of them stale Renovate lanes** whose last run predated a token rotation by three hours. A red branch is not a broken one; check WHEN it last ran. |
 | `cmd/prscan` | Open pull requests across every org. Batches ~15 `org:` qualifiers per search query, so ~20 calls instead of 320 — the search API is rate-limited far more tightly than REST. |
 | `cmd/prmerge` | Merges dependency PRs that are mergeable **and** fully green. |
+| `cmd/quietscan` | Every organisation whose Renovate runner has **stopped**. `redscan` asks whether the last run FAILED; a runner that stopped does not fail, it says nothing. This is the other half of that lesson: check WHEN it last ran. |
 | `scripts/tidyall.sh` | Runs `go mod tidy` on a PR branch and pushes only if it changed something AND the tree still builds. |
 | `scripts/wfmerge.sh` | **Refuses by default.** It lands workflow-touching PRs by pushing to the default branch, which `git-pre-push-guard` exists to stop. The fix is `gh auth refresh -s workflow`, once. |
 
@@ -35,6 +36,84 @@ sub-module keeps its own, and a lane that vets it fails while the root module is
 spotless (`go-widgets/toolkit` has `rougelex/`). It tolerates modules that
 cannot resolve standalone, but requires the ROOT one to tidy.
 
+## What `quietscan` is, and the five rules it will not soften
+
+Nothing else in the fleet queries run recency. `redscan` fetches `created_at`
+and never compares it to anything: it branches on `conclusion` alone, and
+`status=completed&per_page=1` on a repository with zero runs returns `{}` -- so
+a runner that has NEVER run is invisible to it.
+
+**Eight hours of slack, and the observed lag printed every pass.** GitHub's
+scheduler was measured on this fleet running 1h59m to 7h43m behind its crons. A
+one-hour tolerance would have paged on ninety-three runners that were working
+perfectly. Because that number can drift, `quietscan` prints the distribution on
+every pass and says so out loud when the worst lag passes three quarters of the
+slack -- the threshold is a measurement to re-take, not a constant to trust.
+
+**Age against each runner's OWN cron, never a constant.** The fleet's runners
+are staggered across 24 hours -- `0 4`, `44 16`, `11 15`, `33 12` -- so the
+period is read from each workflow's own `cron:` line.
+
+**"Not yet due" is a different verdict from "never fired."** Conflating them
+produced a false alarm about 26 dead runners that were merely queued behind a
+schedule they had not reached. The birth date is keyed on the workflow's
+`created_at`, and the classifier starts its clock at the last run, falling back
+to the birth date ONLY when there has never been one. Never on the last commit
+to the workflow file: a healthy Renovate rewrites that file every time it bumps
+its own action pin, so a monitor keyed on the file's mtime resets its own clock
+whenever Renovate works, and goes blind precisely when things are fine. Taking
+the LATER of birth and last run reintroduces the same blindness by another door,
+and did, until a test caught it.
+
+**Four verdicts, four different fixes, never one total.** `archived` (no pull
+request can fix it), `disabled_inactivity` (re-enable -- and it expires again in
+60 days), `disabled_manually` (may be entirely legitimate), and the runner that
+simply stopped. Each section names its own fix.
+
+**Driven from the ORGANISATION list, not the runner list.** A recency check over
+runners structurally cannot see an organisation that has no runner to be quiet:
+one pass found 198 organisations holding a `.github` repository with no runner in
+it at all, and 9 with no such repository.
+
+## The trap `quietscan` exists to catch before it latches
+
+All runner repositories here are public, so GitHub's 60-day inactivity rule
+applies, and a `.github` repository whose only content is the runner receives no
+push except Renovate's own. **If Renovate stops, the repository goes quiet; at
+day 60 GitHub disables the schedule; and the disablement makes the silence
+permanent.** Re-enabling expires again. The durable answer is a working
+Renovate, which is why `quietscan` warns at 45 days -- fifteen days of margin --
+and prints the date each repository latches.
+
+## Two things `quietscan` is not
+
+**It is not a scheduled GitHub Actions workflow.** A watcher that shares the
+failure mode it watches for is not a watcher. Run it from this machine like its
+three siblings, or from `launchd` if it is to be unattended. It exits 1 when
+anything pages.
+
+**It never dispatches a run.** A dispatch opens real pull requests across an
+organisation, and `actions/workflows/{id}/dispatches` is one path segment from
+the runs listing it reads all day. So every call passes through `readOnly`,
+which allows `gh api` and nothing else -- an allowlist of one, because the first
+version of that gate was a denylist of shapes I had thought of, and its own test
+caught `gh workflow run` walking straight past it.
+
+**The runs listing is filtered to `event=schedule`**, and that filter is the
+whole tool. On the pass that found them, twelve runners that had never once
+started on their own carried *successful* `workflow_dispatch` runs from rollout
+day. Any check that counts "a run" rather than "a scheduled run" calls all
+twelve healthy.
+
+    quietscan                                    # the live fleet
+    quietscan -all                               # every runner, not just findings
+    quietscan -fixture cmd/quietscan/testdata/broken.json -all
+
+The fixture is how the watcher is proved: doctored copies of one real runner,
+each changed in exactly one way, so the verdict names what was changed. A
+watcher that has never fired in anger is not known to work, and this one's whole
+purpose is to speak when everything looks quiet.
+
 ## The failure these were built for
 
 Renovate writes the new `go.sum` lines and **leaves the superseded ones**, so any
@@ -59,4 +138,16 @@ case.
 **The fix is one command, and it is not automatable**: `gh auth refresh -s
 workflow` opens a browser. Until it is run, these pull requests wait.
 
+## Layout and gates
+
+    quiet/           the cron reader and the verdict, with its tests
+    cmd/<name>/      one sweep each
+
     go build ./... && go vet ./...
+    go test ./...
+
+`quiet` is held at 100% of statements, the standard `gitsafe/protect` and
+`gitsafe/redact` hold: it is the part that can be wrong in a way nobody
+notices. The command around it is at 62%, with `read()` exercised against a
+stub `gh` on PATH -- a wrong field name there would make every runner in the
+fleet look healthy, silently.

@@ -1,0 +1,82 @@
+{
+  "_comment": "Doctored copies of one real runner (go-widgets/.github, born 2026-08-30 08:31Z, cron 0 4 * * *, last scheduled run 2026-08-31 10:32Z). Each entry changes exactly ONE thing, so the verdict names what was changed. A watcher that has never fired in anger is not known to work.",
+  "now": "2026-08-31T14:00:00Z",
+  "runners": [
+    {
+      "org": "healthy-control",
+      "repo_exists": true, "pushed_at": "2026-08-31T10:33:41Z",
+      "workflow_found": true, "workflow_state": "active",
+      "born": "2026-08-30T08:31:48Z", "crons": ["0 4 * * *"],
+      "last_run": "2026-08-31T10:32:36Z"
+    },
+    {
+      "org": "doctored-overdue",
+      "repo_exists": true, "pushed_at": "2026-08-28T10:33:41Z",
+      "workflow_found": true, "workflow_state": "active",
+      "born": "2026-08-30T08:31:48Z", "crons": ["0 4 * * *"],
+      "last_run": "2026-08-28T10:32:36Z"
+    },
+    {
+      "org": "doctored-never-fired",
+      "repo_exists": true, "pushed_at": "2026-08-24T10:33:41Z",
+      "workflow_found": true, "workflow_state": "active",
+      "born": "2026-08-24T08:31:48Z", "crons": ["0 4 * * *"],
+      "last_run": ""
+    },
+    {
+      "org": "doctored-not-yet-due",
+      "repo_exists": true, "pushed_at": "2026-08-31T10:33:41Z",
+      "workflow_found": true, "workflow_state": "active",
+      "born": "2026-08-31T09:00:00Z", "crons": ["44 16 * * *"],
+      "last_run": ""
+    },
+    {
+      "org": "doctored-archived",
+      "repo_exists": true, "archived": true, "pushed_at": "2026-06-01T10:33:41Z",
+      "workflow_found": true, "workflow_state": "active",
+      "born": "2026-08-30T08:31:48Z", "crons": ["0 4 * * *"],
+      "last_run": "2026-06-01T10:32:36Z"
+    },
+    {
+      "org": "doctored-disabled-inactivity",
+      "repo_exists": true, "pushed_at": "2026-06-20T10:33:41Z",
+      "workflow_found": true, "workflow_state": "disabled_inactivity",
+      "born": "2026-05-30T08:31:48Z", "crons": ["0 4 * * *"],
+      "last_run": "2026-06-20T10:32:36Z"
+    },
+    {
+      "org": "doctored-disabled-manually",
+      "repo_exists": true, "pushed_at": "2026-08-01T10:33:41Z",
+      "workflow_found": true, "workflow_state": "disabled_manually",
+      "born": "2026-05-30T08:31:48Z", "crons": ["0 4 * * *"],
+      "last_run": "2026-08-01T10:32:36Z"
+    },
+    {
+      "org": "doctored-no-cron",
+      "repo_exists": true, "pushed_at": "2026-08-31T10:33:41Z",
+      "workflow_found": true, "workflow_state": "active",
+      "born": "2026-08-30T08:31:48Z", "crons": [],
+      "last_run": ""
+    },
+    {
+      "org": "doctored-no-runner",
+      "repo_exists": true, "pushed_at": "2026-06-27T22:20:06Z",
+      "workflow_found": false
+    },
+    {
+      "org": "doctored-no-runner-repo"
+    },
+    {
+      "org": "doctored-unreadable",
+      "read_error": "gh: HTTP 503 (api.github.com)"
+    },
+    {
+      "_comment": "The trap keyed on the wrong clock: a runner that stopped eleven days ago, whose workflow FILE was rewritten an hour ago by Renovate's own action bump. A monitor keyed on file mtime reads this as fresh; born is keyed on the workflow's creation, so it does not.",
+      "org": "doctored-stale-run-fresh-file",
+      "repo_exists": true, "pushed_at": "2026-08-31T13:00:00Z",
+      "workflow_found": true, "workflow_state": "active",
+      "born": "2026-08-31T13:00:00Z", "crons": ["0 4 * * *"],
+      "last_run": "2026-08-20T10:32:36Z"
+    }
+  ]
+}
