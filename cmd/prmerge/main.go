@@ -72,6 +72,32 @@ type prRef struct {
 // different answers: a scope refusal waits on `gh auth refresh -s workflow`,
 // a conflict waits on Renovate rebasing, and a moved base only wants the sweep
 // run again.
+// gh2 runs a command other than gh, with the same backoff.
+func gh2(name string, args ...string) ([]byte, error) {
+	for attempt := 0; ; attempt++ {
+		cmd := exec.Command(name, args...)
+		var errb strings.Builder
+		cmd.Stderr = &errb
+		out, err := cmd.Output()
+		if err == nil {
+			return out, nil
+		}
+		msg := errb.String() + string(out)
+		transient := strings.Contains(msg, "no route to host") ||
+			strings.Contains(msg, "operation timed out") ||
+			strings.Contains(msg, "connection reset") ||
+			strings.Contains(msg, "i/o timeout") ||
+			strings.Contains(msg, "error connecting to") ||
+			strings.Contains(msg, "secondary rate") ||
+			strings.Contains(msg, "rate limit")
+		if attempt < 5 && transient {
+			time.Sleep(time.Duration(20*(attempt+1)) * time.Second)
+			continue
+		}
+		return nil, fmt.Errorf("%s", strings.TrimSpace(msg))
+	}
+}
+
 func refusalKind(err error) string {
 	m := strings.ToLower(err.Error())
 	switch {
@@ -348,7 +374,13 @@ func main() {
 				return
 			}
 
-			if _, err := gh("pr", "merge", fmt.Sprint(r.num), "--repo", r.repo, "--squash", "--delete-branch"); err != nil {
+			// ghmerge, not `gh pr merge`. Two reasons, both learned the hard
+			// way: it serves ~/.github-token, which carries the `workflow`
+			// scope that gh's keyring token lacks -- that alone unblocks the
+			// largest class in the fleet, 78 green pull requests in one pass --
+			// and it refuses unless a check actually RAN and passed, so "nothing
+			// is failing" cannot pass for "everything passed".
+			if _, err := gh2("ghmerge", r.repo, fmt.Sprint(r.num)); err != nil {
 				mu.Lock()
 				// Break the refusals down. "merge-refused: 83" hid three
 				// unrelated causes behind one number, and twice today I read a
