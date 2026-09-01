@@ -89,7 +89,14 @@ func gh2(name string, args ...string) ([]byte, error) {
 			strings.Contains(msg, "i/o timeout") ||
 			strings.Contains(msg, "error connecting to") ||
 			strings.Contains(msg, "secondary rate") ||
-			strings.Contains(msg, "rate limit")
+			strings.Contains(msg, "rate limit") ||
+			// 405 on a merge means GitHub has not finished computing
+			// mergeability yet -- the PR reads mergeable=null, and the same
+			// merge succeeds a minute later. Measured: 31 of these in one
+			// pass, and the first one retried by hand went through with 42
+			// checks all green.
+			strings.Contains(msg, "405") ||
+			strings.Contains(msg, "Method Not Allowed")
 		if attempt < 5 && transient {
 			time.Sleep(time.Duration(20*(attempt+1)) * time.Second)
 			continue
@@ -111,6 +118,8 @@ func refusalKind(err error) string {
 		return "requirements-unmet"
 	case strings.Contains(m, "review"):
 		return "review-required"
+	case strings.Contains(m, "405"), strings.Contains(m, "method not allowed"):
+		return "mergeability-not-computed-yet"
 	default:
 		return "other"
 	}
