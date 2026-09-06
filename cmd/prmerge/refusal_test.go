@@ -21,3 +21,23 @@ func TestRefusalKindSeparatesCausesThatNeedDifferentAnswers(t *testing.T) {
 		}
 	}
 }
+
+func TestTheTwoRateLimitsWantOppositeTreatment(t *testing.T) {
+	// A sweep of 206 candidates makes thousands of calls. Treating the hourly
+	// budget as a burst brake slept five minutes per call and reached nothing:
+	// the budget resets at a fixed time, not after a backoff.
+	for _, c := range []struct {
+		msg  string
+		want bool
+	}{
+		{"You have exceeded a secondary rate limit", true},
+		{"was submitted too quickly", true},
+		{"triggered an abuse detection mechanism", true},
+		{"API rate limit exceeded for user ID 11405852.", false},
+		{"gh: not logged in", false},
+	} {
+		if got := throttled(c.msg); got != c.want {
+			t.Errorf("throttled(%q) = %v, want %v", c.msg, got, c.want)
+		}
+	}
+}

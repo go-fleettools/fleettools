@@ -45,7 +45,7 @@ func gh(args ...string) ([]byte, error) {
 			strings.Contains(msg, "error connecting to") ||
 			strings.Contains(msg, "no such host") ||
 			strings.Contains(msg, "check your internet connection")
-		if attempt < 5 && (transient || strings.Contains(msg, "secondary rate") || strings.Contains(msg, "abuse") || strings.Contains(msg, "too quickly") || strings.Contains(msg, "rate limit")) {
+		if attempt < 5 && (transient || throttled(msg)) {
 			time.Sleep(time.Duration(20*(attempt+1)) * time.Second)
 			continue
 		}
@@ -88,8 +88,7 @@ func gh2(name string, args ...string) ([]byte, error) {
 			strings.Contains(msg, "connection reset") ||
 			strings.Contains(msg, "i/o timeout") ||
 			strings.Contains(msg, "error connecting to") ||
-			strings.Contains(msg, "secondary rate") ||
-			strings.Contains(msg, "rate limit") ||
+			throttled(msg) ||
 			// 405 on a merge means GitHub has not finished computing
 			// mergeability yet -- the PR reads mergeable=null, and the same
 			// merge succeeds a minute later. Measured: 31 of these in one
@@ -182,6 +181,23 @@ func ghPR(repo string, num int) ([]byte, error) {
 // opposite: it looks at what someone else has claimed and stays out. This is the
 // discipline that would have kept me out of go-pkgx/packages while a build
 // campaign was running there.
+// throttled says the wait is worth taking.
+//
+// The SECONDARY rate limit is a burst brake: it lifts in seconds and waiting is
+// the whole remedy. The PRIMARY one is an hourly budget that resets at a fixed
+// time, and no short backoff reaches it -- matching "rate limit" caught both,
+// so a spent budget slept 20+40+60+80+100 seconds and failed anyway, once per
+// call.
+func throttled(msg string) bool {
+	if strings.Contains(msg, "API rate limit exceeded") {
+		return false
+	}
+	return strings.Contains(msg, "secondary rate") ||
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "abuse") ||
+		strings.Contains(msg, "too quickly")
+}
+
 func heldByOthers() map[string]string {
 	out := map[string]string{}
 	dir := os.Getenv("AGENTSYNC_DIR")
@@ -200,6 +216,14 @@ func heldByOthers() map[string]string {
 	for _, e := range entries {
 		b, err := os.ReadFile(filepath.Join(dir, "locks", e.Name()))
 		if err != nil {
+			// A lease that cannot be READ is not a lease that is absent, and
+			// this function exists to keep the sweep out of repositories
+			// another session is inside. Which repository it named cannot be
+			// recovered -- the name is in the file that would not open -- so
+			// it is said out loud instead of silently counted as free.
+			fmt.Fprintf(os.Stderr,
+				"WARNING: lease %s could not be read; a repository somebody holds may be swept\n",
+				e.Name())
 			continue
 		}
 		var l struct {
