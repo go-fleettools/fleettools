@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sort"
@@ -40,11 +41,16 @@ type repo struct {
 
 type red struct{ repo, wf, when string }
 
-func main() {
+func main() { os.Exit(run(os.Stdout, os.Stderr)) }
+
+// run is the whole program, so that a test can drive it and read what it says.
+// It returns the exit status: non-zero when the sweep could not read the whole
+// fleet, which is not the same as finding nothing wrong with it.
+func run(stdout, stderr io.Writer) int {
 	out, err := gh("api", "user/orgs", "--paginate", "--jq", ".[].login")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "orgs:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "orgs:", err)
+		return 1
 	}
 	var orgs []string
 	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -52,10 +58,11 @@ func main() {
 			orgs = append(orgs, l)
 		}
 	}
-	fmt.Printf("orgs: %d\n", len(orgs))
+	fmt.Fprintf(stdout, "orgs: %d\n", len(orgs))
 
 	var mu sync.Mutex
 	var repos []repo
+	var unreadOrgs []string
 	sem := make(chan struct{}, 6)
 	var wg sync.WaitGroup
 	for _, o := range orgs {
@@ -66,6 +73,13 @@ func main() {
 			defer func() { <-sem }()
 			b, err := gh("api", "orgs/"+o+"/repos?per_page=100", "--paginate")
 			if err != nil {
+				// An organisation whose repositories could not be listed
+				// contributes none, and the total below would read as its
+				// whole population. Same failure as the one over the runs,
+				// one level up.
+				mu.Lock()
+				unreadOrgs = append(unreadOrgs, o+": "+firstLine(err.Error()))
+				mu.Unlock()
 				return
 			}
 			dec := json.NewDecoder(strings.NewReader(string(b)))
@@ -85,7 +99,7 @@ func main() {
 		}(o)
 	}
 	wg.Wait()
-	fmt.Printf("repos: %d\n", len(repos))
+	fmt.Fprintf(stdout, "repos: %d\n", len(repos))
 
 	var reds []red
 	var unread []string
@@ -123,13 +137,13 @@ func main() {
 	wg.Wait()
 
 	sort.Slice(reds, func(i, j int) bool { return reds[i].repo < reds[j].repo })
-	fmt.Printf("checked: %d of %d   RED default branches: %d\n", checked, len(repos), len(reds))
+	fmt.Fprintf(stdout, "checked: %d of %d   RED default branches: %d\n", checked, len(repos), len(reds))
 	for _, r := range reds {
 		w := r.when
 		if len(w) > 16 {
 			w = w[:16]
 		}
-		fmt.Printf("  %-48s %-26s %s\n", r.repo, r.wf, w)
+		fmt.Fprintf(stdout, "  %-48s %-26s %s\n", r.repo, r.wf, w)
 	}
 
 	// A pass that could not read is not a pass that found nothing.
@@ -140,18 +154,30 @@ func main() {
 	// the primary rate limit, silently, because the error was dropped and only
 	// the successes were counted. Re-run with a full budget the same afternoon:
 	// 1934 of 1934, and TWO red branches that the reassuring zero had hidden.
-	if len(unread) > 0 {
-		sort.Strings(unread)
-		fmt.Printf("\nINCOMPLETE: %d of %d repositories could not be read, so this says\n"+
-			"nothing about them. What follows is a sample of why.\n", len(unread), len(repos))
-		for i, u := range unread {
-			if i == 5 {
-				fmt.Printf("  ... and %d more\n", len(unread)-5)
-				break
-			}
-			fmt.Printf("  %s\n", u)
+	if len(unreadOrgs) == 0 && len(unread) == 0 {
+		return 0
+	}
+	fmt.Fprintln(stdout, "\nINCOMPLETE: this pass says nothing about what follows.")
+	report(stdout, "organisations whose repositories could not be listed", unreadOrgs, len(orgs))
+	report(stdout, "repositories whose latest run could not be read", unread, len(repos))
+	return 1
+}
+
+// report names what could not be read, with a sample of why. A count alone
+// invites the reader to assume a cause; the reasons are what tell a rate limit
+// from a permission.
+func report(w io.Writer, what string, items []string, of int) {
+	if len(items) == 0 {
+		return
+	}
+	sort.Strings(items)
+	fmt.Fprintf(w, "  %d of %d %s:\n", len(items), of, what)
+	for i, it := range items {
+		if i == 5 {
+			fmt.Fprintf(w, "    ... and %d more\n", len(items)-5)
+			break
 		}
-		os.Exit(1)
+		fmt.Fprintf(w, "    %s\n", it)
 	}
 }
 
