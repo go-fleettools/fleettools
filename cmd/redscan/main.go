@@ -88,6 +88,7 @@ func main() {
 	fmt.Printf("repos: %d\n", len(repos))
 
 	var reds []red
+	var unread []string
 	checked := 0
 	for _, r := range repos {
 		wg.Add(1)
@@ -99,10 +100,16 @@ func main() {
 				"repos/"+r.FullName+"/actions/runs?branch="+r.Default+"&status=completed&per_page=1",
 				"--jq", "(.workflow_runs[0] // {}) | {c: (.conclusion // \"\"), n: (.name // \"\"), d: (.created_at // \"\")}")
 			if err != nil {
+				mu.Lock()
+				unread = append(unread, r.FullName+": "+firstLine(err.Error()))
+				mu.Unlock()
 				return
 			}
 			var v struct{ C, N, D string }
-			if json.Unmarshal(b, &v) != nil {
+			if err := json.Unmarshal(b, &v); err != nil {
+				mu.Lock()
+				unread = append(unread, r.FullName+": "+firstLine(err.Error()))
+				mu.Unlock()
 				return
 			}
 			mu.Lock()
@@ -116,7 +123,7 @@ func main() {
 	wg.Wait()
 
 	sort.Slice(reds, func(i, j int) bool { return reds[i].repo < reds[j].repo })
-	fmt.Printf("checked: %d   RED default branches: %d\n", checked, len(reds))
+	fmt.Printf("checked: %d of %d   RED default branches: %d\n", checked, len(repos), len(reds))
 	for _, r := range reds {
 		w := r.when
 		if len(w) > 16 {
@@ -124,4 +131,38 @@ func main() {
 		}
 		fmt.Printf("  %-48s %-26s %s\n", r.repo, r.wf, w)
 	}
+
+	// A pass that could not read is not a pass that found nothing.
+	//
+	// This printed "checked: 284   RED default branches: 0" over a fleet of
+	// 1933, and it was read as "the fleet is green" -- by the session that
+	// wrote the tool. The 1649 repositories it could not reach had failed on
+	// the primary rate limit, silently, because the error was dropped and only
+	// the successes were counted. Re-run with a full budget the same afternoon:
+	// 1934 of 1934, and TWO red branches that the reassuring zero had hidden.
+	if len(unread) > 0 {
+		sort.Strings(unread)
+		fmt.Printf("\nINCOMPLETE: %d of %d repositories could not be read, so this says\n"+
+			"nothing about them. What follows is a sample of why.\n", len(unread), len(repos))
+		for i, u := range unread {
+			if i == 5 {
+				fmt.Printf("  ... and %d more\n", len(unread)-5)
+				break
+			}
+			fmt.Printf("  %s\n", u)
+		}
+		os.Exit(1)
+	}
+}
+
+// firstLine keeps an error readable in a list of them: gh prints a paragraph
+// about rate limits, and the first line is the part that differs.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 90 {
+		s = s[:90] + "..."
+	}
+	return strings.TrimSpace(s)
 }
