@@ -81,6 +81,21 @@ type ahead struct {
 	commits   int
 }
 
+// orphaned is what "no common ancestor" means, and it is not a failed read.
+//
+// The tag predates a rewrite of the branch's history — a purge by blob id
+// leaves the old line in place and the tag on it. Measured on
+// go-filesystems/xfs: v0.1.0 points at a coherent 104-file tree of the same
+// module from 2026-08-05, `go get ...@v0.1.0` serves it, and it is the
+// repository's ONLY tag. So consumers are not broken; they are FROZEN, and no
+// `go get -u` will ever move them, because there is no later version on the
+// history they are on.
+//
+// It is worse than being merely ahead and reads the same from the outside,
+// which is why it gets a line of its own rather than a place among the reads
+// that failed.
+const noCommonAncestor = "No common ancestor"
+
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 // run is the whole program, so a test can drive it and read what it says.
@@ -138,7 +153,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	wg.Wait()
 	fmt.Fprintf(stdout, "repos: %d\n", len(repos))
 
-	var aheads []ahead
+	var aheads, orphans []ahead
 	var unread []string
 	tagged, checked := 0, 0
 	for _, r := range repos {
@@ -170,7 +185,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			n, err := aheadBy(r, tag)
 			if err != nil {
 				mu.Lock()
-				unread = append(unread, r.FullName+": "+firstLine(err.Error()))
+				if strings.Contains(err.Error(), noCommonAncestor) {
+					checked++
+					orphans = append(orphans, ahead{r.FullName, tag, 0})
+				} else {
+					unread = append(unread, r.FullName+": "+firstLine(err.Error()))
+				}
 				mu.Unlock()
 				return
 			}
@@ -195,6 +215,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	for _, a := range aheads {
 		fmt.Fprintf(stdout, "  %-46s latest tag %-10s +%d commit(s) its consumers cannot reach\n",
 			a.repo, a.tag, a.commits)
+	}
+	if len(orphans) > 0 {
+		sort.Slice(orphans, func(i, j int) bool { return orphans[i].repo < orphans[j].repo })
+		fmt.Fprintf(stdout, "\nFROZEN: %d module(s) whose only tag sits on a history the branch no longer\n"+
+			"shares. The tag still resolves, so nothing looks wrong -- but it names a tree\n"+
+			"from before the rewrite, and no `go get -u` will ever move off it.\n", len(orphans))
+		for _, a := range orphans {
+			fmt.Fprintf(stdout, "  %-46s latest tag %s\n", a.repo, a.tag)
+		}
 	}
 
 	// A pass that could not read is not a pass that found nothing.

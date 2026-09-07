@@ -252,3 +252,39 @@ func TestKeepingAnErrorReadableInAList(t *testing.T) {
 		t.Errorf("firstLine(short) = %q", got)
 	}
 }
+
+func TestATagOnAHistoryTheBranchNoLongerSharesIsFrozenNotUnreadable(t *testing.T) {
+	// "No common ancestor" is a STATE, not a failed read. The tag predates a
+	// rewrite of the branch's history; it still resolves, so nothing looks
+	// wrong from the outside — but it names a tree from before the rewrite and
+	// no `go get -u` will move off it. Measured on go-filesystems/xfs: v0.1.0
+	// serves a coherent 104-file tree from 2026-08-05 and is its only tag.
+	withFakeGH(t, oneOrgTwoRepos+`
+  *compare*) echo "gh: No common ancestor between v0.1.0 and main. (HTTP 404)" >&2; exit 1 ;;
+esac`)
+	withRemote(t, map[string]string{
+		"https://github.com/acme/moved": "aaa\trefs/heads/main\nbbb\trefs/tags/v0.1.0\n",
+		"https://github.com/acme/still": "ccc\trefs/heads/main\nccc\trefs/tags/v0.1.0\n",
+	})
+	var out, errOut strings.Builder
+	code := run([]string{"-orgs", "acme"}, &out, &errOut)
+	got := out.String()
+	// It is counted as CHECKED: the state is known, not missing.
+	if !strings.Contains(got, "checked: 2 of 2") {
+		t.Errorf("a frozen module was counted as unread:\n%s", got)
+	}
+	if strings.Contains(got, "INCOMPLETE") {
+		t.Errorf("a known state was reported as a gap:\n%s", got)
+	}
+	if code != 0 {
+		t.Errorf("exit %d: a complete pass that found a frozen module", code)
+	}
+	if !strings.Contains(got, "FROZEN: 1 module") || !strings.Contains(got, "acme/moved") {
+		t.Errorf("the frozen module is not named:\n%s", got)
+	}
+	// And it is NOT counted among the ones merely ahead, which have an
+	// ancestry a maintainer can reason about.
+	if !strings.Contains(got, "AHEAD of their latest tag: 0") {
+		t.Errorf("a frozen module was counted as ahead:\n%s", got)
+	}
+}
