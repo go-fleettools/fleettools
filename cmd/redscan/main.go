@@ -103,32 +103,47 @@ func run(stdout, stderr io.Writer) int {
 
 	var reds []red
 	var unread []string
-	checked := 0
+	checked, rechecked := 0, 0
 	for _, r := range repos {
 		wg.Add(1)
 		go func(r repo) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			b, err := gh("api",
-				"repos/"+r.FullName+"/actions/runs?branch="+r.Default+"&status=completed&per_page=1",
-				"--jq", "(.workflow_runs[0] // {}) | {c: (.conclusion // \"\"), n: (.name // \"\"), d: (.created_at // \"\")}")
+			v, err := latestRun(r)
 			if err != nil {
 				mu.Lock()
 				unread = append(unread, r.FullName+": "+firstLine(err.Error()))
 				mu.Unlock()
 				return
 			}
-			var v struct{ C, N, D string }
-			if err := json.Unmarshal(b, &v); err != nil {
-				mu.Lock()
-				unread = append(unread, r.FullName+": "+firstLine(err.Error()))
-				mu.Unlock()
-				return
+			if isRed(v.C) {
+				// Ask a second time before believing it.
+				//
+				// This endpoint has twice handed back a MONTHS-OLD run as the
+				// newest: openweft/terraform-provider-weft reported failing on
+				// 2026-05-30 and openweft/weft-app-gtk on 2026-06-20, while the
+				// same query -- rerun 45 times, 40 of them at this sweep's own
+				// concurrency -- answered "success" from August every time. The
+				// record it returned was internally consistent, the workflow
+				// name matching that old run rather than the current one, so it
+				// was one stale page and not two crossed fields.
+				//
+				// A red is rare (2 to 7 of 1936) and it sends somebody looking,
+				// so one extra call is nothing against a three-month phantom
+				// outage. Take whichever answer names the LATER run: RFC 3339 in
+				// Z sorts lexically, and a second reading that is older than the
+				// first is the stale one.
+				if again, err := latestRun(r); err == nil && again.D > v.D {
+					mu.Lock()
+					rechecked++
+					mu.Unlock()
+					v = again
+				}
 			}
 			mu.Lock()
 			checked++
-			if v.C == "failure" || v.C == "timed_out" {
+			if isRed(v.C) {
 				reds = append(reds, red{r.FullName, v.N, v.D})
 			}
 			mu.Unlock()
@@ -138,6 +153,11 @@ func run(stdout, stderr io.Writer) int {
 
 	sort.Slice(reds, func(i, j int) bool { return reds[i].repo < reds[j].repo })
 	fmt.Fprintf(stdout, "checked: %d of %d   RED default branches: %d\n", checked, len(repos), len(reds))
+	if rechecked > 0 {
+		// Said out loud rather than swallowed: a sweep that silently repaired
+		// its own readings would hide how often the endpoint does this.
+		fmt.Fprintf(stdout, "  (%d red verdict(s) withdrawn on a second reading — a stale page)\n", rechecked)
+	}
 	for _, r := range reds {
 		w := r.when
 		if len(w) > 16 {
@@ -161,6 +181,23 @@ func run(stdout, stderr io.Writer) int {
 	report(stdout, "organisations whose repositories could not be listed", unreadOrgs, len(orgs))
 	report(stdout, "repositories whose latest run could not be read", unread, len(repos))
 	return 1
+}
+
+// latestRun asks for the newest completed run on a repository's default branch.
+func latestRun(r repo) (struct{ C, N, D string }, error) {
+	var v struct{ C, N, D string }
+	b, err := gh("api",
+		"repos/"+r.FullName+"/actions/runs?branch="+r.Default+"&status=completed&per_page=1",
+		"--jq", "(.workflow_runs[0] // {}) | {c: (.conclusion // \"\"), n: (.name // \"\"), d: (.created_at // \"\")}")
+	if err != nil {
+		return v, err
+	}
+	return v, json.Unmarshal(b, &v)
+}
+
+// isRed reports whether a run's conclusion is one a person should look at.
+func isRed(conclusion string) bool {
+	return conclusion == "failure" || conclusion == "timed_out"
 }
 
 // report names what could not be read, with a sample of why. A count alone

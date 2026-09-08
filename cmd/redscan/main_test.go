@@ -163,3 +163,60 @@ esac`)
 		t.Errorf("%d reasons printed, want 5:\n%s", strings.Count(got, "rate limit"), got)
 	}
 }
+
+// TestAStaleRedIsWithdrawnOnTheSecondReading is the failure this guards.
+//
+// The runs endpoint has twice handed back a MONTHS-OLD run as the newest:
+// openweft/terraform-provider-weft reported failing on 2026-05-30 and
+// openweft/weft-app-gtk on 2026-06-20, while the same query -- rerun 45 times,
+// 40 of them at this sweep's own concurrency -- answered "success" from August
+// every time. Each phantom sent somebody looking for a three-month outage that
+// was not there.
+func TestAStaleRedIsWithdrawnOnTheSecondReading(t *testing.T) {
+	count := t.TempDir() + "/n"
+	t.Setenv("REDSCAN_TEST_COUNT", count)
+	withFakeGH(t, oneOrgTwoRepos+`
+  *acme/green/actions/runs*) echo '{"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}' ;;
+  *acme/red/actions/runs*)
+    n=$(cat "$REDSCAN_TEST_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$REDSCAN_TEST_COUNT"
+    if [ "$n" = 1 ]; then echo '{"c":"failure","n":"CI","d":"2026-06-20T06:33:00Z"}'
+    else echo '{"c":"success","n":"CI","d":"2026-08-18T10:02:00Z"}'; fi ;;
+esac`)
+	var out, errOut strings.Builder
+	if code := run(&out, &errOut); code != 0 {
+		t.Errorf("exit = %d, want 0: %s", code, errOut.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "RED default branches: 0") {
+		t.Errorf("a stale reading was reported as a red branch:\n%s", got)
+	}
+	// Said out loud: a sweep that quietly repaired itself would hide how often
+	// the endpoint does this.
+	if !strings.Contains(got, "1 red verdict(s) withdrawn") {
+		t.Errorf("the withdrawal was not reported:\n%s", got)
+	}
+}
+
+// TestASecondReadingThatIsOlderDoesNotOverruleTheFirst: the rule is "take the
+// LATER run", not "take the second answer". A stale page on the retry must not
+// erase a red that is real.
+func TestASecondReadingThatIsOlderDoesNotOverruleTheFirst(t *testing.T) {
+	count := t.TempDir() + "/n"
+	t.Setenv("REDSCAN_TEST_COUNT", count)
+	withFakeGH(t, oneOrgTwoRepos+`
+  *acme/green/actions/runs*) echo '{"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}' ;;
+  *acme/red/actions/runs*)
+    n=$(cat "$REDSCAN_TEST_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$REDSCAN_TEST_COUNT"
+    if [ "$n" = 1 ]; then echo '{"c":"failure","n":"CI","d":"2026-09-08T06:33:00Z"}'
+    else echo '{"c":"success","n":"CI","d":"2026-01-01T10:02:00Z"}'; fi ;;
+esac`)
+	var out, errOut strings.Builder
+	run(&out, &errOut)
+	got := out.String()
+	if !strings.Contains(got, "RED default branches: 1") || !strings.Contains(got, "acme/red") {
+		t.Errorf("a real red was erased by an older second reading:\n%s", got)
+	}
+	if strings.Contains(got, "withdrawn") {
+		t.Errorf("nothing was withdrawn, yet it said so:\n%s", got)
+	}
+}
