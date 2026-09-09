@@ -1,5 +1,12 @@
-// Reports every repository whose default branch's most recent workflow run
-// failed. One REST call per repo listing, one per repo's latest run.
+// Reports every workflow whose most recent run on its repository's default
+// branch failed. One REST call per organisation's repo listing, one per
+// repository for all its completed runs on that branch.
+//
+// It reads every workflow, not the repository's newest run, because the newest
+// run belongs to whichever workflow happened to fire last and says nothing
+// about the others. go-tex/go-tex.github.io had `playground` failing and
+// `pages` succeeding afterwards, and the sweep read the repository as green
+// while a workflow on its default branch had been red for hours.
 package main
 
 import (
@@ -110,14 +117,18 @@ func run(stdout, stderr io.Writer) int {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			v, err := latestRun(r)
+			runs, err := latestRuns(r)
 			if err != nil {
 				mu.Lock()
 				unread = append(unread, r.FullName+": "+firstLine(err.Error()))
 				mu.Unlock()
 				return
 			}
-			if isRed(v.C) {
+			var bad []wfRun
+			for _, v := range runs {
+				if !isRed(v.C) {
+					continue
+				}
 				// Ask a second time before believing it.
 				//
 				// This endpoint has twice handed back a MONTHS-OLD run as the
@@ -134,16 +145,23 @@ func run(stdout, stderr io.Writer) int {
 				// outage. Take whichever answer names the LATER run: RFC 3339 in
 				// Z sorts lexically, and a second reading that is older than the
 				// first is the stale one.
-				if again, err := latestRun(r); err == nil && again.D > v.D {
-					mu.Lock()
-					rechecked++
-					mu.Unlock()
-					v = again
+				if again, err := latestRuns(r); err == nil {
+					for _, w := range again {
+						if w.W == v.W && w.D > v.D {
+							mu.Lock()
+							rechecked++
+							mu.Unlock()
+							v = w
+						}
+					}
+				}
+				if isRed(v.C) {
+					bad = append(bad, v)
 				}
 			}
 			mu.Lock()
 			checked++
-			if isRed(v.C) {
+			for _, v := range bad {
 				reds = append(reds, red{r.FullName, v.N, v.D})
 			}
 			mu.Unlock()
@@ -183,16 +201,57 @@ func run(stdout, stderr io.Writer) int {
 	return 1
 }
 
-// latestRun asks for the newest completed run on a repository's default branch.
-func latestRun(r repo) (struct{ C, N, D string }, error) {
-	var v struct{ C, N, D string }
+// A wfRun is one completed workflow run, reduced to what a sweep needs.
+type wfRun struct {
+	W int    // the workflow it belongs to
+	C string // conclusion
+	N string // the workflow's name
+	D string // created_at, RFC 3339 in Z, which sorts lexically
+}
+
+// latestRuns asks for a repository's recent completed runs on its default
+// branch and keeps the newest of EACH WORKFLOW.
+//
+// It used to ask for one run and take it, and that hid a failing workflow
+// behind a newer passing one. go-tex/go-tex.github.io has two: `playground`
+// failed at 15:22 on 2026-09-09 and `pages` succeeded at 15:31, so the sweep
+// read the repository as green while a workflow on its default branch was red
+// and had been for hours.
+//
+// It is still ONE call per repository -- a page of a hundred instead of one --
+// so the sweep costs no more requests than it did. A workflow that has not run
+// within the branch's last hundred runs does not appear, which is a dormant
+// workflow rather than a hidden failure.
+func latestRuns(r repo) ([]wfRun, error) {
 	b, err := gh("api",
-		"repos/"+r.FullName+"/actions/runs?branch="+r.Default+"&status=completed&per_page=1",
-		"--jq", "(.workflow_runs[0] // {}) | {c: (.conclusion // \"\"), n: (.name // \"\"), d: (.created_at // \"\")}")
+		"repos/"+r.FullName+"/actions/runs?branch="+r.Default+"&status=completed&per_page=100",
+		"--jq", "[.workflow_runs[] | {w: (.workflow_id // 0), c: (.conclusion // \"\"), "+
+			"n: (.name // \"\"), d: (.created_at // \"\")}]")
 	if err != nil {
-		return v, err
+		return nil, err
 	}
-	return v, json.Unmarshal(b, &v)
+	var all []wfRun
+	if err := json.Unmarshal(b, &all); err != nil {
+		return nil, err
+	}
+	return newestPerWorkflow(all), nil
+}
+
+// newestPerWorkflow keeps one run per workflow: the one naming the later date.
+// The endpoint hands them back newest first, and this does not rely on that.
+func newestPerWorkflow(all []wfRun) []wfRun {
+	best := map[int]wfRun{}
+	for _, v := range all {
+		if b, seen := best[v.W]; !seen || v.D > b.D {
+			best[v.W] = v
+		}
+	}
+	out := make([]wfRun, 0, len(best))
+	for _, v := range best {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].N < out[j].N })
+	return out
 }
 
 // isRed reports whether a run's conclusion is one a person should look at.

@@ -32,8 +32,8 @@ case "$*" in
 
 func TestAFailedRunIsReportedAndTheRestAreCounted(t *testing.T) {
 	withFakeGH(t, oneOrgTwoRepos+`
-  *acme/green/actions/runs*) echo '{"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}' ;;
-  *acme/red/actions/runs*)   echo '{"c":"failure","n":"CI","d":"2026-09-05T20:40:00Z"}' ;;
+  *acme/green/actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
+  *acme/red/actions/runs*)   echo '[{"w":1,"c":"failure","n":"CI","d":"2026-09-05T20:40:00Z"}]' ;;
 esac`)
 	var out, errOut strings.Builder
 	if code := run(&out, &errOut); code != 0 {
@@ -60,7 +60,7 @@ func TestARunThatCouldNotBeReadIsNotABranchThatIsGreen(t *testing.T) {
 	// default branches: 0" over 1933 repositories and the count of successes
 	// read as the population. Two red branches were behind it.
 	withFakeGH(t, oneOrgTwoRepos+`
-  *acme/green/actions/runs*) echo '{"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}' ;;
+  *acme/green/actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
   *actions/runs*) echo "API rate limit exceeded for user ID 1." >&2; exit 1 ;;
 esac`)
 	var out, errOut strings.Builder
@@ -91,7 +91,7 @@ case "$*" in
   *orgs/acme/repos*)
     echo '[{"full_name":"acme/green","default_branch":"main","archived":false,"fork":false}]' ;;
   *orgs/beta/repos*) echo "API rate limit exceeded for user ID 1." >&2; exit 1 ;;
-  *actions/runs*) echo '{"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}' ;;
+  *actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
 esac`)
 	var out, errOut strings.Builder
 	code := run(&out, &errOut)
@@ -176,11 +176,11 @@ func TestAStaleRedIsWithdrawnOnTheSecondReading(t *testing.T) {
 	count := t.TempDir() + "/n"
 	t.Setenv("REDSCAN_TEST_COUNT", count)
 	withFakeGH(t, oneOrgTwoRepos+`
-  *acme/green/actions/runs*) echo '{"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}' ;;
+  *acme/green/actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
   *acme/red/actions/runs*)
     n=$(cat "$REDSCAN_TEST_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$REDSCAN_TEST_COUNT"
-    if [ "$n" = 1 ]; then echo '{"c":"failure","n":"CI","d":"2026-06-20T06:33:00Z"}'
-    else echo '{"c":"success","n":"CI","d":"2026-08-18T10:02:00Z"}'; fi ;;
+    if [ "$n" = 1 ]; then echo '[{"w":1,"c":"failure","n":"CI","d":"2026-06-20T06:33:00Z"}]'
+    else echo '[{"w":1,"c":"success","n":"CI","d":"2026-08-18T10:02:00Z"}]'; fi ;;
 esac`)
 	var out, errOut strings.Builder
 	if code := run(&out, &errOut); code != 0 {
@@ -204,11 +204,11 @@ func TestASecondReadingThatIsOlderDoesNotOverruleTheFirst(t *testing.T) {
 	count := t.TempDir() + "/n"
 	t.Setenv("REDSCAN_TEST_COUNT", count)
 	withFakeGH(t, oneOrgTwoRepos+`
-  *acme/green/actions/runs*) echo '{"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}' ;;
+  *acme/green/actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
   *acme/red/actions/runs*)
     n=$(cat "$REDSCAN_TEST_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$REDSCAN_TEST_COUNT"
-    if [ "$n" = 1 ]; then echo '{"c":"failure","n":"CI","d":"2026-09-08T06:33:00Z"}'
-    else echo '{"c":"success","n":"CI","d":"2026-01-01T10:02:00Z"}'; fi ;;
+    if [ "$n" = 1 ]; then echo '[{"w":1,"c":"failure","n":"CI","d":"2026-09-08T06:33:00Z"}]'
+    else echo '[{"w":1,"c":"success","n":"CI","d":"2026-01-01T10:02:00Z"}]'; fi ;;
 esac`)
 	var out, errOut strings.Builder
 	run(&out, &errOut)
@@ -218,5 +218,60 @@ esac`)
 	}
 	if strings.Contains(got, "withdrawn") {
 		t.Errorf("nothing was withdrawn, yet it said so:\n%s", got)
+	}
+}
+
+// TestANewerWorkflowDoesNotHideAnOlderFailingOne is the failure this replaces.
+//
+// The sweep asked for ONE run and took it, so a repository with several
+// workflows was read through whichever had run most recently.
+// go-tex/go-tex.github.io has two: `playground` failed at 15:22 on 2026-09-09
+// and `pages` succeeded at 15:31, and the repository was reported green while a
+// workflow on its default branch had been red for hours.
+func TestANewerWorkflowDoesNotHideAnOlderFailingOne(t *testing.T) {
+	withFakeGH(t, oneOrgTwoRepos+`
+  *acme/green/actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
+  *acme/red/actions/runs*)
+    echo '[{"w":2,"c":"success","n":"pages","d":"2026-09-09T15:31:00Z"},
+           {"w":1,"c":"failure","n":"playground","d":"2026-09-09T15:22:00Z"},
+           {"w":1,"c":"success","n":"playground","d":"2026-09-09T13:36:00Z"}]' ;;
+esac`)
+	var out, errOut strings.Builder
+	if code := run(&out, &errOut); code != 0 {
+		t.Errorf("exit = %d, want 0: %s", code, errOut.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "RED default branches: 1") {
+		t.Errorf("the failing workflow was hidden behind the newer one:\n%s", got)
+	}
+	// It is named by the workflow that failed, not by the one that passed, or
+	// nobody knows where to look.
+	if !strings.Contains(got, "playground") || strings.Contains(got, "pages") {
+		t.Errorf("the wrong workflow was named:\n%s", got)
+	}
+	// And the older passing run of the SAME workflow does not overrule the
+	// newer failing one.
+	if !strings.Contains(got, "2026-09-09T15:22") {
+		t.Errorf("the run named is not the newest of its workflow:\n%s", got)
+	}
+}
+
+// TestEveryFailingWorkflowIsNamed: a repository with two red workflows is two
+// things to look at, not one.
+func TestEveryFailingWorkflowIsNamed(t *testing.T) {
+	withFakeGH(t, oneOrgTwoRepos+`
+  *acme/green/actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
+  *acme/red/actions/runs*)
+    echo '[{"w":1,"c":"failure","n":"alpha","d":"2026-09-09T15:22:00Z"},
+           {"w":2,"c":"timed_out","n":"beta","d":"2026-09-09T15:20:00Z"}]' ;;
+esac`)
+	var out, errOut strings.Builder
+	run(&out, &errOut)
+	got := out.String()
+	if !strings.Contains(got, "RED default branches: 2") {
+		t.Errorf("two failing workflows were counted as one:\n%s", got)
+	}
+	if !strings.Contains(got, "alpha") || !strings.Contains(got, "beta") {
+		t.Errorf("both should be named:\n%s", got)
 	}
 }
