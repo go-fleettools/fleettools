@@ -29,6 +29,7 @@ while IFS= read -r spec; do
         # there. Those are skipped; the ROOT module must still tidy, since
         # that is the one every lane checks.
         ok=""
+        broken_before=""
         for m in $mods; do
             if (cd "$(dirname "$m")" && timeout 400 go mod tidy >/dev/null 2>&1); then
                 ok="$ok $m"
@@ -38,7 +39,32 @@ while IFS= read -r spec; do
         done
         git diff --quiet && exit 3
         for m in $ok; do
-            (cd "$(dirname "$m")" && timeout 500 go build ./... >/dev/null 2>&1) || exit 6
+            (cd "$(dirname "$m")" && timeout 500 go build ./... >/dev/null 2>&1) || {
+                # The build gate asks whether the tidy BROKE the tree, so it
+                # has to compare against how the tree built BEFORE it -- not
+                # against zero. Two repositories fail here for reasons the
+                # tidy neither caused nor could fix:
+                #
+                #   - a GOOS-specific harness. go-tpm2/validate imports
+                #     github.com/usbarmory/tamago/amd64, which exists only
+                #     under GOOS=tamago, so `go build ./...` on the host has
+                #     never succeeded there and never will.
+                #   - the missing-go.sum case itself: the tree does not build
+                #     BEFORE the tidy either, because Renovate raised go.mod
+                #     without writing go.sum, and the tidy is the fix.
+                #
+                # In both, "fails after tidy" is true and means nothing. So
+                # re-run the same build on the tree as it was, and only refuse
+                # when the tidy is what turned it red.
+                pre=$(mktemp -d)
+                git -c advice.detachedHead=false stash -q --include-untracked 2>/dev/null
+                (cd "$(dirname "$m")" && timeout 500 go build ./... >/dev/null 2>&1)
+                was_ok=$?
+                git stash pop -q 2>/dev/null
+                rm -rf "$pre"
+                [ "$was_ok" -eq 0 ] && exit 6   # cassé PAR le rangement
+                broken_before=1
+            }
         done
         git commit -q -am "go.mod: run go mod tidy, in every module of the tree
 
@@ -50,9 +76,11 @@ Tidy only, applied to every go.mod in the tree -- a sub-module keeps its
 own, and a lane that vets it fails while the root module is spotless.
 go build passes in each." || exit 1
         gitpush origin "$br" >/dev/null 2>&1 || exit 7
+        [ -n "$broken_before" ] && exit 8
     )
     case $? in
         0) echo "  pushed  $spec" ;;
+        8) echo "  pushed  $spec (l'arbre ne compilait pas non plus AVANT: CI juge)" ;;
         3) echo "  clean   $spec (tidy changes nothing; other cause)" ;;
         4) echo "  skip    $spec (no go.mod)" ;;
         5) echo "  skip    $spec (tidy failed)" ;;
