@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	"fleet/quiet"
+	"github.com/go-fleettools/fleettools/quiet"
 )
 
 // readOnly refuses anything that is not a plain GET.

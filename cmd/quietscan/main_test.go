@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"fleet/quiet"
+	"github.com/go-fleettools/fleettools/quiet"
 )
 
 // The one call this tool must never make. `actions/workflows/{id}/dispatches`
