@@ -1,0 +1,70 @@
+# A reusable check: does this organisation advertise what it has?
+#
+# Called BY the organisation's own landing repository, so it fails at the
+# moment somebody changes the landing — not a week later in a report nobody
+# opened. Six lines in the caller:
+#
+#   name: docs
+#   on: [push, pull_request]
+#   jobs:
+#     current:
+#       uses: go-fleettools/fleettools/.github/workflows/docs-current.yml@main
+#
+# ⛔ IT NEEDS NO SECRET, and that is the point. Listing a public organisation
+# and reading its landing are public reads — measured: `GET /orgs/<org>/repos`
+# answers 200 with no token at all. An earlier version of this ran centrally
+# on a schedule and needed a token that could see all 334 organisations, which
+# is a thing somebody has to create, remember and rotate. A check that cannot
+# run is a check that does not exist.
+name: docs-current
+
+on:
+  workflow_call:
+    inputs:
+      org:
+        description: the organisation to check; defaults to the caller's owner
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  current:
+    name: the landing names what the organisation has
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the scanner
+        uses: actions/checkout@v5
+        with:
+          repository: go-fleettools/fleettools
+          ref: main
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: scan this organisation
+        env:
+          # The default token is enough for public reads and gives a workable
+          # rate limit. It cannot see private repositories, which is correct:
+          # a private module is not something the landing should advertise.
+          GH_TOKEN: ${{ github.token }}
+          ORG: ${{ inputs.org || github.repository_owner }}
+        run: |
+          set -o pipefail
+          go run ./cmd/docscan -orgs "$ORG" -fail-on-drift | tee report.txt
+          {
+            echo '## docs-current'
+            echo
+            echo '```'
+            cat report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: what a failure means
+        if: failure()
+        run: |
+          echo "::notice::This organisation has a repository its landing, documentation" \
+               "or profile does not name — or names one that is gone. The report above" \
+               "says which, and on which surfaces. Being unlisted can be a choice; if it" \
+               "is, say so by listing it and marking it, not by leaving it invisible."
