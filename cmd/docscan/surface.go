@@ -99,7 +99,7 @@ func Stale(s Surface, have map[string]bool) []string {
 		// [[params.protocols]] with `name = "smb"`, and a matcher that took
 		// every `name` reported smb, nfs, sftp, s3 and webdav as repositories
 		// the organisation had lost.
-		return listedRepos(s.Body, have)
+		return listedRepos(s.Body, s.Org, have)
 	case "profile":
 		re = regexp.MustCompile(`\(https://github\.com/` + regexp.QuoteMeta(s.Org) +
 			`/([a-z0-9][a-z0-9._-]*)\)`)
@@ -126,38 +126,65 @@ func Stale(s Surface, have map[string]bool) []string {
 // TOML groups them under a [[params.repos]] header; YAML under a `modules:` or
 // `repos:` key. Either way the KEY above the entries is what says "these are
 // repositories", so that is what is followed.
-func listedRepos(body string, have map[string]bool) []string {
+func listedRepos(body, org string, have map[string]bool) []string {
 	var out []string
 	seen := map[string]bool{}
 	inRepos := false
+	curName, curOrg := "", ""
 	name := regexp.MustCompile(`^\s*(?:-\s*)?name\s*[:=]\s*"?([a-z0-9][a-z0-9._-]*)"?\s*$`)
+	// ⛔ AN ENTRY MAY NAME ANOTHER ORGANISATION, and then it is not a claim
+	// about this one. go-composites' landing carries nonnil and respondto with
+	// org = "go-vet-analyzers" and the words "Now maintained in the
+	// go-vet-analyzers org" — which is exactly what a moved module should look
+	// like — and both were reported as names this organisation had lost. The
+	// page was right and the reader was wrong, which is the expensive
+	// direction: a check that cries about correct pages stops being read.
+	owner := regexp.MustCompile(`^\s*(?:-\s*)?(?:org|owner)\s*[:=]\s*"?([A-Za-z0-9][A-Za-z0-9._-]*)"?\s*$`)
 	header := regexp.MustCompile(`^\s*\[\[params\.([a-z]+)\]\]`)
 	yamlKey := regexp.MustCompile(`^(modules|repos):\s*$`)
+
+	flush := func() {
+		defer func() { curName, curOrg = "", "" }()
+		if curName == "" || (curOrg != "" && curOrg != org) {
+			return
+		}
+		if have[curName] || seen[curName] {
+			return
+		}
+		seen[curName] = true
+		out = append(out, curName)
+	}
+
 	for _, line := range strings.Split(body, "\n") {
 		if m := header.FindStringSubmatch(line); m != nil {
+			flush()
 			inRepos = m[1] == "repos"
 			continue
 		}
 		if yamlKey.MatchString(line) {
+			flush()
 			inRepos = true
 			continue
 		}
 		// a YAML key at column zero ends the block
 		if inRepos && len(line) > 0 && line[0] != ' ' && line[0] != '-' && line[0] != '\t' {
+			flush()
 			inRepos = false
 		}
 		if !inRepos {
 			continue
 		}
 		if m := name.FindStringSubmatch(line); m != nil {
-			n := m[1]
-			if have[n] || seen[n] {
-				continue
-			}
-			seen[n] = true
-			out = append(out, n)
+			// A second name in one block is the next entry.
+			flush()
+			curName = m[1]
+			continue
+		}
+		if m := owner.FindStringSubmatch(line); m != nil {
+			curOrg = m[1]
 		}
 	}
+	flush()
 	return out
 }
 

@@ -114,3 +114,61 @@ func TestInfraIsNotAModule(t *testing.T) {
 		t.Error("a real module was excluded")
 	}
 }
+
+// TestAnEntryThatNamesAnotherOrgIsNotAClaimAboutThisOne. go-composites' landing
+// carries nonnil and respondto with org = "go-vet-analyzers" and the words "Now
+// maintained in the go-vet-analyzers org" — which is what a moved module should
+// look like — and both were reported as names this organisation had lost.
+func TestAnEntryThatNamesAnotherOrgIsNotAClaimAboutThisOne(t *testing.T) {
+	body := `[[params.repos]]
+  name = "composites"
+  result = "the library"
+[[params.repos]]
+  name = "nonnil"
+  org = "go-vet-analyzers"
+  result = "Now maintained in the go-vet-analyzers org."
+[[params.repos]]
+  name = "gone"
+  result = "this one really is missing"
+`
+	have := map[string]bool{"composites": true}
+	got := listedRepos(body, "go-composites", have)
+	if len(got) != 1 || got[0] != "gone" {
+		t.Errorf("listedRepos = %v, want [gone] — nonnil belongs to another organisation", got)
+	}
+}
+
+// TestTheOrgKeyBelongsToItsOwnEntry — the other direction, which a flat scan
+// gets wrong: an org key must not carry over to the entry after it.
+func TestTheOrgKeyBelongsToItsOwnEntry(t *testing.T) {
+	body := `[[params.repos]]
+  name = "moved"
+  org = "elsewhere"
+[[params.repos]]
+  name = "gone"
+`
+	got := listedRepos(body, "mine", map[string]bool{})
+	if len(got) != 1 || got[0] != "gone" {
+		t.Errorf("listedRepos = %v, want [gone] — the org key leaked to the next entry", got)
+	}
+}
+
+// TestAnEntryNamingThisOrgExplicitlyStillCounts. Some pages set org on every
+// entry, including their own.
+func TestAnEntryNamingThisOrgExplicitlyStillCounts(t *testing.T) {
+	body := "[[params.repos]]\n  name = \"gone\"\n  org = \"mine\"\n"
+	got := listedRepos(body, "mine", map[string]bool{})
+	if len(got) != 1 || got[0] != "gone" {
+		t.Errorf("listedRepos = %v, want [gone]", got)
+	}
+}
+
+// TestTwoEntriesInOneYamlList. The YAML shape has no per-entry header, so a
+// second `- name:` is what ends the first entry.
+func TestTwoEntriesInOneYamlList(t *testing.T) {
+	body := "modules:\n  - name: kept\n    kind: driver\n  - name: moved\n    org: somewhere-else\n"
+	got := listedRepos(body, "mine", map[string]bool{})
+	if len(got) != 1 || got[0] != "kept" {
+		t.Errorf("listedRepos = %v, want [kept]", got)
+	}
+}
