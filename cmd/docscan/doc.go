@@ -3,6 +3,7 @@
 //
 //	docscan            # the whole fleet
 //	docscan -orgs a,b  # narrowed, and it says so
+//	docscan -orgs o -tree o/o.github.io=. -fail-on-drift   # judge a branch
 //
 // It exists because a written rule was not enough, and because the drift is
 // invisible from inside a repository. On 2026-09-25 go-fsctl had seven modules
@@ -29,6 +30,16 @@
 // ("delegates to matchlen's SIMD common-prefix kernel"). A word that appears is
 // not an entry that exists, and a sweep that cannot tell them apart
 // under-reports in the direction that looks reassuring.
+//
+// # Read the branch, not the default one
+//
+// Every surface is read over the API, which serves the DEFAULT BRANCH. Run as a
+// pull-request check inside the landing repository, that judges main — so the
+// pull request that FIXES the drift is told the drift is still there, and the
+// one that DELETES every card is told nothing is wrong. The second half is why
+// -tree exists rather than a re-run after merging: it names a checkout to read
+// one repository's surfaces from, and refuses a path it cannot read instead of
+// falling back to the API, which would pass while reading nothing.
 //
 // # Being unlisted is not always wrong
 //

@@ -39,9 +39,22 @@ jobs:
         with:
           repository: go-fleettools/fleettools
           ref: main
+          path: scanner
+
+      # ⛔ THE BRANCH UNDER REVIEW, because every surface is otherwise read over
+      # the API — which serves the DEFAULT BRANCH. Measured on
+      # go-filesystems.github.io#15: a pull request adding ten cards was told
+      # all ten were missing, because the check never read them. The false red
+      # is the harmless half; the same blindness passes a pull request that
+      # DELETES every card.
+      - name: check out the branch under review
+        uses: actions/checkout@v5
+        with:
+          path: caller
+
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: scanner/go.mod
 
       - name: scan this organisation
         env:
@@ -50,9 +63,14 @@ jobs:
           # a private module is not something the landing should advertise.
           GH_TOKEN: ${{ github.token }}
           ORG: ${{ inputs.org || github.repository_owner }}
+          CALLER: ${{ github.repository }}
+        working-directory: scanner
         run: |
           set -o pipefail
-          go run ./cmd/docscan -orgs "$ORG" -fail-on-drift | tee report.txt
+          go run ./cmd/docscan \
+            -orgs "$ORG" \
+            -tree "$CALLER=$GITHUB_WORKSPACE/caller" \
+            -fail-on-drift | tee report.txt
           {
             echo '## docs-current'
             echo
