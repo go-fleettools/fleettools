@@ -102,6 +102,7 @@ type finding struct {
 	unlisted  map[string][]string // repo -> the surfaces that DO name it
 	stale     map[string][]string // surface -> names it lists that are gone
 	empty     []string            // repositories with nothing in them
+	quiet     map[string]string   // repo -> why it is deliberately not advertised
 	modules   int
 	surfaces  []string // the surfaces that were readable
 	readError string
@@ -128,6 +129,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// read the branch, and the difference is the whole point of the flag.
 	for _, repo := range slices.Sorted(maps.Keys(trees)) {
 		fmt.Fprintf(stdout, "tree: %s read from %s, not from the API\n", repo, trees[repo])
+		if err := readUnlisted(orgOf(repo), trees[repo]); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
 	}
 	orgs, err := organisations(*only)
 	if err != nil {
@@ -170,7 +175,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 // scan asks one organisation what it has and what it says.
 func scan(org string) finding {
-	f := finding{org: org, unlisted: map[string][]string{}, stale: map[string][]string{}}
+	f := finding{org: org, unlisted: map[string][]string{}, stale: map[string][]string{}, quiet: map[string]string{}}
 
 	b, err := gh("repo", "list", org, "--limit", "200", "--json", "name,isArchived,isFork,diskUsage")
 	if err != nil {
@@ -274,6 +279,14 @@ func scan(org string) finding {
 	}
 
 	for _, m := range modules {
+		// ⛔ A deliberate omission is still PRINTED, with its reason. The point
+		// of the file is to move a repository from invisible to accounted for,
+		// not to remove it from the report — a silent allowance would be the
+		// check switched off one line at a time.
+		if why, ok := unlisted[org][m]; ok {
+			f.quiet[m] = why
+			continue
+		}
 		on := Advertised(surfaces, m)
 		if len(on) < len(f.surfaces) {
 			f.unlisted[m] = on
@@ -299,10 +312,14 @@ func report(found []finding, w io.Writer) int {
 			fmt.Fprintf(w, "%-28s UNREAD: %s\n", f.org, f.readError)
 			continue
 		}
-		if len(f.unlisted) == 0 && len(f.stale) == 0 && len(f.empty) == 0 {
+		if len(f.unlisted) == 0 && len(f.stale) == 0 && len(f.empty) == 0 && len(f.quiet) == 0 {
 			continue
 		}
-		drift++
+		// An organisation whose only news is a deliberate omission has no
+		// drift, and still gets its paragraph so the omission stays visible.
+		if len(f.unlisted) > 0 || len(f.stale) > 0 || len(f.empty) > 0 {
+			drift++
+		}
 		fmt.Fprintf(w, "\n%s — %d modules, surfaces: %s\n", f.org, f.modules,
 			strings.Join(f.surfaces, " "))
 		var names []string
@@ -317,6 +334,9 @@ func report(found []finding, w io.Writer) int {
 				where = "only on " + strings.Join(on, ", ")
 			}
 			fmt.Fprintf(w, "  %-22s %s\n", m, where)
+		}
+		for _, m := range slices.Sorted(maps.Keys(f.quiet)) {
+			fmt.Fprintf(w, "  %-22s unlisted on purpose: %s\n", m, f.quiet[m])
 		}
 		if len(f.empty) > 0 {
 			sort.Strings(f.empty)

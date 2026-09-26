@@ -45,7 +45,22 @@
 //
 // A repository may be deliberately quiet: an experiment, an internal helper, a
 // module that moved. So this prints WHICH surfaces name it and which do not,
-// rather than a verdict. The reverse direction is reported too — a surface
+// rather than a verdict.
+//
+// Under -fail-on-drift a verdict is what it gives, and for a while the failure
+// said "say so by listing it and marking it" while offering no marking at all.
+// The only way to pass was to put a card on the page — including for
+// go-composites/is, whose whole content is a README with a banner and a
+// heading. A row pointing at nothing is worse than no row, so the instruction
+// as given made the page worse.
+//
+// A .docs-unlisted file at the root of the tree given with -tree names one
+// repository per line and, after a space, WHY. The reason is required: an
+// allowance that can be written silently is the check switched off one line at
+// a time. The line keeps being printed, as "unlisted on purpose: <reason>", so
+// the repository moves from invisible to accounted for rather than out of the
+// report. The file lives in the tree under review, so it turns up in the pull
+// request's own diff. The reverse direction is reported too — a surface
 // naming a repository that is gone or archived sends a reader to a tombstone,
 // which is how go-compressions kept pointing at matchlen after it moved to
 // go-simd.
