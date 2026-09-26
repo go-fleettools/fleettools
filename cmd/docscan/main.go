@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -55,6 +57,9 @@ var backoff = func(attempt int) time.Duration {
 // whole organisation whose landing could not be fetched is reported as
 // unreadable rather than as one advertising nothing.
 func file(repo, path string) string {
+	if s, ok := treeFile(repo, path); ok {
+		return s
+	}
 	b, err := gh("api", "repos/"+repo+"/contents/"+path, "--jq", ".content")
 	if err != nil {
 		return ""
@@ -68,6 +73,9 @@ func file(repo, path string) string {
 
 // dir is the names in a directory, or nothing.
 func dir(repo, path string) []string {
+	if names, ok := treeDir(repo, path); ok {
+		return names
+	}
 	b, err := gh("api", "repos/"+repo+"/contents/"+path, "--jq", ".[].name")
 	if err != nil {
 		return nil
@@ -111,8 +119,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// being unlisted is sometimes a choice, and a weekly red job teaches
 	// people to ignore it.
 	strict := fs.Bool("fail-on-drift", false, "exit non-zero when anything is unlisted or stale")
+	fs.Var(treeFlag{}, "tree", "owner/repo=dir: read this repository's surfaces from a\ncheckout instead of the API, so a pull request is judged on\nwhat it proposes rather than on its default branch")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	// ⛔ A result is only as good as what was read, so SAY what was read. A
+	// green run whose tree flag was ignored looks exactly like a green run that
+	// read the branch, and the difference is the whole point of the flag.
+	for _, repo := range slices.Sorted(maps.Keys(trees)) {
+		fmt.Fprintf(stdout, "tree: %s read from %s, not from the API\n", repo, trees[repo])
 	}
 	orgs, err := organisations(*only)
 	if err != nil {
