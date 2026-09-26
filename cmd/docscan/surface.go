@@ -1,0 +1,170 @@
+package main
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// A Surface is one place an organisation advertises its repositories.
+type Surface struct {
+	Name string // "landing", "docs", "profile"
+	Org  string // the organisation it belongs to
+	Body string // everything that place holds, concatenated
+	// Entry reports whether this surface names repo AS AN ENTRY.
+	Entry func(body, repo string) bool
+}
+
+// ⛔ Every matcher below looks for the shape of a LISTING, never for the bare
+// name. The bare name matches prose, and prose is how a sweep convinces itself
+// a module is advertised when it is only mentioned.
+var (
+	// hugo.toml: name = "lz4"      data/*.yaml: - name: lz4
+	tomlEntry = `(?m)^\s*name\s*=\s*"%s"\s*$`
+	yamlEntry = `(?m)^\s*-?\s*name:\s*"?%s"?\s*$`
+	// mkdocs.yml nav: - loop/: loop.md   (or bare loop.md)
+	navEntry = `(?m)^\s*-?\s*[^:\n]*:?\s*%s\.md\s*$`
+	// a profile table links to the repository itself, IN THIS ORGANISATION.
+	//
+	// ⛔ It used to accept any owner, and a profile that says "pairs with
+	// go-fileshare" then read as an organisation listing a module it does not
+	// have. Cross-organisation links are the NORM in these profiles; matching
+	// them turned every neighbour into a phantom.
+	linkEntry = `\(https://github\.com/%s/%s\)`
+)
+
+func matches(pattern, body, repo string) bool {
+	re, err := regexp.Compile(fmt.Sprintf(pattern, regexp.QuoteMeta(repo)))
+	if err != nil {
+		return false
+	}
+	return re.MatchString(body)
+}
+
+// landingEntry accepts either spelling, because the fleet uses both: hugo.toml
+// holds the list in some organisations and data/*.yaml in others. go-filesystems
+// keeps it in data/fs.yaml, not data/repos.yaml — a sweep that guessed the
+// filename read nothing and reported all thirty modules missing.
+func landingEntry(body, repo string) bool {
+	return matches(tomlEntry, body, repo) || matches(yamlEntry, body, repo)
+}
+
+func docsEntry(body, repo string) bool { return matches(navEntry, body, repo) }
+
+// profileEntry needs the organisation, so it is built per organisation rather
+// than being a bare function like the other two.
+func profileEntryFor(org string) func(string, string) bool {
+	return func(body, repo string) bool {
+		re, err := regexp.Compile(fmt.Sprintf(linkEntry, regexp.QuoteMeta(org), regexp.QuoteMeta(repo)))
+		if err != nil {
+			return false
+		}
+		return re.MatchString(body)
+	}
+}
+
+// Advertised is the surfaces that name repo.
+func Advertised(surfaces []Surface, repo string) []string {
+	var on []string
+	for _, s := range surfaces {
+		if s.Body != "" && s.Entry(s.Body, repo) {
+			on = append(on, s.Name)
+		}
+	}
+	return on
+}
+
+// Stale is every repository a surface names that is not in have.
+//
+// It reads the entries out of the surface rather than testing a known list,
+// because the interesting case is the name nobody remembers: a module that
+// moved away and left its row behind.
+//
+// ⛔ ONLY the landing and the profile are asked, and running it is what taught
+// me that. A documentation nav legitimately holds pages that were never
+// repositories -- contributing.md, methodology.md -- so every one of them read
+// as a module that had vanished. Worse, mkdocs.yml carries `theme:\n  name:
+// material`, and a matcher looking for `name:` anywhere reported the THEME as
+// a deleted repository, in two organisations at once.
+//
+// A nav entry is evidence of a page. It is not evidence of a repository, and
+// the two are only the same in the organisations that happen to be laid out
+// that way.
+func Stale(s Surface, have map[string]bool) []string {
+	var re *regexp.Regexp
+	switch s.Name {
+	case "landing":
+		// ⛔ Only names under a REPOSITORY list count. A landing may list other
+		// things with the same key: go-fileshare declares its five protocols as
+		// [[params.protocols]] with `name = "smb"`, and a matcher that took
+		// every `name` reported smb, nfs, sftp, s3 and webdav as repositories
+		// the organisation had lost.
+		return listedRepos(s.Body, have)
+	case "profile":
+		re = regexp.MustCompile(`\(https://github\.com/` + regexp.QuoteMeta(s.Org) +
+			`/([a-z0-9][a-z0-9._-]*)\)`)
+	default:
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(s.Body, -1) {
+		n := m[1]
+		if n == "" || have[n] || seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out
+}
+
+// infra is what an organisation has that is not a module: the places the
+// advertising itself lives.
+// listedRepos is the names under a repository list, and nothing else.
+//
+// TOML groups them under a [[params.repos]] header; YAML under a `modules:` or
+// `repos:` key. Either way the KEY above the entries is what says "these are
+// repositories", so that is what is followed.
+func listedRepos(body string, have map[string]bool) []string {
+	var out []string
+	seen := map[string]bool{}
+	inRepos := false
+	name := regexp.MustCompile(`^\s*(?:-\s*)?name\s*[:=]\s*"?([a-z0-9][a-z0-9._-]*)"?\s*$`)
+	header := regexp.MustCompile(`^\s*\[\[params\.([a-z]+)\]\]`)
+	yamlKey := regexp.MustCompile(`^(modules|repos):\s*$`)
+	for _, line := range strings.Split(body, "\n") {
+		if m := header.FindStringSubmatch(line); m != nil {
+			inRepos = m[1] == "repos"
+			continue
+		}
+		if yamlKey.MatchString(line) {
+			inRepos = true
+			continue
+		}
+		// a YAML key at column zero ends the block
+		if inRepos && len(line) > 0 && line[0] != ' ' && line[0] != '-' && line[0] != '\t' {
+			inRepos = false
+		}
+		if !inRepos {
+			continue
+		}
+		if m := name.FindStringSubmatch(line); m != nil {
+			n := m[1]
+			if have[n] || seen[n] {
+				continue
+			}
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func infra(org, repo string) bool {
+	switch repo {
+	case ".github", "brand", "docs", org + ".github.io":
+		return true
+	}
+	return strings.HasSuffix(repo, ".github.io")
+}
