@@ -14,9 +14,12 @@
 #       uses: go-fleettools/fleettools/.github/workflows/docs-current.yml@main
 #
 # ⛔ NOT `on: [push, pull_request]`. Both fire for a branch that has a pull
-# request open, so every push runs this twice — measured on the first three
-# organisations to adopt it: four check runs per pull request where two were
-# wanted. Across the fleet that is a doubled bill against a shared hourly API
+# request open, so every push runs this twice — measured on the three
+# organisations that copied this snippet (go-encryptions, go-volumes, go-mswin):
+# four check runs per pull request where two were wanted. The FIRST adopter,
+# go-filesystems, never doubled: its caller was written with the narrow trigger,
+# and only this comment was wrong. The surface that taught the others was the
+# one place the fix had not reached. Across the fleet that is a doubled bill against a shared hourly API
 # budget Renovate also draws on. Narrowing push to main keeps the default
 # branch watched and costs one run per pull request.
 #
