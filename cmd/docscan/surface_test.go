@@ -214,3 +214,42 @@ func TestProseInAPageIsStillNotAnEntry(t *testing.T) {
 		t.Error("an unparenthesised name in a title was read as an entry")
 	}
 }
+
+// TestAnEntryWrittenOnOneLine. go-browserhttp's landing holds its list as YAML
+// flow mappings, and the line-per-key matcher required the line to end after the
+// name. It matched nothing, so the landing named none of the organisation's
+// modules, so it was dropped as "not an index": a format the reader cannot parse
+// looks exactly like a page that says nothing.
+func TestAnEntryWrittenOnOneLine(t *testing.T) {
+	body := `items:
+  - { name: "browserhttp", kind: "client", desc: "a Chrome TLS fingerprint" }
+  - { name: "gitcorsproxy", kind: "proxy", desc: "CORS for git smart-HTTP" }
+`
+	for _, want := range []string{"browserhttp", "gitcorsproxy"} {
+		if !landingEntry(body, want) {
+			t.Errorf("the flow mapping naming %q was not read", want)
+		}
+	}
+	// The other direction: prose inside a desc must not count, and neither must
+	// a name that is only a value of some other key.
+	for _, absent := range []string{"client", "proxy", "git", "chrome"} {
+		if landingEntry(body, absent) {
+			t.Errorf("read %q as an entry", absent)
+		}
+	}
+}
+
+// TestListedReposReadsTheFlowForm — the stale direction. Without it, a flow-form
+// landing could name a repository the organisation no longer has and nothing
+// would say so.
+func TestListedReposReadsTheFlowForm(t *testing.T) {
+	body := `items:
+  - { name: "browserhttp", kind: "client" }
+  - { name: "gone", kind: "proxy" }
+  - { name: "moved", org: "elsewhere", kind: "proxy" }
+`
+	got := listedRepos(body, "go-browserhttp", map[string]bool{"browserhttp": true})
+	if len(got) != 1 || got[0] != "gone" {
+		t.Errorf("listedRepos = %v, want [gone]", got)
+	}
+}
