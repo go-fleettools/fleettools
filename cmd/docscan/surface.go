@@ -165,6 +165,13 @@ func infra(org, repo string) bool {
 	switch repo {
 	case ".github", "brand", "docs", org + ".github.io":
 		return true
+	// ⛔ renovate-runner is the repository that RUNS Renovate for the
+	// organisation -- about a hundred of them across the fleet. It is
+	// machinery, like the three above, and a landing that advertised it would
+	// be pointing readers at a cron job. Reported as an unlisted module in
+	// three organisations before this line existed.
+	case "renovate-runner":
+		return true
 	}
 	return strings.HasSuffix(repo, ".github.io")
 }
