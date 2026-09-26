@@ -22,6 +22,14 @@ var (
 	// hugo.toml: name = "lz4"      data/*.yaml: - name: lz4
 	tomlEntry = `(?m)^\s*name\s*=\s*"%s"\s*$`
 	yamlEntry = `(?m)^\s*-?\s*name:\s*"?%s"?\s*$`
+	// ⛔ AND THE SAME LIST WRITTEN ON ONE LINE. go-browserhttp's landing holds
+	//   - { name: "gitcorsproxy", kind: "proxy", desc: "…" }
+	// a YAML flow mapping, and the matcher above requires the line to end after
+	// the name. It matched nothing there, so the landing named none of the
+	// organisation's modules, so it was dropped as "not an index" — and the
+	// organisation read as having one surface when it has two. A format the
+	// reader cannot parse looks exactly like a page that says nothing.
+	yamlFlowEntry = `(?m)^\s*-\s*\{[^}\n]*\bname:\s*"?%s"?\s*[,}]`
 	// mkdocs.yml nav: - loop/: loop.md   (or bare loop.md)
 	navEntry = `(?m)^\s*-?\s*[^:\n]*:?\s*%s\.md\s*$`
 	// ⛔ A NAV LINE CAN NAME THE MODULE IN ITS TITLE instead of its filename.
@@ -58,7 +66,9 @@ func matches(pattern, body, repo string) bool {
 // keeps it in data/fs.yaml, not data/repos.yaml — a sweep that guessed the
 // filename read nothing and reported all thirty modules missing.
 func landingEntry(body, repo string) bool {
-	return matches(tomlEntry, body, repo) || matches(yamlEntry, body, repo)
+	return matches(tomlEntry, body, repo) ||
+		matches(yamlEntry, body, repo) ||
+		matches(yamlFlowEntry, body, repo)
 }
 
 func docsEntry(body, repo string) bool {
@@ -155,7 +165,9 @@ func listedRepos(body, org string, have map[string]bool) []string {
 	// direction: a check that cries about correct pages stops being read.
 	owner := regexp.MustCompile(`^\s*(?:-\s*)?(?:org|owner)\s*[:=]\s*"?([A-Za-z0-9][A-Za-z0-9._-]*)"?\s*$`)
 	header := regexp.MustCompile(`^\s*\[\[params\.([a-z]+)\]\]`)
-	yamlKey := regexp.MustCompile(`^(modules|repos):\s*$`)
+	yamlKey := regexp.MustCompile(`^(modules|repos|items):\s*$`)
+	flowName := regexp.MustCompile(`^\s*-\s*\{[^}\n]*\bname:\s*"?([a-z0-9][a-z0-9._-]*)"?\s*[,}]`)
+	flowOwner := regexp.MustCompile(`\b(?:org|owner):\s*"?([A-Za-z0-9][A-Za-z0-9._-]*)"?\s*[,}]`)
 
 	flush := func() {
 		defer func() { curName, curOrg = "", "" }()
@@ -186,6 +198,17 @@ func listedRepos(body, org string, have map[string]bool) []string {
 			inRepos = false
 		}
 		if !inRepos {
+			continue
+		}
+		// A whole entry on one line: flush it immediately, since nothing
+		// follows it to close it.
+		if m := flowName.FindStringSubmatch(line); m != nil {
+			flush()
+			curName = m[1]
+			if o := flowOwner.FindStringSubmatch(line); o != nil {
+				curOrg = o[1]
+			}
+			flush()
 			continue
 		}
 		if m := name.FindStringSubmatch(line); m != nil {
