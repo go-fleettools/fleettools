@@ -104,6 +104,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	only := fs.String("orgs", "", "comma-separated organisations instead of the whole fleet")
 	workers := fs.Int("workers", 6, "concurrent organisations")
+	// ⛔ For the per-organisation check, which runs IN the organisation and
+	// must stop a merge. The fleet-wide report deliberately does not fail:
+	// being unlisted is sometimes a choice, and a weekly red job teaches
+	// people to ignore it.
+	strict := fs.Bool("fail-on-drift", false, "exit non-zero when anything is unlisted or stale")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -135,7 +140,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	wg.Wait()
 	sort.Slice(found, func(i, j int) bool { return found[i].org < found[j].org })
-	return report(found, stdout)
+	code := report(found, stdout)
+	if *strict && code == 0 {
+		for _, f := range found {
+			if len(f.unlisted) > 0 || len(f.stale) > 0 {
+				return 1
+			}
+		}
+	}
+	return code
 }
 
 // scan asks one organisation what it has and what it says.
