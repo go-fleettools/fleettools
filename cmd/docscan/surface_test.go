@@ -172,3 +172,45 @@ func TestTwoEntriesInOneYamlList(t *testing.T) {
 		t.Errorf("listedRepos = %v, want [kept]", got)
 	}
 }
+
+// TestANavLineNamesItsModuleInTheTitle. go-reddit's documentation reads
+// `- The client (reddit): client.md`: the page is client.md, so matching only
+// the filename called the organisation's one documented module undocumented.
+func TestANavLineNamesItsModuleInTheTitle(t *testing.T) {
+	nav := `nav:
+  - Home: index.md
+  - The client (reddit): client.md
+  - Authentication (OAuth): oauth.md
+  - The reader app: reader.md
+  - Contributing: contributing.md
+`
+	if !docsEntry(nav, "reddit") {
+		t.Error("the nav names reddit in a title and was not read")
+	}
+	if !docsEntry(nav, "reader") {
+		t.Error("the filename spelling stopped working")
+	}
+	// The other direction: a module this organisation does not document must
+	// not be conjured out of a neighbouring line.
+	// "client" is NOT in this list: the nav points at client.md, so a module
+	// of that name really would be documented by that line.
+	for _, absent := range []string{"read", "oauth2", "home", "The client"} {
+		if docsEntry(nav, absent) {
+			t.Errorf("the nav was read as naming %q", absent)
+		}
+	}
+}
+
+// TestProseInAPageIsStillNotAnEntry — the rule the whole matcher exists for.
+func TestProseInAPageIsStillNotAnEntry(t *testing.T) {
+	if docsEntry("A paragraph mentioning reddit, and reddit again.\n", "reddit") {
+		t.Error("prose was read as a nav entry")
+	}
+	if docsEntry("  - see also: the reddit client\n", "reddit") {
+		t.Error("a nav line pointing at no page was read as an entry")
+	}
+	// The name has to be parenthesised, not merely present.
+	if docsEntry("  - The reddit client: client.md\n", "reddit") {
+		t.Error("an unparenthesised name in a title was read as an entry")
+	}
+}

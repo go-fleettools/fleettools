@@ -24,6 +24,18 @@ var (
 	yamlEntry = `(?m)^\s*-?\s*name:\s*"?%s"?\s*$`
 	// mkdocs.yml nav: - loop/: loop.md   (or bare loop.md)
 	navEntry = `(?m)^\s*-?\s*[^:\n]*:?\s*%s\.md\s*$`
+	// ⛔ A NAV LINE CAN NAME THE MODULE IN ITS TITLE instead of its filename.
+	// go-reddit's documentation says `- The client (reddit): client.md`, and
+	// matching only the filename called that organisation's one documented
+	// module undocumented.
+	//
+	// Only the PARENTHESISED form counts. Accepting the name anywhere in the
+	// title looked tidier and is the wrong trade: repository names here are
+	// ordinary words — client, engine, core, docs — and a title containing one
+	// by accident would mark a module documented when it is not. A false
+	// "documented" is silence, which is the direction this tool exists to
+	// break; a false "missing" only costs a pull request that gets closed.
+	navTitle = `(?m)^\s*-\s*[^:\n]*\(%s\)[^:\n]*:\s*\S+\.(?:md|yml)\s*$`
 	// a profile table links to the repository itself, IN THIS ORGANISATION.
 	//
 	// ⛔ It used to accept any owner, and a profile that says "pairs with
@@ -49,7 +61,9 @@ func landingEntry(body, repo string) bool {
 	return matches(tomlEntry, body, repo) || matches(yamlEntry, body, repo)
 }
 
-func docsEntry(body, repo string) bool { return matches(navEntry, body, repo) }
+func docsEntry(body, repo string) bool {
+	return matches(navEntry, body, repo) || matches(navTitle, body, repo)
+}
 
 // profileEntry needs the organisation, so it is built per organisation rather
 // than being a bare function like the other two.
