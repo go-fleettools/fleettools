@@ -1,0 +1,41 @@
+// docscan reports every repository an organisation HAS but does not ADVERTISE
+// — and every one it advertises and no longer has.
+//
+//	docscan            # the whole fleet
+//	docscan -orgs a,b  # narrowed, and it says so
+//
+// It exists because a written rule was not enough, and because the drift is
+// invisible from inside a repository. On 2026-09-25 go-fsctl had seven modules
+// and told the world about five: blk and outdir were created after the landing
+// was last touched, so they were absent from data/repos.yaml, from the docs
+// nav, from the home-page table and from the organisation profile — four
+// surfaces, none of which anybody opens while editing code. outdir's
+// documentation URL returned 404 for three weeks.
+//
+// Worse, the landing's own comment said "one card per real, non-fork repo in
+// the org" while listing five of seven. A comment stating a rule does not keep
+// the data to it.
+//
+// The next day the same check over seven more organisations found
+// go-compressions naming seven of thirteen — including bzip2, the encoder Go's
+// standard library does not have, which is the reason somebody visits that
+// organisation at all.
+//
+// # It matches ENTRIES, not words
+//
+// A first pass at this compared repository names as words against the whole
+// landing file. It reported go-compressions/compress and matchlen as present:
+// both appear in PROSE, matchlen inside another module's description
+// ("delegates to matchlen's SIMD common-prefix kernel"). A word that appears is
+// not an entry that exists, and a sweep that cannot tell them apart
+// under-reports in the direction that looks reassuring.
+//
+// # Being unlisted is not always wrong
+//
+// A repository may be deliberately quiet: an experiment, an internal helper, a
+// module that moved. So this prints WHICH surfaces name it and which do not,
+// rather than a verdict. The reverse direction is reported too — a surface
+// naming a repository that is gone or archived sends a reader to a tombstone,
+// which is how go-compressions kept pointing at matchlen after it moved to
+// go-simd.
+package main
