@@ -167,7 +167,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	code := report(found, stdout)
 	if *strict && code == 0 {
 		for _, f := range found {
-			if len(f.unlisted) > 0 || len(f.stale) > 0 {
+			if f.drifted() {
 				return 1
 			}
 		}
@@ -222,6 +222,24 @@ func classify(org string, all []ghRepo, f *finding) (have map[string]bool, modul
 		modules = append(modules, r.Name)
 	}
 	return have, modules
+}
+
+// drifted is the ONE definition of drift, for the headline count and for the
+// exit status alike.
+//
+// ⛔ They used to be two expressions, and they disagreed twice.
+//
+// An EMPTY repository counted in the headline and not in the gate, so the
+// report ended "4 organisations with drift" naming four whose only finding was
+// a line that says, in the same report, "empty, so not a module to advertise".
+// The count contradicted the remedy printed above it.
+//
+// A MALFORMED .docs-unlisted counted in the headline and not in the gate, which
+// is the dangerous way round: the file that grants exemptions could be
+// unparseable and the check would still pass. I wrote that one while adding the
+// file, in the same change where I said an allowance must never be silent.
+func (f finding) drifted() bool {
+	return len(f.unlisted) > 0 || len(f.stale) > 0 || f.badAllow != ""
 }
 
 // scan asks one organisation what it has and what it says.
@@ -353,7 +371,7 @@ func report(found []finding, w io.Writer) int {
 		}
 		// An organisation whose only news is a deliberate omission has no
 		// drift, and still gets its paragraph so the omission stays visible.
-		if len(f.unlisted) > 0 || len(f.stale) > 0 || len(f.empty) > 0 || f.badAllow != "" {
+		if f.drifted() {
 			drift++
 		}
 		fmt.Fprintf(w, "\n%s — %d modules, surfaces: %s\n", f.org, f.modules,
