@@ -105,7 +105,7 @@ func TestYAMLAndTOMLAreBothAccepted(t *testing.T) {
 }
 
 func TestInfraIsNotAModule(t *testing.T) {
-	for _, r := range []string{".github", "brand", "docs", "go-authn.github.io"} {
+	for _, r := range []string{".github", "brand", "docs", "go-authn.github.io", "renovate-runner"} {
 		if !infra("go-authn", r) {
 			t.Errorf("%q should not count as a module", r)
 		}
