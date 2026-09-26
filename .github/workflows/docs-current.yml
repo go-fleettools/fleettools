@@ -97,5 +97,9 @@ jobs:
         run: |
           echo "::notice::This organisation has a repository its landing, documentation" \
                "or profile does not name — or names one that is gone. The report above" \
-               "says which, and on which surfaces. Being unlisted can be a choice; if it" \
-               "is, say so by listing it and marking it, not by leaving it invisible."
+               "says which, and on which surfaces."
+          echo "::notice::Being unlisted can be a choice: an experiment, a placeholder," \
+               "a module that moved. Say so in a .docs-unlisted file at the root of this" \
+               "repository, one line per repository: the name, a space, and WHY. The" \
+               "reason is required, and the report keeps printing the line — the file" \
+               "moves a repository from invisible to accounted for, it does not hide it."
