@@ -2,13 +2,23 @@
 #
 # Called BY the organisation's own landing repository, so it fails at the
 # moment somebody changes the landing — not a week later in a report nobody
-# opened. Six lines in the caller:
+# opened. Nine lines in the caller:
 #
 #   name: docs
-#   on: [push, pull_request]
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
 #   jobs:
 #     current:
 #       uses: go-fleettools/fleettools/.github/workflows/docs-current.yml@main
+#
+# ⛔ NOT `on: [push, pull_request]`. Both fire for a branch that has a pull
+# request open, so every push runs this twice — measured on the first three
+# organisations to adopt it: four check runs per pull request where two were
+# wanted. Across the fleet that is a doubled bill against a shared hourly API
+# budget Renovate also draws on. Narrowing push to main keeps the default
+# branch watched and costs one run per pull request.
 #
 # ⛔ IT NEEDS NO SECRET, and that is the point. Listing a public organisation
 # and reading its landing are public reads — measured: `GET /orgs/<org>/repos`
