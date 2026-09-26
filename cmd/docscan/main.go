@@ -104,6 +104,7 @@ type finding struct {
 	archived  map[string]bool     // of those, the ones that are archived, not gone
 	empty     []string            // repositories with nothing in them
 	quiet     map[string]string   // repo -> why it is deliberately not advertised
+	badAllow  string              // the .docs-unlisted file is malformed
 	modules   int
 	surfaces  []string // the surfaces that were readable
 	readError string
@@ -245,6 +246,19 @@ func scan(org string) finding {
 
 	sort.Strings(modules)
 	site := org + "/" + org + ".github.io"
+	// ⛔ NOT a write to the shared map: scan runs one goroutine per
+	// organisation, and the tree-read allowances were parsed before any of
+	// them started. Everything after this point uses the local copy.
+	allow := unlisted[org]
+	if len(allow) == 0 {
+		parsed, err := parseUnlisted(file(site, UnlistedFile))
+		if err != nil {
+			// A malformed allowance counts as drift. It must not read as no
+			// allowance asked for, which is the silent direction.
+			f.badAllow = err.Error()
+		}
+		allow = parsed
+	}
 	var landing strings.Builder
 	landing.WriteString(file(site, "hugo.toml"))
 	for _, d := range dir(site, "data") {
@@ -305,7 +319,7 @@ func scan(org string) finding {
 		// of the file is to move a repository from invisible to accounted for,
 		// not to remove it from the report — a silent allowance would be the
 		// check switched off one line at a time.
-		if why, ok := unlisted[org][m]; ok {
+		if why, ok := allow[m]; ok {
 			f.quiet[m] = why
 			continue
 		}
@@ -334,16 +348,19 @@ func report(found []finding, w io.Writer) int {
 			fmt.Fprintf(w, "%-28s UNREAD: %s\n", f.org, f.readError)
 			continue
 		}
-		if len(f.unlisted) == 0 && len(f.stale) == 0 && len(f.empty) == 0 && len(f.quiet) == 0 {
+		if len(f.unlisted) == 0 && len(f.stale) == 0 && len(f.empty) == 0 && len(f.quiet) == 0 && f.badAllow == "" {
 			continue
 		}
 		// An organisation whose only news is a deliberate omission has no
 		// drift, and still gets its paragraph so the omission stays visible.
-		if len(f.unlisted) > 0 || len(f.stale) > 0 || len(f.empty) > 0 {
+		if len(f.unlisted) > 0 || len(f.stale) > 0 || len(f.empty) > 0 || f.badAllow != "" {
 			drift++
 		}
 		fmt.Fprintf(w, "\n%s — %d modules, surfaces: %s\n", f.org, f.modules,
 			strings.Join(f.surfaces, " "))
+		if f.badAllow != "" {
+			fmt.Fprintf(w, "  %s\n", f.badAllow)
+		}
 		var names []string
 		for m := range f.unlisted {
 			names = append(names, m)

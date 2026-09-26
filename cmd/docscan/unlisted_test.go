@@ -176,3 +176,42 @@ func TestClassifySortsTheOrganisation(t *testing.T) {
 		t.Errorf("empty = %q, want %q", got, "shell")
 	}
 }
+
+// TestParseUnlistedIsWhatTheApiPathUses. The fleet-wide report has no checkout,
+// so it parses the file's bytes rather than a path — and go-composites/is came
+// back NOWHERE minutes after the allowance was merged, because only the tree
+// path could see it.
+func TestParseUnlistedIsWhatTheApiPathUses(t *testing.T) {
+	got, err := parseUnlisted("# why\n\nis  a placeholder, no code\nother  moved to another org\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["is"] != "a placeholder, no code" || got["other"] != "moved to another org" {
+		t.Errorf("parsed %v", got)
+	}
+	// The empty body is what file() returns for a repository with no such
+	// file, and it must mean "nothing allowed", not an error.
+	empty, err := parseUnlisted("")
+	if err != nil || len(empty) != 0 {
+		t.Errorf("empty body: %v %v", empty, err)
+	}
+}
+
+// TestAMalformedAllowanceIsDriftNotSilence.
+func TestAMalformedAllowanceIsDriftNotSilence(t *testing.T) {
+	var b strings.Builder
+	code := report([]finding{{
+		org: "o", modules: 1, surfaces: []string{"landing"},
+		unlisted: map[string][]string{}, stale: map[string][]string{},
+		archived: map[string]bool{}, quiet: map[string]string{},
+		badAllow: ".docs-unlisted:3: \"is\" says which repository but not why",
+	}}, &b)
+	out := b.String()
+	if !strings.Contains(out, "says which repository but not why") {
+		t.Errorf("the malformed file was not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "1 organisations with drift") {
+		t.Errorf("a malformed allowance did not count as drift:\n%s", out)
+	}
+	_ = code
+}

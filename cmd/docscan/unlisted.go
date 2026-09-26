@@ -37,7 +37,27 @@ func readUnlisted(org, root string) error {
 		}
 		return err
 	}
-	for i, line := range strings.Split(string(b), "\n") {
+	entries, err := parseUnlisted(string(b))
+	if err != nil {
+		return err
+	}
+	if len(entries) > 0 {
+		unlisted[org] = entries
+	}
+	return nil
+}
+
+// parseUnlisted reads the file's content. It is separate from readUnlisted
+// because the fleet-wide report has no checkout to read from.
+//
+// ⛔ THE FLEET REPORT COULD NOT SEE THE FILE. It was read only from a -tree,
+// so go-composites/is came back NOWHERE in the fleet sweep minutes after the
+// allowance was merged — the one place the drift is counted was the one place
+// the answer was invisible. An instrument that cannot see a correct state
+// reports it as a defect, and I have written that mistake down more than once.
+func parseUnlisted(body string) (map[string]string, error) {
+	out := map[string]string{}
+	for i, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -45,14 +65,11 @@ func readUnlisted(org, root string) error {
 		name, reason, _ := strings.Cut(line, " ")
 		reason = strings.TrimSpace(reason)
 		if reason == "" {
-			return fmt.Errorf("%s:%d: %q says which repository but not why; write the reason after the name", UnlistedFile, i+1, name)
+			return nil, fmt.Errorf("%s:%d: %q says which repository but not why; write the reason after the name", UnlistedFile, i+1, name)
 		}
-		if unlisted[org] == nil {
-			unlisted[org] = map[string]string{}
-		}
-		unlisted[org][name] = reason
+		out[name] = reason
 	}
-	return nil
+	return out, nil
 }
 
 // orgOf is the owner half of owner/repo.
