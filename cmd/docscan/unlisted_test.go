@@ -215,3 +215,47 @@ func TestAMalformedAllowanceIsDriftNotSilence(t *testing.T) {
 	}
 	_ = code
 }
+
+// TestTheCountAndTheGateCountAlike. They were two expressions and disagreed
+// twice: an empty repository counted in the headline and not in the gate, and a
+// malformed allowance counted in the headline and not in the gate — the second
+// being the dangerous way round, since the file that grants exemptions could be
+// unparseable and the check still pass.
+func TestTheCountAndTheGateCountAlike(t *testing.T) {
+	base := func() finding {
+		return finding{
+			org: "o", modules: 2, surfaces: []string{"landing"},
+			unlisted: map[string][]string{}, stale: map[string][]string{},
+			archived: map[string]bool{}, quiet: map[string]string{},
+		}
+	}
+	empty := base()
+	empty.empty = []string{"shell"}
+	if empty.drifted() {
+		t.Error("an empty repository counts as drift, though the report calls it not a module to advertise")
+	}
+	quiet := base()
+	quiet.quiet = map[string]string{"is": "a placeholder"}
+	if quiet.drifted() {
+		t.Error("a deliberate omission counts as drift")
+	}
+	bad := base()
+	bad.badAllow = ".docs-unlisted:1: no reason"
+	if !bad.drifted() {
+		t.Error("a malformed allowance does not fail the gate — the file granting exemptions could be unparseable and the check pass")
+	}
+	for name, f := range map[string]finding{
+		"unlisted": func() finding { g := base(); g.unlisted = map[string][]string{"x": nil}; return g }(),
+		"stale":    func() finding { g := base(); g.stale = map[string][]string{"landing": {"gone"}}; return g }(),
+	} {
+		if !f.drifted() {
+			t.Errorf("%s is not drift", name)
+		}
+	}
+	// And the headline must agree with drifted() on the same finding.
+	var b strings.Builder
+	report([]finding{empty}, &b)
+	if !strings.Contains(b.String(), "0 organisations with drift") {
+		t.Errorf("the headline disagrees with the gate:\n%s", b.String())
+	}
+}
