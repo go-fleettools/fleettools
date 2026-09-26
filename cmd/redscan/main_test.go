@@ -275,3 +275,82 @@ esac`)
 		t.Errorf("both should be named:\n%s", got)
 	}
 }
+
+// TestARedFromAWorkflowTheRepositoryNoLongerHasIsNotReported. GitHub keeps the
+// last run of a deleted or superseded workflow for ever, so it stays red with
+// nothing anybody can do. go-fsctl/go-fsctl.github.io was named on "pages build
+// and deployment" from 2026-06-22 while its own Hugo workflow had been
+// deploying since — the site answers 200. Two of thirteen reds were this shape,
+// and a reader who checks two and finds both wrong stops checking the rest.
+func TestARedFromAWorkflowTheRepositoryNoLongerHasIsNotReported(t *testing.T) {
+	withFakeGH(t, oneOrgTwoRepos+`
+  *acme/green/actions/workflows*) echo '[{"i":1,"s":"active"}]' ;;
+  *acme/red/actions/workflows*)   echo '[{"i":9,"s":"active"}]' ;;
+  *acme/green/actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
+  *acme/red/actions/runs*)   echo '[{"w":1,"c":"failure","n":"pages build and deployment","d":"2026-06-22T11:04:00Z"}]' ;;
+esac`)
+	var out, errOut strings.Builder
+	if code := run(&out, &errOut); code != 0 {
+		t.Errorf("exit = %d: %s", code, errOut.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "RED default branches: 0") {
+		t.Errorf("a run from a workflow that is gone was counted as red:\n%s", got)
+	}
+	if !strings.Contains(got, "no longer has") || !strings.Contains(got, "pages build and deployment") {
+		t.Errorf("it was dropped silently instead of being named:\n%s", got)
+	}
+}
+
+// TestARedFromAWorkflowThatStillExistsIsStillReported — the other direction,
+// which a filter written from one example gets wrong.
+func TestARedFromAWorkflowThatStillExistsIsStillReported(t *testing.T) {
+	withFakeGH(t, oneOrgTwoRepos+`
+  *acme/green/actions/workflows*) echo '[{"i":1,"s":"active"}]' ;;
+  *acme/red/actions/workflows*)   echo '[{"i":1,"s":"active"}]' ;;
+  *acme/green/actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
+  *acme/red/actions/runs*)   echo '[{"w":1,"c":"failure","n":"CI","d":"2026-09-05T20:40:00Z"}]' ;;
+esac`)
+	var out, errOut strings.Builder
+	run(&out, &errOut)
+	got := out.String()
+	if !strings.Contains(got, "RED default branches: 1") || !strings.Contains(got, "acme/red") {
+		t.Errorf("a live failing workflow stopped being reported:\n%s", got)
+	}
+	if strings.Contains(got, "no longer has") {
+		t.Errorf("a live workflow was called gone:\n%s", got)
+	}
+}
+
+// TestADisabledWorkflowCountsAsGone: GitHub reports one turned off by hand or
+// by inactivity with a state that is not "active", and its last run is as
+// unfixable as a deleted one's.
+func TestADisabledWorkflowCountsAsGone(t *testing.T) {
+	withFakeGH(t, oneOrgTwoRepos+`
+  *acme/green/actions/workflows*) echo '[{"i":1,"s":"active"}]' ;;
+  *acme/red/actions/workflows*)   echo '[{"i":1,"s":"disabled_inactivity"}]' ;;
+  *acme/green/actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
+  *acme/red/actions/runs*)   echo '[{"w":1,"c":"failure","n":"CI","d":"2026-09-05T20:40:00Z"}]' ;;
+esac`)
+	var out, errOut strings.Builder
+	run(&out, &errOut)
+	if got := out.String(); !strings.Contains(got, "RED default branches: 0") {
+		t.Errorf("a disabled workflow's last failure was still reported as red:\n%s", got)
+	}
+}
+
+// TestAWorkflowListThatCannotBeReadKEEPSTheRed. Failing open is the whole
+// point: an unread list must not silence a real failure, which is the direction
+// that costs something.
+func TestAWorkflowListThatCannotBeReadKeepsTheRed(t *testing.T) {
+	withFakeGH(t, oneOrgTwoRepos+`
+  *actions/workflows*) echo "gone fishing" >&2; exit 1 ;;
+  *acme/green/actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
+  *acme/red/actions/runs*)   echo '[{"w":1,"c":"failure","n":"CI","d":"2026-09-05T20:40:00Z"}]' ;;
+esac`)
+	var out, errOut strings.Builder
+	run(&out, &errOut)
+	if got := out.String(); !strings.Contains(got, "RED default branches: 1") {
+		t.Errorf("an unreadable workflow list silenced a real red:\n%s", got)
+	}
+}

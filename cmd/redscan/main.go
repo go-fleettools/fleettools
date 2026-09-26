@@ -109,7 +109,7 @@ func run(stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "repos: %d\n", len(repos))
 
 	var reds []red
-	var unread []string
+	var unread, gone []string
 	checked, rechecked := 0, 0
 	for _, r := range repos {
 		wg.Add(1)
@@ -159,6 +159,36 @@ func run(stdout, stderr io.Writer) int {
 					bad = append(bad, v)
 				}
 			}
+			// ⛔ A RED FROM A WORKFLOW THE REPOSITORY NO LONGER HAS CAN NEVER
+			// GO GREEN. GitHub keeps the last run of a deleted or superseded
+			// workflow for ever, and this reported it as the current state:
+			// go-fsctl/go-fsctl.github.io was named red on "pages build and
+			// deployment" from 2026-06-22 while its own Hugo workflow had been
+			// deploying successfully since — the site answers 200 and its last
+			// four runs are green. go-ruby-hanami was the same shape. Two of
+			// thirteen, and the reader who checks two and finds both wrong
+			// stops checking the other eleven.
+			//
+			// The extra call is made ONLY for a repository that already has a
+			// red, which is 13 of 1983 — the sweep's budget is unchanged.
+			if len(bad) > 0 {
+				if live, err := activeWorkflows(r); err == nil {
+					var kept []wfRun
+					for _, v := range bad {
+						if live[v.W] {
+							kept = append(kept, v)
+						} else {
+							mu.Lock()
+							// Said out loud, not dropped: a workflow that
+							// vanished is worth knowing about, it is just not
+							// a branch anybody can turn green.
+							gone = append(gone, r.FullName+": "+v.N)
+							mu.Unlock()
+						}
+					}
+					bad = kept
+				}
+			}
 			mu.Lock()
 			checked++
 			for _, v := range bad {
@@ -171,6 +201,13 @@ func run(stdout, stderr io.Writer) int {
 
 	sort.Slice(reds, func(i, j int) bool { return reds[i].repo < reds[j].repo })
 	fmt.Fprintf(stdout, "checked: %d of %d   RED default branches: %d\n", checked, len(repos), len(reds))
+	if len(gone) > 0 {
+		sort.Strings(gone)
+		fmt.Fprintf(stdout, "  (%d red run(s) belong to a workflow the repository no longer has, so nothing can turn them green:)\n", len(gone))
+		for _, g := range gone {
+			fmt.Fprintf(stdout, "      %s\n", g)
+		}
+	}
 	if rechecked > 0 {
 		// Said out loud rather than swallowed: a sweep that silently repaired
 		// its own readings would hide how often the endpoint does this.
@@ -287,4 +324,29 @@ func firstLine(s string) string {
 		s = s[:90] + "..."
 	}
 	return strings.TrimSpace(s)
+}
+
+// activeWorkflows is the set of workflow ids the repository still has and has
+// not disabled. GitHub reports a removed one as state "deleted" and keeps
+// serving its runs, which is how a branch stays red with nothing to fix.
+func activeWorkflows(r repo) (map[int]bool, error) {
+	out, err := gh("api", "repos/"+r.FullName+"/actions/workflows?per_page=100",
+		"--jq", "[.workflows[] | {i: .id, s: .state}]")
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		I int    `json:"i"`
+		S string `json:"s"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, err
+	}
+	live := map[int]bool{}
+	for _, w := range rows {
+		if w.S == "active" {
+			live[w.I] = true
+		}
+	}
+	return live, nil
 }
