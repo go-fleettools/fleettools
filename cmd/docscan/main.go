@@ -101,6 +101,7 @@ type finding struct {
 	org       string
 	unlisted  map[string][]string // repo -> the surfaces that DO name it
 	stale     map[string][]string // surface -> names it lists that are gone
+	archived  map[string]bool     // of those, the ones that are archived, not gone
 	empty     []string            // repositories with nothing in them
 	quiet     map[string]string   // repo -> why it is deliberately not advertised
 	modules   int
@@ -173,27 +174,30 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return code
 }
 
-// scan asks one organisation what it has and what it says.
-func scan(org string) finding {
-	f := finding{org: org, unlisted: map[string][]string{}, stale: map[string][]string{}, quiet: map[string]string{}}
-
-	b, err := gh("repo", "list", org, "--limit", "200", "--json", "name,isArchived,isFork,diskUsage")
-	if err != nil {
-		f.readError = err.Error()
-		return f
-	}
-	var all []ghRepo
-	if err := json.Unmarshal(b, &all); err != nil {
-		f.readError = err.Error()
-		return f
-	}
-	have := map[string]bool{}
-	var modules []string
+// classify sorts an organisation's repositories into what the report needs:
+// the names it OWNS, the ones that are MODULES, the empty ones, and the
+// archived ones.
+//
+// ⛔ It is a function of its own so that it can be tested. It used to be the
+// top of scan(), which reaches GitHub, so nothing exercised it — and when the
+// archived/gone distinction was added, deleting the two lines that fill
+// f.archived left the whole suite green. A control nothing can reach is a
+// control that will be deleted by accident.
+func classify(org string, all []ghRepo, f *finding) (have map[string]bool, modules []string) {
+	have = map[string]bool{}
 	for _, r := range all {
 		// ⛔ An archived repository is not unlisted-by-mistake, it is finished.
 		// Reporting it would bury the real answers under every tombstone the
 		// fleet keeps.
 		if r.Archived || r.Fork {
+			// ⛔ ARCHIVED IS NOT GONE, and the difference decides what a
+			// reader does about it. Told a surface names something "the org
+			// no longer has", they delete the row; told it is archived, they
+			// mark it — which is the honest answer, because the repository is
+			// still there and a link to it still resolves.
+			if r.Archived {
+				f.archived[r.Name] = true
+			}
 			continue
 		}
 		// ⛔ have is "the organisation owns this name", which is a different
@@ -216,6 +220,24 @@ func scan(org string) finding {
 		}
 		modules = append(modules, r.Name)
 	}
+	return have, modules
+}
+
+// scan asks one organisation what it has and what it says.
+func scan(org string) finding {
+	f := finding{org: org, unlisted: map[string][]string{}, stale: map[string][]string{}, quiet: map[string]string{}, archived: map[string]bool{}}
+
+	b, err := gh("repo", "list", org, "--limit", "200", "--json", "name,isArchived,isFork,diskUsage")
+	if err != nil {
+		f.readError = err.Error()
+		return f
+	}
+	var all []ghRepo
+	if err := json.Unmarshal(b, &all); err != nil {
+		f.readError = err.Error()
+		return f
+	}
+	have, modules := classify(org, all, &f)
 	f.modules = len(modules)
 	if len(modules) == 0 {
 		return f
@@ -343,7 +365,20 @@ func report(found []finding, w io.Writer) int {
 			fmt.Fprintf(w, "  empty, so not a module to advertise: %s\n", strings.Join(f.empty, " "))
 		}
 		for s, gone := range f.stale {
-			fmt.Fprintf(w, "  %s still lists, and the org no longer has: %s\n", s, strings.Join(gone, " "))
+			var missing, frozen []string
+			for _, n := range gone {
+				if f.archived[n] {
+					frozen = append(frozen, n)
+				} else {
+					missing = append(missing, n)
+				}
+			}
+			if len(missing) > 0 {
+				fmt.Fprintf(w, "  %s still lists, and the org no longer has: %s\n", s, strings.Join(missing, " "))
+			}
+			if len(frozen) > 0 {
+				fmt.Fprintf(w, "  %s lists as current, and the org has ARCHIVED: %s\n", s, strings.Join(frozen, " "))
+			}
 		}
 	}
 	fmt.Fprintf(w, "\n%d organisations with drift, %d unreadable\n", drift, unread)
