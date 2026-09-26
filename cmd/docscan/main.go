@@ -85,6 +85,7 @@ type ghRepo struct {
 	Name     string `json:"name"`
 	Archived bool   `json:"isArchived"`
 	Fork     bool   `json:"isFork"`
+	Disk     int    `json:"diskUsage"`
 }
 
 // finding is one organisation's answer.
@@ -92,6 +93,7 @@ type finding struct {
 	org       string
 	unlisted  map[string][]string // repo -> the surfaces that DO name it
 	stale     map[string][]string // surface -> names it lists that are gone
+	empty     []string            // repositories with nothing in them
 	modules   int
 	surfaces  []string // the surfaces that were readable
 	readError string
@@ -155,7 +157,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 func scan(org string) finding {
 	f := finding{org: org, unlisted: map[string][]string{}, stale: map[string][]string{}}
 
-	b, err := gh("repo", "list", org, "--limit", "200", "--json", "name,isArchived,isFork")
+	b, err := gh("repo", "list", org, "--limit", "200", "--json", "name,isArchived,isFork,diskUsage")
 	if err != nil {
 		f.readError = err.Error()
 		return f
@@ -180,6 +182,16 @@ func scan(org string) finding {
 		// it is simply not a module and does not belong in the unlisted count.
 		have[r.Name] = true
 		if infra(org, r.Name) {
+			continue
+		}
+		// ⛔ An EMPTY repository is not a module nobody advertised; it is a
+		// repository with nothing in it, and "add it to the landing" is the
+		// wrong remedy -- a row pointing at nothing is worse than no row.
+		// Five of the fleet's sixty unadvertised names were empty, and one of
+		// them, openweft/weft-loom-pub, is what made me look: it has no
+		// README, no language and no commits since June.
+		if r.Disk == 0 {
+			f.empty = append(f.empty, r.Name)
 			continue
 		}
 		modules = append(modules, r.Name)
@@ -272,7 +284,7 @@ func report(found []finding, w io.Writer) int {
 			fmt.Fprintf(w, "%-28s UNREAD: %s\n", f.org, f.readError)
 			continue
 		}
-		if len(f.unlisted) == 0 && len(f.stale) == 0 {
+		if len(f.unlisted) == 0 && len(f.stale) == 0 && len(f.empty) == 0 {
 			continue
 		}
 		drift++
@@ -290,6 +302,10 @@ func report(found []finding, w io.Writer) int {
 				where = "only on " + strings.Join(on, ", ")
 			}
 			fmt.Fprintf(w, "  %-22s %s\n", m, where)
+		}
+		if len(f.empty) > 0 {
+			sort.Strings(f.empty)
+			fmt.Fprintf(w, "  empty, so not a module to advertise: %s\n", strings.Join(f.empty, " "))
 		}
 		for s, gone := range f.stale {
 			fmt.Fprintf(w, "  %s still lists, and the org no longer has: %s\n", s, strings.Join(gone, " "))
