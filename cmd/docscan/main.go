@@ -222,7 +222,20 @@ func scan(org string) finding {
 				n++
 			}
 		}
-		if n == 0 {
+		// ⛔ An INDEX names most of what the organisation has. A surface that
+		// names a handful is a product page, and asking why it omits the rest
+		// is asking the wrong question of it.
+		//
+		// The first threshold here was "at least one", and it was too weak by
+		// a wide margin: openweft's landing is a page about weft that happens
+		// to name nine of seventy modules, so the report carried 44 lines of
+		// "only on profile" -- true, expected, and enough to bury the 17
+		// modules that really were named nowhere. go-widgets' landing names
+		// one of nineteen.
+		//
+		// Half is not a tuned constant. It is the point where a listing stops
+		// being a sample and starts being a list.
+		if n*2 < len(modules) {
 			continue
 		}
 		kept = append(kept, s)
