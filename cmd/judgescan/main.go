@@ -216,6 +216,12 @@ func main() {
 	// what was actually looked at, always.
 	fmt.Fprintf(os.Stderr, "\n%d repositories scanned, %d name an external tool in a test, %d have one their CI never installs\n",
 		scanned, withTools, len(found))
+	if n := unparsedFiles.Load(); n > 0 {
+		// Said out loud: those files were read by the old text search, which
+		// is the instrument this replaces precisely because it cannot tell a
+		// call from a string that looks like one.
+		fmt.Fprintf(os.Stderr, "⚠ %d test file(s) did not parse and fell back to the text search.\n", n)
+	}
 }
 
 // defaultRoot is the GitHub checkout root on this machine.
@@ -296,6 +302,7 @@ func scan(root, repo string) (finding, bool) {
 func toolsWanted(dir string) ([]string, bool) {
 	seen := map[string]bool{}
 	dynamic := false
+	unparsed := 0
 	filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -314,26 +321,46 @@ func toolsWanted(dir string) ([]string, bool) {
 		if err != nil {
 			return nil
 		}
-		// A tool whose LookPath error is discarded is not gating anything,
-		// wherever else in the file it may also appear properly.
-		discarded := map[string]bool{}
-		for _, m := range discardedErrRE.FindAllSubmatch(b, -1) {
-			discarded[string(m[1])] = true
+		// PARSED, not searched. See parse.go: a LookPath inside a string
+		// literal is not a call, and this tool's own test fixtures are full
+		// of them.
+		gated, _, dyn, ok := lookPaths(b)
+		if !ok {
+			// A file that does not parse is NOT a file naming no tools. Fall
+			// back to the old text search, and count it so the report can say
+			// the pass was not uniform.
+			unparsed++
+			discarded := map[string]bool{}
+			for _, m := range discardedErrRE.FindAllSubmatch(b, -1) {
+				discarded[string(m[1])] = true
+			}
+			for _, m := range fallbackRE.FindAllSubmatch(b, -1) {
+				discarded[string(m[1])] = true
+			}
+			for _, m := range lookPathRE.FindAllSubmatch(b, -1) {
+				name := string(m[1])
+				if !ubiquitous[name] && !discarded[name] {
+					seen[name] = true
+				}
+			}
+			if lookPathDynamicRE.Match(b) {
+				dynamic = true
+			}
+			return nil
 		}
-		for _, m := range fallbackRE.FindAllSubmatch(b, -1) {
-			discarded[string(m[1])] = true
-		}
-		for _, m := range lookPathRE.FindAllSubmatch(b, -1) {
-			name := string(m[1])
-			if !ubiquitous[name] && !discarded[name] {
+		for name := range gated {
+			if !ubiquitous[name] {
 				seen[name] = true
 			}
 		}
-		if lookPathDynamicRE.Match(b) {
+		if dyn {
 			dynamic = true
 		}
 		return nil
 	})
+	if unparsed > 0 {
+		unparsedFiles.Add(int64(unparsed))
+	}
 	out := make([]string, 0, len(seen))
 	for k := range seen {
 		out = append(out, k)
