@@ -240,11 +240,28 @@ func heldByOthers() map[string]string {
 	return out
 }
 
-func main() {
-	out, err := gh("api", "user/orgs", "--paginate", "--jq", ".[].login")
+// orgsToSweep is the organisations to search: the ones named on the command
+// line, or every one the token can see when none are.
+//
+// Naming them is what lets a sweep be scoped to where its result can be
+// checked. Without it the only choice is the whole fleet, and the whole fleet
+// is expensive: ~300 candidates is thousands of REST calls, against a budget
+// Renovate is also drawing on. A run that has to be justified before it starts
+// is one that should be possible to make small.
+//
+// It also makes the command safe to explore. `prmerge -h` is not a flag this
+// knows, so it used to fall through to sweeping everything -- which is how this
+// filter came to be written: somebody typed it expecting a usage message and
+// merged eighteen pull requests across three organisations instead.
+func orgsToSweep(named []string, all func() ([]byte, error)) ([]string, error) {
+	if len(named) > 0 {
+		orgs := append([]string(nil), named...)
+		sort.Strings(orgs)
+		return orgs, nil
+	}
+	out, err := all()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "orgs:", err)
-		os.Exit(1)
+		return nil, err
 	}
 	var orgs []string
 	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -253,6 +270,32 @@ func main() {
 		}
 	}
 	sort.Strings(orgs)
+	return orgs, nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help" || os.Args[1] == "help") {
+		fmt.Println("usage: prmerge [org...]")
+		fmt.Println()
+		fmt.Println("Merges dependency pull requests that are mergeable AND fully green.")
+		fmt.Println("With no argument it sweeps every organisation the token can see,")
+		fmt.Println("which is thousands of REST calls against a budget Renovate shares.")
+		fmt.Println("Name organisations to scope it:")
+		fmt.Println()
+		fmt.Println("    prmerge go-crdt openweft")
+		return
+	}
+	orgs, err := orgsToSweep(os.Args[1:], func() ([]byte, error) {
+		return gh("api", "user/orgs", "--paginate", "--jq", ".[].login")
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "orgs:", err)
+		os.Exit(1)
+	}
+	if len(orgs) == 0 {
+		fmt.Fprintln(os.Stderr, "orgs: none to sweep")
+		os.Exit(1)
+	}
 
 	var batches [][]string
 	cur, n := []string{}, 0

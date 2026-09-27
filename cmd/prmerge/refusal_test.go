@@ -41,3 +41,50 @@ func TestTheTwoRateLimitsWantOppositeTreatment(t *testing.T) {
 		}
 	}
 }
+
+// Which organisations a run sweeps, which decides what it costs.
+//
+// The whole fleet is ~300 candidates and thousands of REST calls, against a
+// budget Renovate is also drawing on. Naming organisations is what lets a run
+// be scoped to where its result can be checked — and the absence of that was
+// how eighteen pull requests across three organisations came to be merged by
+// somebody typing `prmerge -h` and expecting a usage message.
+func TestOrgsToSweepPrefersWhatWasNamed(t *testing.T) {
+	refuse := func() ([]byte, error) { return nil, errors.New("the fleet must not be asked for") }
+
+	got, err := orgsToSweep([]string{"openweft", "go-crdt"}, refuse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sorted, because the caller batches them into search queries and two runs
+	// naming the same organisations should ask the same questions.
+	if len(got) != 2 || got[0] != "go-crdt" || got[1] != "openweft" {
+		t.Errorf("orgsToSweep named = %v, want [go-crdt openweft]", got)
+	}
+
+	// And it must not have asked: a scoped run that still enumerates the fleet
+	// pays the cost it was scoped to avoid.
+	if _, err := orgsToSweep([]string{"one"}, refuse); err != nil {
+		t.Errorf("a named sweep consulted the fleet: %v", err)
+	}
+}
+
+// The control: with nothing named it still sweeps everything, which is the
+// behaviour every existing caller has.
+func TestOrgsToSweepFallsBackToTheWholeFleet(t *testing.T) {
+	got, err := orgsToSweep(nil, func() ([]byte, error) {
+		return []byte("  openweft \n\ngo-crdt\n"), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "go-crdt" || got[1] != "openweft" {
+		t.Errorf("orgsToSweep unnamed = %v, want [go-crdt openweft] with blanks and spaces dropped", got)
+	}
+
+	if _, err := orgsToSweep(nil, func() ([]byte, error) {
+		return nil, errors.New("no token")
+	}); err == nil {
+		t.Error("a fleet sweep whose enumeration failed reported no error, and would have swept nothing quietly")
+	}
+}
