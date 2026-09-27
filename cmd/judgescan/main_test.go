@@ -765,3 +765,77 @@ func TestTheTwoRepositoriesThatCausedThis(t *testing.T) {
 		t.Error("xorriso was found in a line that does not install it")
 	}
 }
+
+// ⛔ replayable is a SELECTOR, not an exclusion: a wrong `true` puts a
+// repository on a list it does not belong on, and the first version did
+// exactly that -- eleven times in one repository, by reading `- name: go test
+// (Linux 386)` as a command. So the cases that must NOT be reported come
+// first.
+
+func TestAStepNameIsNotACommand(t *testing.T) {
+	for _, tc := range []struct{ name, yaml string }{
+		{"a step label", "      - name: go test (Linux 386)\n"},
+		{"a label without the dash", "        name: go test race (Cgo)\n"},
+		{"a comment", "          # go test here one day\n"},
+		{
+			// -c compiles a test binary and runs nothing, so there is no
+			// result to cache and nothing to replay. Several repositories
+			// cross-compile this way to prove a lane builds.
+			"compile only",
+			"      - run: CGO_ENABLED=0 GOOS=linux GOARCH=riscv64 go test -c -o /tmp/t.test .\n",
+		},
+		{"already disabled", "      - run: go test -count=1 -race ./...\n"},
+		{"the spaced spelling", "      - run: go test -count 1 ./...\n"},
+		{"no go test at all", "      - run: go build ./...\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := replayable(tc.yaml); len(got) != 0 {
+				t.Errorf("reported %q", got)
+			}
+		})
+	}
+}
+
+func TestATestThatCanReplayIsReported(t *testing.T) {
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"the plain form", "      - run: go test ./...\n", "go test ./..."},
+		{
+			"a coverage gate",
+			"          go test -race -coverpkg=\"$COVERPKG\" -coverprofile=cover.out ./...\n",
+			"go test -race -coverpkg=\"$COVERPKG\" -coverprofile=cover.out ./...",
+		},
+		{
+			// -count=2 also defeats the cache, but it changes what the run
+			// MEANS, so it is reported for a human rather than waved through.
+			"a count that is not 1",
+			"      - run: go test -count=2 ./...\n",
+			"go test -count=2 ./...",
+		},
+		{
+			// The witness: go-compressions/compress, whose arm64 lane replayed
+			// a result recorded before ncompress was installed.
+			"the line that caused this",
+			"      - run: go test -race -v ./... 2>&1 | tee test-output.txt\n",
+			"go test -race -v ./... 2>&1 | tee test-output.txt",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := replayable(tc.yaml)
+			if len(got) != 1 || got[0] != tc.want {
+				t.Errorf("got %q, want [%q]", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBothInvocationsAreCounted: a workflow that fixed its test step and left
+// its coverage gate alone is still replaying a profile, which is the worse
+// half -- the gate that exposed this printed `(cached) coverage: 100.0%`.
+func TestBothInvocationsAreCounted(t *testing.T) {
+	yaml := "      - run: go test -count=1 -race ./...\n" +
+		"      - run: go test -covermode=atomic -coverprofile=cov.out ./...\n"
+	got := replayable(yaml)
+	if len(got) != 1 || !strings.Contains(got[0], "coverprofile") {
+		t.Errorf("got %q, want only the coverage line", got)
+	}
+}
