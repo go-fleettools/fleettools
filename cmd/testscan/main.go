@@ -130,6 +130,7 @@ func (f finding) covered() bool { return f.catchAll || f.testedPkgs >= f.withTes
 
 func main() {
 	root := flag.String("root", defaultRoot(), "directory holding org/repo checkouts")
+	doFetch := flag.Bool("fetch", true, "git fetch each repository about to be reported, so its distance is measured and not remembered")
 	only := flag.String("repo", "", "scan a single org/repo, verbosely")
 	all := flag.Bool("all", false, "also list repositories whose CI covers everything")
 	remote := flag.Bool("remote", false, "read origin/HEAD instead of the working tree (fetch first)")
@@ -207,26 +208,22 @@ func main() {
 
 	reportDropped(dropped)
 
-	// How stale is the evidence? This reads the working tree, so a checkout
-	// that has not heard from its remote in weeks yields a diagnosis that is
-	// weeks out of date and looks exactly like a fresh one. Say it before
-	// anyone acts on the list above.
-	stale, furthest := 0, 0
+	// How stale is the evidence? One function, because these twelve lines
+	// existed twice and the fix for them landed in only one copy.
+	ages := make([]checkout.Age, 0, len(found))
 	for _, f := range found {
-		if f.behind > 0 {
-			stale++
+		a := checkout.Age{Behind: f.behind, FetchAge: f.fetchAge, FetchKnown: f.fetchKnown}
+		// Ask the remote, for the findings only. A remembered distance
+		// of 0 means nobody asked; a measured one means nothing is
+		// there. Only a handful of repositories reach this point.
+		if *doFetch {
+			if n, ok := checkout.Refresh(filepath.Join(*root, f.repo)); ok {
+				a = checkout.Age{Behind: n, FetchAge: 0, FetchKnown: true}
+			}
 		}
-		if f.behind > furthest {
-			furthest = f.behind
-		}
+		ages = append(ages, a)
 	}
-	if stale > 0 {
-		fmt.Fprintf(os.Stderr,
-			"\n⚠ %d of the %d findings above come from a checkout BEHIND its remote (furthest: %d commits).\n"+
-				"  A finding derived from a stale tree describes code that may no longer exist. Pull those\n"+
-				"  clones and RE-RUN this: refreshing without re-deriving makes a stale finding look confirmed.\n",
-			stale, len(found), furthest)
-	}
+	fmt.Fprint(os.Stderr, checkout.StalenessWarning(ages))
 
 	// A scan that cannot read reports zero, and zero reads as good news.
 	fmt.Fprintf(os.Stderr, "\n%d repositories scanned, %d have tests, %d run them all in CI, %d do not\n",

@@ -167,13 +167,16 @@ type finding struct {
 	bytesRead  int      // how much YAML was actually read -- the positive control
 	fetchAge   time.Duration
 	fetchKnown bool
-	behind     int  // commits this checkout is behind its remote default
-	skipFatal  bool // a workflow turns `--- SKIP` into a failing step
+	behind     int      // commits this checkout is behind its remote default
+	skipFatal  bool     // a workflow turns `--- SKIP` into a failing step
+	replay     []string // `go test` lines that could replay a cached result
 }
 
 func main() {
 	root := flag.String("root", defaultRoot(), "directory holding org/repo checkouts")
+	doFetch := flag.Bool("fetch", true, "git fetch each repository about to be reported, so its distance is measured and not remembered")
 	only := flag.String("repo", "", "scan a single org/repo, verbosely")
+	showReplays := flag.Bool("replays", false, "list every repository whose `go test` can replay a cached result")
 	flag.Parse()
 
 	repos, err := findRepos(*root, *only)
@@ -186,7 +189,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	var found []finding
+	var found, withTool []finding
 	scanned, withTools := 0, 0
 	for _, r := range repos {
 		f, ok := scan(*root, r)
@@ -195,6 +198,7 @@ func main() {
 			continue
 		}
 		withTools++
+		withTool = append(withTool, f)
 		if f.noCI != "" || len(f.missing) > 0 {
 			found = append(found, f)
 		}
@@ -223,6 +227,39 @@ func main() {
 	}
 
 	sort.Slice(found, func(i, j int) bool { return found[i].repo < found[j].repo })
+
+	// A repository already on the list above has a tool nobody installs, which
+	// is the bigger problem; naming it twice buries the one that is only ever
+	// replayed. So this class is reported for the repositories whose judge IS
+	// installed.
+	onList := map[string]bool{}
+	for _, f := range found {
+		onList[f.repo] = true
+	}
+	var replays []finding
+	for _, f := range withTool {
+		if !onList[f.repo] && len(f.replay) > 0 {
+			replays = append(replays, f)
+		}
+	}
+	// ⛔ The same ownership question the list above asks. Without it this
+	// named tannevaled/purego, a fork, on its first run.
+	if *only == "" && len(replays) > 0 {
+		names := make([]string, 0, len(replays))
+		for _, f := range replays {
+			names = append(names, f.repo)
+		}
+		owners, have := checkout.Owners()
+		keep, _ := checkout.Ours(names, owners, have, checkout.Ask)
+		var mine []finding
+		for _, f := range replays {
+			if keep[f.repo] {
+				mine = append(mine, f)
+			}
+		}
+		replays = mine
+	}
+	sort.Slice(replays, func(i, j int) bool { return replays[i].repo < replays[j].repo })
 
 	// Set aside the repositories whose CI would go RED on the very skip this
 	// tool is looking for. They are still printed below; they are just not
@@ -258,6 +295,34 @@ func main() {
 	// How stale is the evidence? This reads the working tree, so a checkout
 	// that has not fetched in weeks gives a weeks-old answer that looks exactly
 	// like a current one. Say so before anyone acts on the list.
+	if len(replays) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"\n%d install their judge and can still replay a run that did not have it\n"+
+				"  (go test without -count=1; the cache key does not see a program appearing):\n", len(replays))
+		// ⛔ The COUNT is unconditional and the list is not. 119 lines of
+		// census under a list of 5 findings buries the 5, and a scanner whose
+		// important answer scrolls off is a scanner nobody reads -- but a
+		// number that only appears with a flag is a number nobody knows to
+		// ask for.
+		if !*showReplays {
+			fmt.Fprintln(os.Stderr, "  (-replays to list them)")
+		}
+		for _, f := range replays {
+			if !*showReplays {
+				break
+			}
+			first := f.replay[0]
+			if len(first) > 64 {
+				first = first[:61] + "..."
+			}
+			more := ""
+			if n := len(f.replay) - 1; n > 0 {
+				more = fmt.Sprintf("  (+%d more)", n)
+			}
+			fmt.Fprintf(os.Stderr, "  %-38s %s%s\n", f.repo, first, more)
+		}
+	}
+
 	if len(loud) > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d left out — their CI FAILS on a `--- SKIP`, so the skip cannot be silent:\n", len(loud))
 		for _, f := range loud {
@@ -274,26 +339,22 @@ func main() {
 		}
 	}
 
-	// ⛔ The distance, not the fetch age. This counted clones that had not
-	// FETCHED in a week, and `git fetch` refreshes FETCH_HEAD without touching
-	// the working tree — so the signal said "fresh" for a tree twenty commits
-	// behind. testscan learnt this on 2026-09-27 and this copy did not, which
-	// is why both now call one function.
-	stale, furthest := 0, 0
+	// How stale is the evidence? One function, because these twelve lines
+	// existed twice and the fix for them landed in only one copy.
+	ages := make([]checkout.Age, 0, len(found))
 	for _, f := range found {
-		if f.behind > 0 {
-			stale++
+		a := checkout.Age{Behind: f.behind, FetchAge: f.fetchAge, FetchKnown: f.fetchKnown}
+		// Ask the remote, for the findings only. A remembered distance
+		// of 0 means nobody asked; a measured one means nothing is
+		// there. Only a handful of repositories reach this point.
+		if *doFetch {
+			if n, ok := checkout.Refresh(filepath.Join(*root, f.repo)); ok {
+				a = checkout.Age{Behind: n, FetchAge: 0, FetchKnown: true}
+			}
 		}
-		if f.behind > furthest {
-			furthest = f.behind
-		}
+		ages = append(ages, a)
 	}
-	if stale > 0 {
-		fmt.Fprintf(os.Stderr,
-			"\n⚠ %d of the %d findings above come from a checkout BEHIND its remote (furthest: %d commits).\n"+
-				"  Pull those clones and RE-RUN this: refreshing without re-deriving makes a stale finding\n"+
-				"  look confirmed.\n", stale, len(found), furthest)
-	}
+	fmt.Fprint(os.Stderr, checkout.StalenessWarning(ages))
 
 	// A scan that cannot read reports zero, and zero reads as good news. Say
 	// what was actually looked at, always.
@@ -376,6 +437,7 @@ func scan(root, repo string) (finding, bool) {
 	}
 	f.workflows, f.bytesRead = n, len(yaml)
 	f.skipFatal = skipIsFatal(yaml)
+	f.replay = replayable(yaml)
 	hay := strings.ToLower(installLines(yaml))
 	for _, t := range tools {
 		if !mentioned(hay, t) {
