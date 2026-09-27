@@ -33,7 +33,13 @@
 //     named. go-widgets/window's lanes each name one test; that turned out to
 //     be fine (prefix matching covered all 19), but only counting said so.
 //
-// It reads the working tree only. No API calls, so it cannot starve Renovate.
+// It reads the working tree only. The SCAN makes no API calls, so it cannot
+// starve Renovate — but each FINDING is confirmed with one, because a checkout
+// on disk is not necessarily one of our repositories. Six of nineteen findings
+// on 2026-09-27 were forks, a local-only directory, or upstream's own project;
+// telling somebody hashicorp/hcl has no CI is worse than saying nothing. That
+// is nineteen calls, not nine hundred and twenty-five, and an unanswered
+// question keeps the finding.
 package main
 
 import (
