@@ -277,21 +277,10 @@ func main() {
 		found = quiet
 	}
 
-	for _, f := range found {
-		switch {
-		case f.noCI != "":
-			fmt.Printf("%-40s  no CI at all       %s\n", f.repo, strings.Join(f.missing, " "))
-		default:
-			fmt.Printf("%-40s  never installed    %s\n", f.repo, strings.Join(f.missing, " "))
-		}
-		if *only != "" {
-			fmt.Printf("    read %d workflow file(s), %d bytes of YAML\n", f.workflows, f.bytesRead)
-			if f.dynamic {
-				fmt.Println("    NOTE: a LookPath here takes a non-literal argument; its tool is not in this list")
-			}
-		}
-	}
-
+	// ⛔ The list is printed AFTER the re-derivation below, not before it. The
+	// first version printed here and dropped the finding four lines later, so
+	// a stale finding still reached the reader's eyes with a retraction under
+	// it. A correction that arrives after the claim is not a correction.
 	// How stale is the evidence? This reads the working tree, so a checkout
 	// that has not fetched in weeks gives a weeks-old answer that looks exactly
 	// like a current one. Say so before anyone acts on the list.
@@ -339,22 +328,73 @@ func main() {
 		}
 	}
 
-	// How stale is the evidence? One function, because these twelve lines
-	// existed twice and the fix for them landed in only one copy.
+	// ⛔ RE-DERIVE, do not merely refresh. This tool has been printing
+	// "refreshing without re-deriving makes a stale finding look confirmed"
+	// while doing exactly that: it fetched, measured the distance, warned, and
+	// then reported a finding parsed from the OLD bytes. On 2026-09-27 that
+	// warning fired on 2 of 5 findings and, once the clones were pulled by
+	// hand, 4 of 8 findings disappeared -- every one of them a workflow that
+	// had gained the tool upstream.
+	//
+	// So a finding whose checkout is behind is re-scanned against the remote
+	// default, using this same scan() over a materialised tree. One parser,
+	// not two.
 	ages := make([]checkout.Age, 0, len(found))
+	var survived []finding
+	rederived, dropped2 := 0, 0
 	for _, f := range found {
 		a := checkout.Age{Behind: f.behind, FetchAge: f.fetchAge, FetchKnown: f.fetchKnown}
-		// Ask the remote, for the findings only. A remembered distance
-		// of 0 means nobody asked; a measured one means nothing is
-		// there. Only a handful of repositories reach this point.
+		dir := filepath.Join(*root, f.repo)
 		if *doFetch {
-			if n, ok := checkout.Refresh(filepath.Join(*root, f.repo)); ok {
+			if n, ok := checkout.Refresh(dir); ok {
 				a = checkout.Age{Behind: n, FetchAge: 0, FetchKnown: true}
 			}
 		}
-		ages = append(ages, a)
+		keep := true
+		if a.Behind > 0 {
+			if ref, ok := checkout.DefaultRef(dir); ok {
+				if tmp, cleanup, ok := checkout.MaterialiseAt(dir, ref); ok {
+					rederived++
+					// scan() wants root+repo; the materialised tree IS the repo.
+					nf, still := scan(tmp, "")
+					if !still || (nf.noCI == "" && len(nf.missing) == 0) {
+						keep = false
+						dropped2++
+					} else {
+						nf.repo, nf.behind = f.repo, a.Behind
+						f = nf
+					}
+					cleanup()
+				}
+			}
+		}
+		if keep {
+			survived = append(survived, f)
+			ages = append(ages, a)
+		}
 	}
-	fmt.Fprint(os.Stderr, checkout.StalenessWarning(ages))
+	found = survived
+	for _, f := range found {
+		switch {
+		case f.noCI != "":
+			fmt.Printf("%-40s  no CI at all       %s\n", f.repo, strings.Join(f.missing, " "))
+		default:
+			fmt.Printf("%-40s  never installed    %s\n", f.repo, strings.Join(f.missing, " "))
+		}
+		if *only != "" {
+			fmt.Printf("    read %d workflow file(s), %d bytes of YAML\n", f.workflows, f.bytesRead)
+			if f.dynamic {
+				fmt.Println("    NOTE: a LookPath here takes a non-literal argument; its tool is not in this list")
+			}
+		}
+	}
+
+	if dropped2 > 0 {
+		fmt.Fprintf(os.Stderr,
+			"\n%d finding(s) dropped: re-derived against the remote default and no longer true\n"+
+				"  (the working tree was behind; %d checkout(s) were re-scanned that way).\n", dropped2, rederived)
+	}
+	fmt.Fprint(os.Stderr, checkout.StalenessWarning(ages, *doFetch))
 
 	// A scan that cannot read reports zero, and zero reads as good news. Say
 	// what was actually looked at, always.

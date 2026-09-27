@@ -157,7 +157,7 @@ func main() {
 			continue
 		}
 		withTests++
-		if f.covered() && !f.noCI && !f.noGoTest {
+		if !isFinding(f) {
 			ok++
 			if !*all {
 				continue
@@ -183,6 +183,49 @@ func main() {
 		return found[i].repo < found[j].repo
 	})
 
+	// ⛔ scanRef already reads origin/main rather than the working tree, and
+	// this tool still reported ten repositories with no CI of which EIGHT had
+	// one. Its own comment says why: "origin/main in a clone is itself a
+	// cached value". Nobody had fetched. The Refresh below did — AFTER the
+	// verdict was formed.
+	//
+	// So the order is now fetch, then derive again, for the findings only.
+	// Nine hundred fetches to answer a question about ten is a cost, not a
+	// measurement.
+	ages := make([]checkout.Age, 0, len(found))
+	var survived []finding
+	rederived, vanished := 0, 0
+	for _, f := range found {
+		a := checkout.Age{Behind: f.behind, FetchAge: f.fetchAge, FetchKnown: f.fetchKnown}
+		if *doFetch {
+			if n, fetched := checkout.Refresh(filepath.Join(*root, f.repo)); fetched {
+				a = checkout.Age{Behind: n, FetchAge: 0, FetchKnown: true}
+				rederived++
+				nf, still := scanRef(*root, f.repo)
+				if !still || !isFinding(nf) {
+					vanished++
+					// ⛔ And move it to the other column. A finding that is
+					// dropped without being counted anywhere makes the summary
+					// stop adding up -- 1 with tests, 0 conforming, 0 findings
+					// -- and a total that does not close is the shape of a
+					// scan that lost something.
+					ok++
+					continue
+				}
+				nf.behind, nf.fetchAge, nf.fetchKnown = a.Behind, a.FetchAge, a.FetchKnown
+				f = nf
+			}
+		}
+		survived = append(survived, f)
+		ages = append(ages, a)
+	}
+	found = survived
+	if vanished > 0 {
+		fmt.Fprintf(os.Stderr,
+			"\n%d finding(s) dropped: fetched and re-derived, and no longer true\n"+
+				"  (%d checkout(s) were re-scanned against their remote default).\n", vanished, rederived)
+	}
+
 	for _, f := range found {
 		fmt.Print(render(f))
 		// ⛔ Per FINDING, not as an aggregate at the bottom. The aggregate was
@@ -192,8 +235,17 @@ func main() {
 		// commits behind. What the reader needs is beside the line they are
 		// about to act on.
 		if f.behind > 0 {
-			fmt.Printf("    ⚠ this checkout is %d commit(s) behind its remote — the finding above "+
-				"describes code that may no longer exist. Pull, then RE-RUN this.\n", f.behind)
+			// ⛔ Two messages about the same fact must not disagree. This line
+			// said "Pull, then RE-RUN this" while the summary underneath said
+			// the finding had already been re-derived and still held. A reader
+			// who follows the first does work the tool has done.
+			if *doFetch {
+				fmt.Printf("    this checkout is %d commit(s) behind — re-derived against the remote "+
+					"default, and it still holds.\n", f.behind)
+			} else {
+				fmt.Printf("    ⚠ this checkout is %d commit(s) behind its remote and -fetch=false, so "+
+					"the finding above describes code that may no longer exist.\n", f.behind)
+			}
 		}
 		if *only != "" {
 			fmt.Printf("    read %d workflow file(s), %d bytes\n", f.workflows, f.bytesRead)
@@ -208,22 +260,7 @@ func main() {
 
 	reportDropped(dropped)
 
-	// How stale is the evidence? One function, because these twelve lines
-	// existed twice and the fix for them landed in only one copy.
-	ages := make([]checkout.Age, 0, len(found))
-	for _, f := range found {
-		a := checkout.Age{Behind: f.behind, FetchAge: f.fetchAge, FetchKnown: f.fetchKnown}
-		// Ask the remote, for the findings only. A remembered distance
-		// of 0 means nobody asked; a measured one means nothing is
-		// there. Only a handful of repositories reach this point.
-		if *doFetch {
-			if n, ok := checkout.Refresh(filepath.Join(*root, f.repo)); ok {
-				a = checkout.Age{Behind: n, FetchAge: 0, FetchKnown: true}
-			}
-		}
-		ages = append(ages, a)
-	}
-	fmt.Fprint(os.Stderr, checkout.StalenessWarning(ages))
+	fmt.Fprint(os.Stderr, checkout.StalenessWarning(ages, *doFetch))
 
 	// A scan that cannot read reports zero, and zero reads as good news.
 	fmt.Fprintf(os.Stderr, "\n%d repositories scanned, %d have tests, %d run them all in CI, %d do not\n",
@@ -284,6 +321,13 @@ func findRepos(root, only string) ([]string, error) {
 }
 
 // scan returns one repository's finding, and whether it has any tests at all.
+// isFinding is the ONE definition of "this repository is a problem".
+//
+// It was written inline in the scan loop, so the re-derivation pass had to
+// restate it -- and a predicate stated twice is a predicate that drifts. The
+// headline count and the re-check now ask the same question.
+func isFinding(f finding) bool { return !f.covered() || f.noCI || f.noGoTest }
+
 func scan(root, repo string) (finding, bool) {
 	dir := filepath.Join(root, repo)
 	pkgs, tagged := testPackages(dir)

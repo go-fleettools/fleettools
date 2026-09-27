@@ -141,7 +141,10 @@ type Age struct {
 // separately, and that is the drift this package exists to stop: the distance
 // fix landed in one of them on 2026-09-27 and not the other, and the comment
 // left behind in the second said so.
-func StalenessWarning(ages []Age) string {
+// confirmed says whether the caller RE-DERIVED each behind finding against
+// the remote default. It changes what the sentence is allowed to claim: with
+// it, being behind is a note; without it, it is a reason to distrust the list.
+func StalenessWarning(ages []Age, confirmed bool) string {
 	behind, unknown, furthest := 0, 0, 0
 	for _, a := range ages {
 		switch Judge(a.Behind, a.FetchAge, a.FetchKnown) {
@@ -155,7 +158,13 @@ func StalenessWarning(ages []Age) string {
 		}
 	}
 	var b strings.Builder
-	if behind > 0 {
+	switch {
+	case behind > 0 && confirmed:
+		fmt.Fprintf(&b,
+			"\n%d of the %d findings above sit on a checkout BEHIND its remote (furthest: %d commits),\n"+
+				"  and each was RE-DERIVED against the remote default and still holds. Pulling would\n"+
+				"  change the line numbers, not the verdict.\n", behind, len(ages), furthest)
+	case behind > 0:
 		fmt.Fprintf(&b,
 			"\n⚠ %d of the %d findings above come from a checkout BEHIND its remote (furthest: %d commits).\n"+
 				"  Pull those clones and RE-RUN this: refreshing without re-deriving makes a stale finding\n"+
@@ -169,6 +178,61 @@ func StalenessWarning(ages []Age) string {
 	}
 	return b.String()
 }
+
+// MaterialiseAt writes the tree at a ref into a temporary directory and
+// returns its path with a cleanup function.
+//
+// ⛔ THIS EXISTS BECAUSE REFRESHING IS NOT RE-DERIVING, which is the sentence
+// these scanners have been PRINTING at their users for weeks while not doing
+// it themselves. On 2026-09-27 testscan reported 10 repositories with no CI;
+// after the clones were pulled by hand it reported 2. judgescan the same
+// morning reported 8 and then 4. Eight and four findings, every one of them
+// describing a workflow file that had gained the very thing the tool said was
+// missing -- because the clone farm drifts under Renovate and under my own
+// merges, and a scan of a stale tree manufactures findings that look exactly
+// like real ones.
+//
+// Fetching told us the distance. It did not change the bytes being parsed.
+// This does: the caller re-runs its ORDINARY scan over the materialised tree,
+// so there is no second copy of the parsing to drift from the first.
+//
+// It is called for the handful of repositories that produced a finding, never
+// for the fleet, because `git archive` of nine hundred repositories to answer
+// a question about five of them is not a measurement, it is a cost.
+func MaterialiseAt(dir, ref string) (string, func(), bool) {
+	tmp, err := os.MkdirTemp("", "fleettools-at-*")
+	if err != nil {
+		return "", func() {}, false
+	}
+	cleanup := func() { os.RemoveAll(tmp) }
+	ar := exec.Command("git", "-C", dir, "archive", "--format=tar", ref)
+	untar := exec.Command("tar", "-x", "-C", tmp)
+	pipe, err := ar.StdoutPipe()
+	if err != nil {
+		cleanup()
+		return "", func() {}, false
+	}
+	untar.Stdin = pipe
+	if err := ar.Start(); err != nil {
+		cleanup()
+		return "", func() {}, false
+	}
+	if err := untar.Run(); err != nil {
+		_ = ar.Wait()
+		cleanup()
+		return "", func() {}, false
+	}
+	if err := ar.Wait(); err != nil {
+		cleanup()
+		return "", func() {}, false
+	}
+	// ⛔ A materialised tree has no .git, so anything the scan derives from git
+	// there would answer about nothing. Callers use it for FILE content only.
+	return tmp, cleanup, true
+}
+
+// DefaultRef names the remote default branch of a checkout.
+func DefaultRef(dir string) (string, bool) { return defaultRemoteRef(dir) }
 
 func git(dir string, args ...string) (string, bool) {
 	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
