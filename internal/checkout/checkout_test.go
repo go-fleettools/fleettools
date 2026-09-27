@@ -172,23 +172,33 @@ func TestZeroBehindIsNotAlwaysCurrent(t *testing.T) {
 // there are both. A warning that fires on a clean fleet is a warning nobody
 // reads by the third run.
 func TestTheWarningSaysNothingWhenThereIsNothingToSay(t *testing.T) {
-	if s := StalenessWarning(nil); s != "" {
+	if s := StalenessWarning(nil, false); s != "" {
 		t.Errorf("warned about an empty list: %q", s)
 	}
 	fresh := []Age{{Behind: 0, FetchAge: time.Minute, FetchKnown: true}}
-	if s := StalenessWarning(fresh); s != "" {
+	if s := StalenessWarning(fresh, false); s != "" {
 		t.Errorf("warned about a current checkout: %q", s)
 	}
 	both := []Age{
 		{Behind: 4, FetchAge: time.Minute, FetchKnown: true},
 		{Behind: 0, FetchAge: 9 * time.Hour, FetchKnown: true},
 	}
-	s := StalenessWarning(both)
+	s := StalenessWarning(both, false)
 	if !strings.Contains(s, "BEHIND its remote") {
 		t.Errorf("lost the behind half: %q", s)
 	}
 	if !strings.Contains(s, "not FETCHED") {
 		t.Errorf("lost the unknown half: %q", s)
+	}
+	// ⛔ With confirmed=true the sentence must NOT tell the reader to pull and
+	// re-run, because the caller already re-derived. A warning that asks for
+	// work already done teaches people to ignore warnings.
+	c := StalenessWarning(both, true)
+	if strings.Contains(c, "RE-RUN this") {
+		t.Errorf("still asked for a re-run after re-derivation: %q", c)
+	}
+	if !strings.Contains(c, "RE-DERIVED") {
+		t.Errorf("did not say the finding was re-derived: %q", c)
 	}
 }
 
@@ -249,5 +259,69 @@ func TestRefreshMeasuresWhatAHorizonCannotKnow(t *testing.T) {
 	}
 	if got != 1 {
 		t.Errorf("Refresh = %d commits behind, want 1", got)
+	}
+}
+
+// TestMaterialiseAtGivesTheRefsBytesNotTheTrees. The whole point is that the
+// working tree and the ref disagree; a helper that returned the tree would be
+// indistinguishable from not calling it.
+func TestMaterialiseAtGivesTheRefsBytesNotTheTrees(t *testing.T) {
+	base := t.TempDir()
+	origin, work := filepath.Join(base, "origin"), filepath.Join(base, "clone")
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, origin, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(origin, "ci.yml"), []byte("old: nothing installed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, origin, "add", "-A")
+	gitIn(t, origin, "commit", "-qm", "first")
+	gitIn(t, base, "clone", "-q", origin, work)
+
+	// Upstream gains the thing the scan is looking for. The clone does not.
+	if err := os.WriteFile(filepath.Join(origin, "ci.yml"), []byte("new: apt-get install swtpm\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, origin, "commit", "-qam", "install the judge")
+	gitIn(t, work, "fetch", "-q", "origin")
+
+	onDisk, err := os.ReadFile(filepath.Join(work, "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(onDisk), "old:") {
+		t.Fatalf("the clone is not behind; this test needs it to be: %q", onDisk)
+	}
+
+	ref, ok := DefaultRef(work)
+	if !ok {
+		t.Fatal("DefaultRef could not name the remote default")
+	}
+	tmp, cleanup, ok := MaterialiseAt(work, ref)
+	if !ok {
+		t.Fatal("MaterialiseAt failed")
+	}
+	defer cleanup()
+
+	at, err := os.ReadFile(filepath.Join(tmp, "ci.yml"))
+	if err != nil {
+		t.Fatalf("the materialised tree has no ci.yml: %v", err)
+	}
+	if !strings.Contains(string(at), "swtpm") {
+		t.Errorf("materialised %q, want the ref's bytes with swtpm in them", at)
+	}
+	// And the control in the other direction: the working tree is untouched.
+	after, _ := os.ReadFile(filepath.Join(work, "ci.yml"))
+	if string(after) != string(onDisk) {
+		t.Error("MaterialiseAt changed the working tree")
+	}
+}
+
+func TestMaterialiseAtRefusesARefThatIsNotThere(t *testing.T) {
+	_, cleanup, ok := MaterialiseAt(t.TempDir(), "origin/main")
+	defer cleanup()
+	if ok {
+		t.Error("materialised a ref from a directory that is not a repository")
 	}
 }
