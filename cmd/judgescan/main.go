@@ -98,6 +98,21 @@ var ubiquitous = map[string]bool{
 	// by a workflow. Reporting them buries the real findings.
 	"openssl": true, "tar": true, "gzip": true, "gunzip": true, "unzip": true,
 	"curl": true, "wget": true, "make": true, "diff": true, "sed": true,
+	// awk is POSIX-mandated and sits beside sed and diff above for the same
+	// reason: it is on every Unix this fleet builds on, macOS included.
+	"awk": true,
+	// ⛔ bzip2 is here on EVIDENCE, not on the same reasoning. It was reported
+	// against go-compressions/bzip2, whose test comment reads "the one whose
+	// acceptance means the archive is a bzip2 archive rather than something
+	// two Go packages agree about" — and that judge was already running: its
+	// subtests appear in the CI log with no skip, and `bzip2` is in the
+	// runner image's own apt-package table.
+	//
+	// ⛔ ABSENCE FROM THAT TABLE PROVES NOTHING, which is why nothing else was
+	// added from it: `git` is not in the apt list either, and `git` is on
+	// every runner — it arrives another way. Presence is evidence; absence is
+	// silence.
+	"bzip2": true,
 }
 
 // packageOf maps a binary to the other spellings a workflow may install it
