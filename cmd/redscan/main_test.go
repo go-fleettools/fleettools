@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -352,5 +353,61 @@ esac`)
 	run(&out, &errOut)
 	if got := out.String(); !strings.Contains(got, "RED default branches: 1") {
 		t.Errorf("an unreadable workflow list silenced a real red:\n%s", got)
+	}
+}
+
+// ⛔ laterRuns decides whether a red is DROPPED from the headline, so a wrong
+// "superseded" hides a branch somebody should fix. The cases that must stay
+// come first.
+func TestAGatingWorkflowIsNeverSuperseded(t *testing.T) {
+	// A workflow that runs on every push: its own last run IS the newest, so
+	// nothing is later than it.
+	ci := wfRun{W: 1, C: "failure", N: "ci", D: "2026-09-27T10:00:00Z"}
+	all := []wfRun{
+		ci,
+		{W: 2, C: "success", N: "docs", D: "2026-09-27T09:00:00Z"},
+		{W: 1, C: "success", N: "ci", D: "2026-09-26T10:00:00Z"},
+	}
+	if n := laterRuns(all, ci); n != 0 {
+		t.Errorf("laterRuns = %d, want 0 for the newest run on the branch", n)
+	}
+	if n := laterRuns(all, ci); n >= supersededAfter {
+		t.Error("a workflow that runs on every push was called superseded")
+	}
+
+	// One later run is not enough either: a docs workflow finishing after a
+	// failing test run must not retire the test run's verdict.
+	red := wfRun{W: 1, C: "failure", N: "ci", D: "2026-09-27T10:00:00Z"}
+	withDocs := append(all, wfRun{W: 2, C: "success", N: "docs", D: "2026-09-27T10:05:00Z"})
+	if n := laterRuns(withDocs, red); n >= supersededAfter {
+		t.Errorf("laterRuns = %d retired a red that one later run followed", n)
+	}
+}
+
+// TestTheAbandonedPagesWorkflowIsSuperseded, with the real numbers. The two
+// repositories this was written for sat at 11 and 6 later runs.
+func TestTheAbandonedPagesWorkflowIsSuperseded(t *testing.T) {
+	pages := wfRun{W: 9, C: "failure", N: "pages build and deployment", D: "2026-06-22T11:04:00Z"}
+	all := []wfRun{pages}
+	for i := 0; i < 11; i++ {
+		all = append(all, wfRun{W: 1, C: "success", N: "Deploy Hugo site to Pages",
+			D: fmt.Sprintf("2026-09-%02dT09:00:00Z", 10+i)})
+	}
+	n := laterRuns(all, pages)
+	if n != 11 {
+		t.Fatalf("laterRuns = %d, want 11", n)
+	}
+	if n < supersededAfter {
+		t.Errorf("11 later runs did not reach the threshold %d", supersededAfter)
+	}
+	// And the smaller witness, go-ruby-hanami at 6.
+	hanami := wfRun{W: 9, C: "failure", N: "pages build and deployment", D: "2026-07-06T12:59:00Z"}
+	six := []wfRun{hanami}
+	for i := 0; i < 6; i++ {
+		six = append(six, wfRun{W: 1, C: "success", N: "deploy-pages",
+			D: fmt.Sprintf("2026-08-%02dT09:00:00Z", 10+i)})
+	}
+	if laterRuns(six, hanami) < supersededAfter {
+		t.Errorf("the 6-run witness did not reach the threshold %d", supersededAfter)
 	}
 }

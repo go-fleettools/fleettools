@@ -109,7 +109,7 @@ func run(stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "repos: %d\n", len(repos))
 
 	var reds []red
-	var unread, gone []string
+	var unread, gone, stale []string
 	checked, rechecked := 0, 0
 	for _, r := range repos {
 		wg.Add(1)
@@ -117,7 +117,7 @@ func run(stdout, stderr io.Writer) int {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			runs, err := latestRuns(r)
+			runs, allRuns, err := latestRuns(r)
 			if err != nil {
 				mu.Lock()
 				unread = append(unread, r.FullName+": "+firstLine(err.Error()))
@@ -145,7 +145,7 @@ func run(stdout, stderr io.Writer) int {
 				// outage. Take whichever answer names the LATER run: RFC 3339 in
 				// Z sorts lexically, and a second reading that is older than the
 				// first is the stale one.
-				if again, err := latestRuns(r); err == nil {
+				if again, againAll, err := latestRuns(r); err == nil {
 					for _, w := range again {
 						if w.W == v.W && w.D > v.D {
 							mu.Lock()
@@ -154,6 +154,7 @@ func run(stdout, stderr io.Writer) int {
 							v = w
 						}
 					}
+					allRuns = againAll
 				}
 				if isRed(v.C) {
 					bad = append(bad, v)
@@ -171,6 +172,35 @@ func run(stdout, stderr io.Writer) int {
 			//
 			// The extra call is made ONLY for a repository that already has a
 			// red, which is 13 of 1983 — the sweep's budget is unchanged.
+			// ⛔ ACTIVE IS NOT THE SAME AS STILL RUNNING, and the guard below
+			// was written for these very two repositories without catching
+			// them: GitHub reports its implicit `pages-build-deployment` as
+			// `active` for ever, so a repository that moved to its own deploy
+			// workflow keeps a red from the one it abandoned.
+			//
+			// The property that separates them is not deletion, it is being
+			// SKIPPED. A workflow that gates pushes runs on every push, so the
+			// number of later runs on the branch is zero. These two sat at 11
+			// and 6, months behind green deploys from the workflow that
+			// replaced them.
+			//
+			// Set aside, not dropped: a rarely-scheduled workflow in a busy
+			// repository could land here wrongly, and the reader must be able
+			// to see that it did.
+			if len(bad) > 0 && len(allRuns) > 0 {
+				var kept []wfRun
+				for _, v := range bad {
+					if n := laterRuns(allRuns, v); n >= supersededAfter {
+						mu.Lock()
+						stale = append(stale, fmt.Sprintf("%s: %s (last ran %s, %d runs on %s since)",
+							r.FullName, v.N, v.D[:10], n, r.Default))
+						mu.Unlock()
+						continue
+					}
+					kept = append(kept, v)
+				}
+				bad = kept
+			}
 			if len(bad) > 0 {
 				if live, err := activeWorkflows(r); err == nil {
 					var kept []wfRun
@@ -205,6 +235,13 @@ func run(stdout, stderr io.Writer) int {
 		sort.Strings(gone)
 		fmt.Fprintf(stdout, "  (%d red run(s) belong to a workflow the repository no longer has, so nothing can turn them green:)\n", len(gone))
 		for _, g := range gone {
+			fmt.Fprintf(stdout, "      %s\n", g)
+		}
+	}
+	if len(stale) > 0 {
+		sort.Strings(stale)
+		fmt.Fprintf(stdout, "  (%d red run(s) belong to a workflow the branch has moved past — skipped by every push since, so it gates nothing:)\n", len(stale))
+		for _, g := range stale {
 			fmt.Fprintf(stdout, "      %s\n", g)
 		}
 	}
@@ -259,19 +296,46 @@ type wfRun struct {
 // so the sweep costs no more requests than it did. A workflow that has not run
 // within the branch's last hundred runs does not appear, which is a dormant
 // workflow rather than a hidden failure.
-func latestRuns(r repo) ([]wfRun, error) {
+func latestRuns(r repo) ([]wfRun, []wfRun, error) {
 	b, err := gh("api",
 		"repos/"+r.FullName+"/actions/runs?branch="+r.Default+"&status=completed&per_page=100",
 		"--jq", "[.workflow_runs[] | {w: (.workflow_id // 0), c: (.conclusion // \"\"), "+
 			"n: (.name // \"\"), d: (.created_at // \"\")}]")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var all []wfRun
 	if err := json.Unmarshal(b, &all); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return newestPerWorkflow(all), nil
+	return newestPerWorkflow(all), all, nil
+}
+
+// supersededAfter is how many later runs on the same branch make a workflow's
+// last verdict stale.
+//
+// ⛔ MEASURED, not chosen. A workflow that gates pushes runs on every push, so
+// the count of runs newer than its own last one is ZERO. The two repositories
+// that made this necessary sat at 11 and 6:
+//
+//	go-fsctl/go-fsctl.github.io   red 2026-06-22, 11 later runs
+//	go-ruby-hanami/….github.io    red 2026-07-06,  6 later runs
+//
+// Both are GitHub's implicit `pages-build-deployment`, abandoned when the
+// repository adopted its own deploy workflow — whose runs are green and as
+// recent as yesterday. Five is below the smaller witness and far above zero.
+const supersededAfter = 5
+
+// laterRuns counts the runs on the branch that finished after v did. It reads
+// the SAME response latestRuns already fetched, so knowing this costs nothing.
+func laterRuns(all []wfRun, v wfRun) int {
+	n := 0
+	for _, o := range all {
+		if o.D > v.D {
+			n++
+		}
+	}
+	return n
 }
 
 // newestPerWorkflow keeps one run per workflow: the one naming the later date.
