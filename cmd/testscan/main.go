@@ -50,6 +50,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -120,6 +121,7 @@ type finding struct {
 	bytesRead  int
 	fetchAge   time.Duration // how long since this clone last heard from its remote
 	fetchKnown bool
+	behind     int      // commits this checkout's HEAD is behind its remote default
 	named      []string // the paths invocations named, when not ./...
 }
 
@@ -183,6 +185,16 @@ func main() {
 
 	for _, f := range found {
 		fmt.Print(render(f))
+		// ⛔ Per FINDING, not as an aggregate at the bottom. The aggregate was
+		// there and it said nothing useful: it counted clones that had not
+		// FETCHED in a week, and every one of the five wrong findings on
+		// 2026-09-27 had fetched minutes earlier and was still up to twenty
+		// commits behind. What the reader needs is beside the line they are
+		// about to act on.
+		if f.behind > 0 {
+			fmt.Printf("    ⚠ this checkout is %d commit(s) behind its remote — the finding above "+
+				"describes code that may no longer exist. Pull, then RE-RUN this.\n", f.behind)
+		}
 		if *only != "" {
 			fmt.Printf("    read %d workflow file(s), %d bytes\n", f.workflows, f.bytesRead)
 			if f.tagged > 0 {
@@ -208,24 +220,21 @@ func main() {
 	// that has not heard from its remote in weeks yields a diagnosis that is
 	// weeks out of date and looks exactly like a fresh one. Say it before
 	// anyone acts on the list above.
-	stale, oldest := 0, time.Duration(0)
+	stale, furthest := 0, 0
 	for _, f := range found {
-		if !f.fetchKnown {
-			continue
-		}
-		if f.fetchAge > 7*24*time.Hour {
+		if f.behind > 0 {
 			stale++
 		}
-		if f.fetchAge > oldest {
-			oldest = f.fetchAge
+		if f.behind > furthest {
+			furthest = f.behind
 		}
 	}
 	if stale > 0 {
 		fmt.Fprintf(os.Stderr,
-			"\n⚠ %d of the %d repositories above have not fetched in over a week (oldest: %d days).\n"+
-				"  Their workflows may already have changed. Refresh those clones and RE-RUN this:\n"+
-				"  refreshing without re-deriving the finding makes a stale one look confirmed.\n",
-			stale, len(found), int(oldest.Hours()/24))
+			"\n⚠ %d of the %d findings above come from a checkout BEHIND its remote (furthest: %d commits).\n"+
+				"  A finding derived from a stale tree describes code that may no longer exist. Pull those\n"+
+				"  clones and RE-RUN this: refreshing without re-deriving makes a stale finding look confirmed.\n",
+			stale, len(found), furthest)
 	}
 
 	// A scan that cannot read reports zero, and zero reads as good news.
@@ -294,7 +303,7 @@ func scan(root, repo string) (finding, bool) {
 		return finding{}, false
 	}
 	f := finding{repo: repo, withTests: len(pkgs), tagged: tagged}
-	_, f.fetchAge, f.fetchKnown = staleness(dir)
+	f.behind, f.fetchAge, f.fetchKnown = staleness(dir)
 
 	yaml, n, err := readWorkflows(dir)
 	if err != nil || n == 0 {
@@ -521,7 +530,20 @@ func staleness(dir string) (behind int, fetchAge time.Duration, ok bool) {
 	if err != nil {
 		return 0, 0, false
 	}
-	return 0, time.Since(st.ModTime()), true
+	// ⛔ AND ACTUALLY COUNT IT. This returned a hard-coded 0 for `behind`
+	// while its own doc said it reported the distance, and both callers threw
+	// the value away — so the only signal left was the fetch AGE, which is the
+	// wrong one: `git fetch` updates FETCH_HEAD and the remote refs and does
+	// NOT touch the working tree. A clone fetched a minute ago can be twenty
+	// commits behind, and on 2026-09-27 five of them were.
+	if ref, ok := defaultRemoteRef(dir); ok {
+		if out, ok := gitRef(dir, "rev-list", "--count", "HEAD.."+ref); ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(out)); err == nil {
+				behind = n
+			}
+		}
+	}
+	return behind, time.Since(st.ModTime()), true
 }
 
 // gitRef runs one git command inside a repository and returns stdout.
@@ -617,7 +639,7 @@ func scanRef(root, repo string) (finding, bool) {
 	}
 	yaml := sb.String()
 	f.workflows, f.bytesRead = len(wf), len(yaml)
-	_, f.fetchAge, f.fetchKnown = staleness(dir)
+	f.behind, f.fetchAge, f.fetchKnown = staleness(dir)
 	return classify(f, yaml, pkgs, dir), true
 }
 
