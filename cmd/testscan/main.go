@@ -45,12 +45,12 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/go-fleettools/fleettools/internal/checkout"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -169,8 +169,7 @@ func main() {
 	// have, and upstream's own project in upstream's own account. See ours.go.
 	var dropped []string
 	if *only == "" {
-		owners, have := ourOwners()
-		found, dropped = sift(found, owners, have, askGitHub)
+		found, dropped = sift(found)
 	}
 
 	sort.Slice(found, func(i, j int) bool {
@@ -206,15 +205,7 @@ func main() {
 		}
 	}
 
-	if len(dropped) > 0 {
-		// Printed, not swallowed: a checkout that is not ours is still worth
-		// knowing is on the disk, and a silent filter is one nobody can check.
-		sort.Strings(dropped)
-		fmt.Fprintf(os.Stderr, "\n%d checkout(s) left out — not ours to fix:\n", len(dropped))
-		for _, d := range dropped {
-			fmt.Fprintf(os.Stderr, "  %s\n", d)
-		}
-	}
+	reportDropped(dropped)
 
 	// How stale is the evidence? This reads the working tree, so a checkout
 	// that has not heard from its remote in weeks yields a diagnosis that is
@@ -303,7 +294,7 @@ func scan(root, repo string) (finding, bool) {
 		return finding{}, false
 	}
 	f := finding{repo: repo, withTests: len(pkgs), tagged: tagged}
-	f.behind, f.fetchAge, f.fetchKnown = staleness(dir)
+	f.behind, f.fetchAge, f.fetchKnown = checkout.Staleness(dir)
 
 	yaml, n, err := readWorkflows(dir)
 	if err != nil || n == 0 {
@@ -507,45 +498,6 @@ func readDelegate(dir string) (string, bool) {
 	return "", false
 }
 
-// staleness reports how far this checkout's HEAD is behind its remote-tracking
-// branch, and how long ago the remote was last fetched.
-//
-// This tool reads the WORKING TREE, so a stale checkout yields a stale
-// diagnosis — and the diagnosis looks exactly like a fresh one. On
-// 2026-09-22 it reported three openweft repositories as having no test lane;
-// all three had gained `ci.yml` weeks earlier, and the local clones predated
-// it. Three pull requests went out to re-fix what was already fixed.
-//
-// Refreshing the clone afterwards is not a remedy on its own: it makes the
-// finding LOOK confirmed while the finding itself was never re-derived. So the
-// number is printed before any result, whether or not anyone asked.
-func staleness(dir string) (behind int, fetchAge time.Duration, ok bool) {
-	head, err := os.ReadFile(filepath.Join(dir, ".git", "FETCH_HEAD"))
-	if err != nil || len(head) == 0 {
-		// Never fetched in this clone, or a layout this cannot read. Unknown
-		// is reported as unknown.
-		return 0, 0, false
-	}
-	st, err := os.Stat(filepath.Join(dir, ".git", "FETCH_HEAD"))
-	if err != nil {
-		return 0, 0, false
-	}
-	// ⛔ AND ACTUALLY COUNT IT. This returned a hard-coded 0 for `behind`
-	// while its own doc said it reported the distance, and both callers threw
-	// the value away — so the only signal left was the fetch AGE, which is the
-	// wrong one: `git fetch` updates FETCH_HEAD and the remote refs and does
-	// NOT touch the working tree. A clone fetched a minute ago can be twenty
-	// commits behind, and on 2026-09-27 five of them were.
-	if ref, ok := defaultRemoteRef(dir); ok {
-		if out, ok := gitRef(dir, "rev-list", "--count", "HEAD.."+ref); ok {
-			if n, err := strconv.Atoi(strings.TrimSpace(out)); err == nil {
-				behind = n
-			}
-		}
-	}
-	return behind, time.Since(st.ModTime()), true
-}
-
 // gitRef runs one git command inside a repository and returns stdout.
 func gitRef(dir string, args ...string) (string, bool) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
@@ -639,7 +591,7 @@ func scanRef(root, repo string) (finding, bool) {
 	}
 	yaml := sb.String()
 	f.workflows, f.bytesRead = len(wf), len(yaml)
-	f.behind, f.fetchAge, f.fetchKnown = staleness(dir)
+	f.behind, f.fetchAge, f.fetchKnown = checkout.Staleness(dir)
 	return classify(f, yaml, pkgs, dir), true
 }
 
