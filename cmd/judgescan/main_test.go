@@ -690,3 +690,78 @@ func TestRef(t *testing.T) {
 		t.Errorf("a tool the runner ships was reported: %v", f.missing)
 	}
 }
+
+// ⛔ skipIsFatal is an EXCLUSION: a wrong `true` deletes a real finding and
+// says nothing. So the cases that must stay findings are the important half,
+// and they are first.
+
+func TestASkipThatNothingActsOnIsStillSilent(t *testing.T) {
+	for _, tc := range []struct{ name, yaml string }{
+		{"no mention at all", "jobs:\n  t:\n    steps:\n      - run: go test ./...\n"},
+		{"printed, not judged", "      - run: go test -v ./... | grep -- '--- SKIP' || true\n"},
+		{
+			// ::error:: writes an annotation. The step still succeeds, so the
+			// skip stays green -- exactly the silence this tool reports.
+			"an annotation with no exit",
+			"      - run: |\n          case $out in\n            *\"--- SKIP\"*) echo \"::error::a judge skipped\" ;;\n          esac\n",
+		},
+		{
+			// exit 0 is a guard written the wrong way round.
+			"exit 0",
+			"      - run: |\n          case $out in *\"--- SKIP\"*) exit 0 ;; esac\n",
+		},
+		{
+			// The exit belongs to a later step, five lines down.
+			"an exit too far away",
+			"      - run: echo '--- SKIP'\n      - run: a\n      - run: b\n      - run: c\n      - run: d\n      - run: exit 1\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if skipIsFatal(tc.yaml) {
+				t.Error("excluded a repository whose skip would stay green")
+			}
+		})
+	}
+}
+
+func TestASkipTheRunRefusesIsNotSilent(t *testing.T) {
+	for _, tc := range []struct{ name, yaml string }{
+		{
+			// go-filesystems/unarchive, verbatim from the merged workflow.
+			"the case form, on one line",
+			"      - run: |\n          case \"$out\" in\n            *\"--- SKIP\"*) echo \"::error::a foreign judge skipped; its tool is not installed\"; exit 1 ;;\n          esac\n",
+		},
+		{
+			"the grep form, spread over lines",
+			"      - run: |\n          if grep -q -- \"--- SKIP\" out.txt; then\n            echo \"::error::skipped\"\n            exit 1\n          fi\n",
+		},
+		{"exit 2 counts as well", "          *\"--- SKIP\"*) exit 2 ;;\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !skipIsFatal(tc.yaml) {
+				t.Error("a run that exits non-zero on --- SKIP was called silent")
+			}
+		})
+	}
+}
+
+// TestTheTwoRepositoriesThatCausedThis pins the actual regression: a binary
+// whose package is spelt differently, in a workflow that also refuses a skip.
+// Both halves must hold, or the pair comes back.
+func TestTheTwoRepositoriesThatCausedThis(t *testing.T) {
+	for _, tc := range []struct{ tool, install string }{
+		{"bsdcpio", "sudo apt-get install -y -qq libarchive-tools"},
+		{"7zz", "sudo apt-get install -y -qq libarchive-tools xorriso 7zip-standalone"},
+		{"bsdtar", "sudo apt-get install -y -qq libarchive-tools"},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			if !mentioned(strings.ToLower(tc.install), tc.tool) {
+				t.Errorf("%q reported missing from %q", tc.tool, tc.install)
+			}
+		})
+	}
+	// And the control: the alias must not swallow a tool that really is absent.
+	if mentioned("sudo apt-get install -y -qq libarchive-tools", "xorriso") {
+		t.Error("xorriso was found in a line that does not install it")
+	}
+}

@@ -146,6 +146,15 @@ var packageOf = map[string][]string{
 	"node":    {"setup-node", "nodejs"},
 	"hdiutil": {"macos-", "macOS", "darwin"}, "diskutil": {"macos-", "macOS", "darwin"},
 	"codesign": {"macos-", "macOS", "darwin"},
+	// libarchive's cpio and tar, and 7-Zip's own binary. MEASURED, not guessed:
+	// go-filesystems/unarchive run 36321532531 logged `Setting up
+	// 7zip-standalone (23.01+dfsg-11)` and its 7zz judge then passed, and
+	// go-filesystems/cpio installs libarchive-tools and passes `pwb`, a format
+	// GNU cpio cannot write. Both were reported here as missing tools the day
+	// after they were fixed, because a package is not spelt like its program.
+	"bsdcpio": {"libarchive-tools", "libarchive"},
+	"bsdtar":  {"libarchive-tools", "libarchive"},
+	"7zz":     {"7zip-standalone", "7zip"},
 }
 
 // finding is one repository's verdict.
@@ -158,7 +167,8 @@ type finding struct {
 	bytesRead  int      // how much YAML was actually read -- the positive control
 	fetchAge   time.Duration
 	fetchKnown bool
-	behind     int // commits this checkout is behind its remote default
+	behind     int  // commits this checkout is behind its remote default
+	skipFatal  bool // a workflow turns `--- SKIP` into a failing step
 }
 
 func main() {
@@ -214,6 +224,22 @@ func main() {
 
 	sort.Slice(found, func(i, j int) bool { return found[i].repo < found[j].repo })
 
+	// Set aside the repositories whose CI would go RED on the very skip this
+	// tool is looking for. They are still printed below; they are just not
+	// this tool's findings, because nothing about them is quiet.
+	var loud []finding
+	{
+		var quiet []finding
+		for _, f := range found {
+			if f.skipFatal && f.noCI == "" {
+				loud = append(loud, f)
+			} else {
+				quiet = append(quiet, f)
+			}
+		}
+		found = quiet
+	}
+
 	for _, f := range found {
 		switch {
 		case f.noCI != "":
@@ -232,6 +258,14 @@ func main() {
 	// How stale is the evidence? This reads the working tree, so a checkout
 	// that has not fetched in weeks gives a weeks-old answer that looks exactly
 	// like a current one. Say so before anyone acts on the list.
+	if len(loud) > 0 {
+		fmt.Fprintf(os.Stderr, "\n%d left out — their CI FAILS on a `--- SKIP`, so the skip cannot be silent:\n", len(loud))
+		for _, f := range loud {
+			fmt.Fprintf(os.Stderr, "  %-38s %s\n", f.repo, strings.Join(f.missing, " "))
+		}
+		fmt.Fprintln(os.Stderr, "  (the tool name is spelt unlike the package that installs it; the run is green)")
+	}
+
 	if len(dropped) > 0 {
 		sort.Strings(dropped)
 		fmt.Fprintf(os.Stderr, "\n%d checkout(s) left out — not ours to fix:\n", len(dropped))
@@ -341,6 +375,7 @@ func scan(root, repo string) (finding, bool) {
 		return f, true
 	}
 	f.workflows, f.bytesRead = n, len(yaml)
+	f.skipFatal = skipIsFatal(yaml)
 	hay := strings.ToLower(installLines(yaml))
 	for _, t := range tools {
 		if !mentioned(hay, t) {
@@ -464,6 +499,49 @@ func readWorkflows(dir string) (string, int, error) {
 // is present -- in the one repository where it demonstrably was not. That
 // false NEGATIVE is the dangerous direction: it removes a real finding from
 // the list and nothing looks wrong.
+// nonZeroExit matches a shell line that ends the step in failure.
+//
+// `::error::` alone does NOT: it writes an annotation and the step still
+// succeeds, so a guard built only from it is a guard that never refuses.
+var nonZeroExit = regexp.MustCompile(`\bexit\s+[1-9][0-9]*\b`)
+
+// skipIsFatal says whether a workflow turns a `--- SKIP` in the test output
+// into a failing step.
+//
+// This tool's claim is about SILENCE. A test that names a tool nobody
+// installed skips, a skip is green, and nobody ever learns. A run that exits
+// non-zero on the literal string `--- SKIP` is not silent: it is green because
+// the tool ran, or red, and red is redscan's subject, not this one.
+//
+// So this EXCLUDES a repository from the list and never puts one on it -- the
+// same rule reach.go states for its call graph. Those repositories are still
+// printed, under their own heading, because a finding that disappears without
+// a word is indistinguishable from one that was never found.
+//
+// It exists because this tool matched a BINARY name against apt PACKAGE names
+// and reported go-filesystems/cpio and go-filesystems/unarchive the day after
+// their judges were installed and passing: `bsdcpio` comes from
+// `libarchive-tools`, `7zz` from `7zip-standalone`. The alias table above now
+// holds those two, and would have inherited the next mismatch; this asks the
+// question the table cannot -- whether the failure could stay quiet.
+func skipIsFatal(yaml string) bool {
+	lines := strings.Split(yaml, "\n")
+	for i, ln := range lines {
+		if !strings.Contains(ln, "--- SKIP") {
+			continue
+		}
+		// A `case *"--- SKIP"*) ...; exit 1 ;;` puts the test and the exit on
+		// one line; an `if grep -q -- "--- SKIP"` spreads them over several.
+		// Four lines covers both without reaching into the next step.
+		for j := i; j < len(lines) && j <= i+4; j++ {
+			if nonZeroExit.MatchString(lines[j]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func installLines(yaml string) string {
 	var sb strings.Builder
 	for _, line := range strings.Split(yaml, "\n") {
