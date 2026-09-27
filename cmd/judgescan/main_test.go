@@ -425,3 +425,101 @@ func f(t *testing.T) {
 		t.Errorf("missing = %v (ok=%v), want [git-http-backend]", f.missing, ok)
 	}
 }
+
+// TestAStringThatLooksLikeACallIsNotOne. This tool reported ITSELF: its own
+// fixtures hold Go source inside backquoted strings, and a whole-file search
+// found nine tools in them. The parser does not, because a LookPath inside a
+// string literal is not a call.
+func TestAStringThatLooksLikeACallIsNotOne(t *testing.T) {
+	src := []byte("package p\n\n" +
+		"import \"testing\"\n\n" +
+		"func TestFixture(t *testing.T) {\n" +
+		"\tsrc := `package q\nfunc f() { exec.LookPath(\"pdftoppm\") }`\n" +
+		"\t_ = src\n" +
+		"}\n")
+	gated, _, _, ok := lookPaths(src)
+	if !ok {
+		t.Fatal("the fixture did not parse")
+	}
+	if gated["pdftoppm"] {
+		t.Error("a tool named inside a string literal was read as a call")
+	}
+	if len(gated) != 0 {
+		t.Errorf("gated = %v, want none", gated)
+	}
+}
+
+// TestARealCallIsStillFound — the other direction. Without it the rule above
+// is satisfied by a reader that finds nothing at all.
+func TestARealCallIsStillFound(t *testing.T) {
+	src := []byte("package p\n\nimport \"os/exec\"\n\nfunc f() {\n" +
+		"\tp, err := exec.LookPath(\"swtpm\")\n\t_, _ = p, err\n}\n")
+	gated, _, _, ok := lookPaths(src)
+	if !ok {
+		t.Fatal("did not parse")
+	}
+	if !gated["swtpm"] {
+		t.Errorf("a real call was missed: %v", gated)
+	}
+}
+
+// TestADiscardedErrorIsNotAGate. `p, _ := exec.LookPath("x")` gates nothing,
+// and the AST says so from the ASSIGNMENT rather than from the text around it.
+func TestADiscardedErrorIsNotAGate(t *testing.T) {
+	src := []byte("package p\n\nimport \"os/exec\"\n\nfunc f() {\n" +
+		"\tp, _ := exec.LookPath(\"mock\")\n\t_ = p\n}\n")
+	gated, tolerated, _, ok := lookPaths(src)
+	if !ok {
+		t.Fatal("did not parse")
+	}
+	if gated["mock"] {
+		t.Error("a LookPath whose error is thrown away was called a gate")
+	}
+	if !tolerated["mock"] {
+		t.Error("it was not reported as tolerated either — it has to be one or the other")
+	}
+}
+
+// TestAFallbackIsNotAGate: `if p, err := exec.LookPath("x"); err == nil { … }`
+// takes the tool when it is there and carries on when it is not.
+func TestAFallbackIsNotAGate(t *testing.T) {
+	src := []byte("package p\n\nimport \"os/exec\"\n\nfunc f() {\n" +
+		"\tif p, err := exec.LookPath(\"git-http-backend\"); err == nil {\n\t\t_ = p\n\t}\n}\n")
+	gated, tolerated, _, ok := lookPaths(src)
+	if !ok {
+		t.Fatal("did not parse")
+	}
+	if gated["git-http-backend"] {
+		t.Error("a fallback was called a gate")
+	}
+	if !tolerated["git-http-backend"] {
+		t.Error("the fallback was not recorded")
+	}
+}
+
+// TestANonLiteralArgumentIsDynamicNotAbsent. A LookPath over a variable names
+// a tool this cannot know, and saying nothing would read as "no tool needed".
+func TestANonLiteralArgumentIsDynamicNotAbsent(t *testing.T) {
+	src := []byte("package p\n\nimport \"os/exec\"\n\nfunc f(name string) {\n" +
+		"\tp, _ := exec.LookPath(name)\n\t_ = p\n}\n")
+	gated, _, dynamic, ok := lookPaths(src)
+	if !ok {
+		t.Fatal("did not parse")
+	}
+	if !dynamic {
+		t.Error("a LookPath over a variable was not reported as dynamic")
+	}
+	if len(gated) != 0 {
+		t.Errorf("it invented a name: %v", gated)
+	}
+}
+
+// TestAFileThatDoesNotParseIsNotAFileWithNoTools. ok=false is the signal that
+// sends the caller to the fallback; returning an empty set with ok=true would
+// make an unreadable file look clean, which is the one answer that must never
+// happen by accident.
+func TestAFileThatDoesNotParseIsNotAFileWithNoTools(t *testing.T) {
+	if _, _, _, ok := lookPaths([]byte("package p\nfunc f( {")); ok {
+		t.Error("a file that does not parse reported a clean read")
+	}
+}
