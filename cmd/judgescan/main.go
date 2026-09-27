@@ -546,6 +546,20 @@ func installLines(yaml string) string {
 	var sb strings.Builder
 	for _, line := range strings.Split(yaml, "\n") {
 		t := strings.TrimSpace(line)
+		// ⛔ A COMMENT IS NOT AN INSTALL, and this is how that was learnt:
+		// cloud-boot/docs gained a workflow whose comment reads
+		//
+		//	# ⛔ qemu-system-riscv64 is DELIBERATELY not installed here
+		//
+		// explaining, at length, why the judge cannot run. Every line of that
+		// explanation sits inside a `run:` block, carries no YAML key, and so
+		// survived the filter below -- and the repository dropped off this
+		// tool's list. A sentence saying a tool is absent was read as the tool
+		// being present, which is the worst direction for a scanner to be
+		// wrong in, because nothing is printed when it happens.
+		if strings.HasPrefix(t, "#") {
+			continue
+		}
 		// A runner image can be chosen from a matrix, where `runs-on:` says
 		// only `${{ matrix.os }}` and the real name sits in a mapping line the
 		// filter below drops. go-macos/appbundle has

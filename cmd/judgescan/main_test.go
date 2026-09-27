@@ -765,3 +765,30 @@ func TestTheTwoRepositoriesThatCausedThis(t *testing.T) {
 		t.Error("xorriso was found in a line that does not install it")
 	}
 }
+
+// ⛔ TestAProseMentionIsNotAnInstall. The failure was self-inflicted and
+// silent: a workflow comment explaining that qemu-system-riscv64 is
+// deliberately NOT installed convinced this tool that it WAS, and
+// cloud-boot/docs vanished from the findings without a word.
+func TestAProseMentionIsNotAnInstall(t *testing.T) {
+	yaml := "      - run: |\n" +
+		"          # ⛔ qemu-system-riscv64 is DELIBERATELY not installed here, and that\n" +
+		"          # is the honest state rather than an oversight.\n" +
+		"          go test -count=1 -v ./...\n"
+	if mentioned(strings.ToLower(installLines(yaml)), "qemu-system-riscv64") {
+		t.Error("a comment saying the tool is absent was read as installing it")
+	}
+	// A YAML comment at step level, the other spelling.
+	if mentioned(strings.ToLower(installLines("      # install swtpm one day\n      - run: go test ./...\n")), "swtpm") {
+		t.Error("a YAML comment was read as an install")
+	}
+	// ⛔ And the control, because dropping too much is the other way to be
+	// wrong: a real install is still seen, and so is one with a trailing
+	// comment on the same line.
+	if !mentioned(strings.ToLower(installLines("      - run: sudo apt-get install -y qemu-system-misc\n")), "qemu-system-misc") {
+		t.Error("a real install line was dropped")
+	}
+	if !mentioned(strings.ToLower(installLines("          sudo apt-get install -y swtpm  # the TPM the handshake needs\n")), "swtpm") {
+		t.Error("an install with a trailing comment was dropped")
+	}
+}
