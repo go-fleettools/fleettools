@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -135,5 +136,118 @@ func TestOwnerOf(t *testing.T) {
 		if got := OwnerOf(in); got != want {
 			t.Errorf("OwnerOf(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// ⛔ TestZeroBehindIsNotAlwaysCurrent pins the case that produced this:
+// go-compressions/compress, 36 minutes after its last fetch, reported 0 behind
+// and was 1 behind. The scanner printed it as a finding on a tree whose fix
+// was already merged, and said nothing about the tree being old.
+func TestZeroBehindIsNotAlwaysCurrent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		behind int
+		age    time.Duration
+		known  bool
+		want   Verdict
+	}{
+		{"fetched minutes ago, nothing upstream", 0, 5 * time.Minute, true, Current},
+		{"the witness: 36 minutes, looked current", 0, 36 * time.Minute, true, Current},
+		{"stopped asking two hours ago", 0, 2 * time.Hour, true, Unknown},
+		{"never fetched at all", 0, 0, false, Unknown},
+		{"behind, and recently asked", 3, time.Minute, true, Behind},
+		// ⛔ Behind wins over Unknown: a distance already known to be non-zero
+		// is a fact, and an old fetch can only make it larger.
+		{"behind, and asked long ago", 3, 48 * time.Hour, true, Behind},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Judge(tc.behind, tc.age, tc.known); got != tc.want {
+				t.Errorf("Judge(%d, %v, %v) = %v, want %v", tc.behind, tc.age, tc.known, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTheWarningSaysNothingWhenThereIsNothingToSay, and says both halves when
+// there are both. A warning that fires on a clean fleet is a warning nobody
+// reads by the third run.
+func TestTheWarningSaysNothingWhenThereIsNothingToSay(t *testing.T) {
+	if s := StalenessWarning(nil); s != "" {
+		t.Errorf("warned about an empty list: %q", s)
+	}
+	fresh := []Age{{Behind: 0, FetchAge: time.Minute, FetchKnown: true}}
+	if s := StalenessWarning(fresh); s != "" {
+		t.Errorf("warned about a current checkout: %q", s)
+	}
+	both := []Age{
+		{Behind: 4, FetchAge: time.Minute, FetchKnown: true},
+		{Behind: 0, FetchAge: 9 * time.Hour, FetchKnown: true},
+	}
+	s := StalenessWarning(both)
+	if !strings.Contains(s, "BEHIND its remote") {
+		t.Errorf("lost the behind half: %q", s)
+	}
+	if !strings.Contains(s, "not FETCHED") {
+		t.Errorf("lost the unknown half: %q", s)
+	}
+}
+
+// gitIn runs git in dir, with an environment that ignores the machine's own
+// git configuration -- otherwise the test measures the user's setup.
+func gitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// ⛔ TestRefreshMeasuresWhatAHorizonCannotKnow is the test the 36-minute
+// witness asks for: a clone that fetched a moment ago, a commit landing
+// upstream AFTER that, and the remembered distance still 0. No interval can
+// tell that apart from a repository with nothing waiting for it.
+func TestRefreshMeasuresWhatAHorizonCannotKnow(t *testing.T) {
+	base := t.TempDir()
+	origin, work := filepath.Join(base, "origin"), filepath.Join(base, "clone")
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, origin, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(origin, "a.txt"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, origin, "add", "-A")
+	gitIn(t, origin, "commit", "-qm", "first")
+	gitIn(t, base, "clone", "-q", origin, work)
+	gitIn(t, work, "fetch", "-q", "origin")
+
+	// Upstream moves AFTER the clone last looked.
+	gitIn(t, origin, "commit", "-q", "--allow-empty", "-m", "landed after you looked")
+
+	behind, age, ok := Staleness(work)
+	if !ok {
+		t.Fatal("Staleness could not read the checkout")
+	}
+	if behind != 0 {
+		t.Fatalf("the remembered distance was %d; this test needs it to be 0", behind)
+	}
+	if age > FetchHorizon {
+		t.Fatalf("fetch age %v is already past the horizon; this test needs it inside", age)
+	}
+	if v := Judge(behind, age, ok); v != Current {
+		t.Fatalf("Judge said %v; the point of this test is that it says Current here", v)
+	}
+
+	// And the fetch says what no horizon could have known.
+	got, ok := Refresh(work)
+	if !ok {
+		t.Fatal("Refresh failed")
+	}
+	if got != 1 {
+		t.Errorf("Refresh = %d commits behind, want 1", got)
 	}
 }
