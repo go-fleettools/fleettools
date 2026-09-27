@@ -545,3 +545,89 @@ func TestOwnerOf(t *testing.T) {
 		}
 	}
 }
+
+// gitRepo builds a real clone with a real remote, so the distance measured is
+// git's own and not a string this test and the code agree on.
+func gitRepo(t *testing.T, commitsAhead int) string {
+	t.Helper()
+	base := t.TempDir()
+	origin := filepath.Join(base, "origin")
+	clone := filepath.Join(base, "clone")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.MkdirAll(origin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(origin, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(origin, "a.txt"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(origin, "add", "-A")
+	run(origin, "commit", "-qm", "first")
+
+	run(base, "clone", "-q", origin, clone)
+
+	for i := range commitsAhead {
+		if err := os.WriteFile(filepath.Join(origin, "a.txt"), []byte{byte('a' + i)}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		run(origin, "commit", "-qam", "later")
+	}
+	// A FETCH, not a pull: this is the whole point. It refreshes FETCH_HEAD
+	// and the remote refs and leaves the working tree where it was, which is
+	// the state that made five findings wrong. Always, including when there is
+	// nothing new — otherwise the level-with-its-remote case has no FETCH_HEAD
+	// and SKIPS, and a skipped control is the one direction that mattered.
+	run(clone, "fetch", "-q", "origin")
+	return clone
+}
+
+// TestStalenessCountsCommitsAndNotMinutes. The old version returned a
+// hard-coded 0 for the distance while its doc said it reported one, so the
+// only signal was the fetch age — and a clone fetched seconds ago can be
+// twenty commits behind.
+func TestStalenessCountsCommitsAndNotMinutes(t *testing.T) {
+	clone := gitRepo(t, 3)
+	behind, age, ok := staleness(clone)
+	if !ok {
+		t.Fatal("a clone that has fetched reported unknown")
+	}
+	if behind != 3 {
+		t.Errorf("behind = %d, want 3", behind)
+	}
+	// And the age says "fresh", which is exactly why it is the wrong signal.
+	if age > time.Hour {
+		t.Errorf("the fetch was seconds ago and the age reads %v", age)
+	}
+}
+
+// TestACloneLevelWithItsRemoteIsNotBehind — the other direction, or a function
+// returning any positive number would pass the test above.
+func TestACloneLevelWithItsRemoteIsNotBehind(t *testing.T) {
+	behind, _, ok := staleness(gitRepo(t, 0))
+	if !ok {
+		t.Fatal("a clone that has fetched reported unknown")
+	}
+	if behind != 0 {
+		t.Errorf("a clone level with its remote reads %d behind", behind)
+	}
+}
+
+// TestSomethingThatIsNotARepositoryIsUnknownNotZero. Unknown must not read as
+// up to date: that is how a directory this cannot measure would slip through
+// looking fresh.
+func TestSomethingThatIsNotARepositoryIsUnknownNotZero(t *testing.T) {
+	if _, _, ok := staleness(t.TempDir()); ok {
+		t.Error("a directory with no .git reported a known staleness")
+	}
+}
