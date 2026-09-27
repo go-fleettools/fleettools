@@ -250,6 +250,9 @@ func main() {
 	// what was actually looked at, always.
 	fmt.Fprintf(os.Stderr, "\n%d repositories scanned, %d name an external tool in a test, %d have one their CI never installs\n",
 		scanned, withTools, len(found))
+	if n := benchOnly.Load(); n > 0 {
+		fmt.Fprintf(os.Stderr, "%d tool(s) left out: only a Benchmark reaches them, and `go test` does not run those.\n", n)
+	}
 	if n := unparsedFiles.Load(); n > 0 {
 		// Said out loud: those files were read by the old text search, which
 		// is the instrument this replaces precisely because it cannot tell a
@@ -334,9 +337,10 @@ func scan(root, repo string) (finding, bool) {
 
 // toolsWanted collects the literal tool names a repository's tests look for.
 func toolsWanted(dir string) ([]string, bool) {
-	seen := map[string]bool{}
-	dynamic := false
-	unparsed := 0
+	// Read the package's test files TOGETHER. The LookPath is almost never in
+	// the Test itself — it is in a helper — so a file-at-a-time view can say
+	// which tool is wanted and never which kind of function wants it.
+	files := map[string][]byte{}
 	filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -348,59 +352,62 @@ func toolsWanted(dir string) ([]string, bool) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(p, "_test.go") {
-			return nil
-		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return nil
-		}
-		// PARSED, not searched. See parse.go: a LookPath inside a string
-		// literal is not a call, and this tool's own test fixtures are full
-		// of them.
-		gated, _, dyn, ok := lookPaths(b)
-		if !ok {
-			// A file that does not parse is NOT a file naming no tools. Fall
-			// back to the old text search, and count it so the report can say
-			// the pass was not uniform.
-			unparsed++
-			discarded := map[string]bool{}
-			for _, m := range discardedErrRE.FindAllSubmatch(b, -1) {
-				discarded[string(m[1])] = true
+		if strings.HasSuffix(p, "_test.go") {
+			if b, err := os.ReadFile(p); err == nil {
+				files[p] = b
 			}
-			for _, m := range fallbackRE.FindAllSubmatch(b, -1) {
-				discarded[string(m[1])] = true
-			}
-			for _, m := range lookPathRE.FindAllSubmatch(b, -1) {
-				name := string(m[1])
-				if !ubiquitous[name] && !discarded[name] {
-					seen[name] = true
-				}
-			}
-			if lookPathDynamicRE.Match(b) {
-				dynamic = true
-			}
-			return nil
-		}
-		for name := range gated {
-			if !ubiquitous[name] {
-				seen[name] = true
-			}
-		}
-		if dyn {
-			dynamic = true
 		}
 		return nil
 	})
-	if unparsed > 0 {
-		unparsedFiles.Add(int64(unparsed))
+	if len(files) == 0 {
+		return nil, false
 	}
-	out := make([]string, 0, len(seen))
-	for k := range seen {
+
+	wanted, benchOnlyTools, dynamic, ok := reachability(files)
+	if !ok {
+		// A package that does not parse is not a package naming no tools. Fall
+		// back to the per-file read, and count it so the report can say the
+		// pass was not uniform.
+		unparsedFiles.Add(1)
+		seen := map[string]bool{}
+		for _, b := range files {
+			gated, _, dyn, ok := lookPaths(b)
+			if !ok {
+				continue
+			}
+			for name := range gated {
+				if !ubiquitous[name] {
+					seen[name] = true
+				}
+			}
+			if dyn {
+				dynamic = true
+			}
+		}
+		return sorted(seen), dynamic
+	}
+
+	seen := map[string]bool{}
+	for name := range wanted {
+		if !ubiquitous[name] {
+			seen[name] = true
+		}
+	}
+	// ⛔ byBench is deliberately NOT reported. `go test` does not run
+	// benchmarks, so a tool only a Benchmark reaches is one the workflow was
+	// never going to need. See reach.go: go-tpm2/tpm2 and openweft/weft both
+	// named swtpm through a helper, and only one of them had a Test behind it.
+	benchOnly.Add(int64(len(benchOnlyTools)))
+	return sorted(seen), dynamic
+}
+
+func sorted(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
 		out = append(out, k)
 	}
 	sort.Strings(out)
-	return out, dynamic
+	return out
 }
 
 // readWorkflows concatenates every workflow file, returning the text and the

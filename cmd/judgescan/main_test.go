@@ -523,3 +523,102 @@ func TestAFileThatDoesNotParseIsNotAFileWithNoTools(t *testing.T) {
 		t.Error("a file that does not parse reported a clean read")
 	}
 }
+
+// TestAToolOnlyABenchmarkReachesIsLeftOut. `go test` does not run benchmarks,
+// so a judge behind one was never going to run whatever the workflow installs.
+// go-tpm2/tpm2 named swtpm through a helper called from six Benchmark
+// functions and nothing else.
+func TestAToolOnlyABenchmarkReachesIsLeftOut(t *testing.T) {
+	root := t.TempDir()
+	repo(t, root, "o/benchonly",
+		`package p
+
+func startIt(tb testing.TB) string {
+	bin, err := exec.LookPath("swtpm")
+	if err != nil {
+		tb.Skip("no swtpm")
+	}
+	return bin
+}
+
+func BenchmarkRoundTrip(b *testing.B) { _ = startIt(b) }`,
+		map[string]string{"ci.yml": "steps:\n  - run: go test ./...\n"})
+
+	if f, ok := scan(root, "o/benchonly"); ok {
+		t.Errorf("a benchmark-only judge was reported: %v", f.missing)
+	}
+}
+
+// TestTheSameHelperBehindATestIsStillReported — the other direction, and the
+// one that makes the rule worth having rather than just quieter. openweft/weft
+// has this exact shape and its judge really has never run.
+func TestTheSameHelperBehindATestIsStillReported(t *testing.T) {
+	root := t.TempDir()
+	repo(t, root, "o/testtoo",
+		`package p
+
+func startIt(tb testing.TB) string {
+	bin, err := exec.LookPath("swtpm")
+	if err != nil {
+		tb.Skip("no swtpm")
+	}
+	return bin
+}
+
+func BenchmarkRoundTrip(b *testing.B)  { _ = startIt(b) }
+func TestRealHandshake(t *testing.T)   { _ = startIt(t) }`,
+		map[string]string{"ci.yml": "steps:\n  - run: go test ./...\n"})
+
+	f, ok := scan(root, "o/testtoo")
+	if !ok || len(f.missing) != 1 || f.missing[0] != "swtpm" {
+		t.Errorf("missing = %v (ok=%v), want [swtpm] — a Test reaches it too", f.missing, ok)
+	}
+}
+
+// TestAHelperNothingCallsIsStillReported. The call graph is name-based and so
+// incomplete: a helper invoked through a function value or an interface has no
+// edge this can see. It may therefore take things OFF the list and never be
+// the reason something is on it.
+func TestAHelperNothingCallsIsStillReported(t *testing.T) {
+	root := t.TempDir()
+	repo(t, root, "o/orphan",
+		`package p
+
+func helper(t *testing.T) {
+	if _, err := exec.LookPath("xorriso"); err != nil {
+		t.Skip("absent")
+	}
+}`,
+		map[string]string{"ci.yml": "steps:\n  - run: go test ./...\n"})
+
+	f, ok := scan(root, "o/orphan")
+	if !ok || len(f.missing) != 1 || f.missing[0] != "xorriso" {
+		t.Errorf("missing = %v (ok=%v), want [xorriso] — an unresolved caller must not delete a judge", f.missing, ok)
+	}
+}
+
+// TestAHelperAcrossTwoFilesIsFollowed. The LookPath is almost never in the
+// Test; reading one file at a time could say which tool was wanted and never
+// by whom.
+func TestAHelperAcrossTwoFilesIsFollowed(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "o", "twofiles")
+	if err := os.MkdirAll(filepath.Join(dir, ".github", "workflows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("helper_test.go", "package p\n\nfunc startIt(tb testing.TB) {\n"+
+		"\tif _, err := exec.LookPath(\"swtpm\"); err != nil {\n\t\ttb.Skip(\"no\")\n\t}\n}\n")
+	write("bench_test.go", "package p\n\nfunc BenchmarkA(b *testing.B) { startIt(b) }\n")
+	if err := os.WriteFile(filepath.Join(dir, ".github", "workflows", "ci.yml"),
+		[]byte("steps:\n  - run: go test ./...\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := scan(root, "o/twofiles"); ok {
+		t.Errorf("the helper's only caller is in another file and was not followed: %v", f.missing)
+	}
+}
