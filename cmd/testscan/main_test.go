@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/go-fleettools/fleettools/internal/checkout"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -481,73 +482,6 @@ func TestNoRemoteReachesTheOutput(t *testing.T) {
 	}
 }
 
-// TestWhyNotOursNamesTheReasonAndOnlyWhenAnswered. The failure mode that
-// matters is the quiet one: an unanswered question must never read as "not
-// ours", because that deletes a real finding — and the minutes when the API
-// refuses are exactly the minutes a sweep is running.
-func TestWhyNotOursNamesTheReasonAndOnlyWhenAnswered(t *testing.T) {
-	for name, c := range map[string]struct {
-		in   ownership
-		want string
-	}{
-		"a fork":                     {ownership{fork: true, ok: true}, "a fork"},
-		"not on GitHub":              {ownership{missing: true, ok: true}, "not on GitHub"},
-		"ours":                       {ownership{ok: true}, ""},
-		"the question failed":        {ownership{}, ""},
-		"failed, looked like a fork": {ownership{fork: true}, ""},
-	} {
-		if got := whyNotOurs(c.in); got != c.want {
-			t.Errorf("%s: whyNotOurs = %q, want %q", name, got, c.want)
-		}
-	}
-}
-
-// TestSiftKeepsWhatItCannotAskAbout — fail open, in one place, with a control
-// that a repository it CAN place is still dropped.
-func TestSiftKeepsWhatItCannotAskAbout(t *testing.T) {
-	// The question never answers: nothing may be dropped on either ground.
-	unanswerable := func(string) ownership { return ownership{} }
-	kept, dropped := sift([]finding{{repo: "someone/else"}}, nil, false, unanswerable)
-	if len(kept) != 1 || len(dropped) != 0 {
-		t.Errorf("an unanswered owner list dropped a finding: kept=%v dropped=%v", len(kept), dropped)
-	}
-	// Owners known: a repository outside them goes, one inside stays.
-	owners := map[string]bool{"go-encryptions": true}
-	kept, dropped = sift([]finding{{repo: "usbarmory/tamago"}}, owners, true, unanswerable)
-	if len(kept) != 0 || len(dropped) != 1 {
-		t.Errorf("a checkout under somebody else's account was kept: kept=%v dropped=%v", len(kept), dropped)
-	}
-	if !strings.Contains(dropped[0], "not one of our accounts") {
-		t.Errorf("the reason is not named: %q", dropped[0])
-	}
-	// A fork under an account that IS ours still goes, on the other ground.
-	kept, dropped = sift([]finding{{repo: "go-encryptions/ccm"}}, owners, true,
-		func(string) ownership { return ownership{fork: true, ok: true} })
-	if len(kept) != 0 || len(dropped) != 1 || !strings.Contains(dropped[0], "a fork") {
-		t.Errorf("a fork in one of our own organisations was kept: kept=%v dropped=%v", len(kept), dropped)
-	}
-	// And a plain repository of ours survives both tests.
-	kept, dropped = sift([]finding{{repo: "go-encryptions/ccm"}}, owners, true,
-		func(string) ownership { return ownership{ok: true} })
-	if len(kept) != 1 || len(dropped) != 0 {
-		t.Errorf("one of ours was dropped: kept=%v dropped=%v", len(kept), dropped)
-	}
-}
-
-func TestOwnerOf(t *testing.T) {
-	for in, want := range map[string]string{
-		"go-encryptions/ccm": "go-encryptions",
-		"tannevaled/hcl":     "tannevaled",
-		"nameonly":           "nameonly",
-	} {
-		if got := ownerOf(in); got != want {
-			t.Errorf("ownerOf(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-// gitRepo builds a real clone with a real remote, so the distance measured is
-// git's own and not a string this test and the code agree on.
 func gitRepo(t *testing.T, commitsAhead int) string {
 	t.Helper()
 	base := t.TempDir()
@@ -598,7 +532,7 @@ func gitRepo(t *testing.T, commitsAhead int) string {
 // twenty commits behind.
 func TestStalenessCountsCommitsAndNotMinutes(t *testing.T) {
 	clone := gitRepo(t, 3)
-	behind, age, ok := staleness(clone)
+	behind, age, ok := checkout.Staleness(clone)
 	if !ok {
 		t.Fatal("a clone that has fetched reported unknown")
 	}
@@ -614,7 +548,7 @@ func TestStalenessCountsCommitsAndNotMinutes(t *testing.T) {
 // TestACloneLevelWithItsRemoteIsNotBehind — the other direction, or a function
 // returning any positive number would pass the test above.
 func TestACloneLevelWithItsRemoteIsNotBehind(t *testing.T) {
-	behind, _, ok := staleness(gitRepo(t, 0))
+	behind, _, ok := checkout.Staleness(gitRepo(t, 0))
 	if !ok {
 		t.Fatal("a clone that has fetched reported unknown")
 	}
@@ -627,7 +561,7 @@ func TestACloneLevelWithItsRemoteIsNotBehind(t *testing.T) {
 // up to date: that is how a directory this cannot measure would slip through
 // looking fresh.
 func TestSomethingThatIsNotARepositoryIsUnknownNotZero(t *testing.T) {
-	if _, _, ok := staleness(t.TempDir()); ok {
+	if _, _, ok := checkout.Staleness(t.TempDir()); ok {
 		t.Error("a directory with no .git reported a known staleness")
 	}
 }

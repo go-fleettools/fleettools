@@ -42,6 +42,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/go-fleettools/fleettools/internal/checkout"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -142,6 +143,7 @@ type finding struct {
 	bytesRead  int      // how much YAML was actually read -- the positive control
 	fetchAge   time.Duration
 	fetchKnown bool
+	behind     int // commits this checkout is behind its remote default
 }
 
 func main() {
@@ -172,6 +174,29 @@ func main() {
 			found = append(found, f)
 		}
 	}
+	// ⛔ Confirm each finding belongs to us before printing it. judgescan had
+	// no such question and was still naming forks: tannevaled/tamago-go (a
+	// fork of usbarmory's) and tannevaled/x-sys (not on GitHub at all) were
+	// two of fourteen. See internal/checkout — testscan asks the same thing,
+	// and it is one function so the two cannot drift apart again.
+	var dropped []string
+	if *only == "" {
+		repos := make([]string, 0, len(found))
+		for _, f := range found {
+			repos = append(repos, f.repo)
+		}
+		owners, have := checkout.Owners()
+		keep, out := checkout.Ours(repos, owners, have, checkout.Ask)
+		dropped = out
+		var kept []finding
+		for _, f := range found {
+			if keep[f.repo] {
+				kept = append(kept, f)
+			}
+		}
+		found = kept
+	}
+
 	sort.Slice(found, func(i, j int) bool { return found[i].repo < found[j].repo })
 
 	for _, f := range found {
@@ -192,24 +217,33 @@ func main() {
 	// How stale is the evidence? This reads the working tree, so a checkout
 	// that has not fetched in weeks gives a weeks-old answer that looks exactly
 	// like a current one. Say so before anyone acts on the list.
-	stale, oldest := 0, time.Duration(0)
-	for _, f := range found {
-		if !f.fetchKnown {
-			continue
+	if len(dropped) > 0 {
+		sort.Strings(dropped)
+		fmt.Fprintf(os.Stderr, "\n%d checkout(s) left out — not ours to fix:\n", len(dropped))
+		for _, d := range dropped {
+			fmt.Fprintf(os.Stderr, "  %s\n", d)
 		}
-		if f.fetchAge > 7*24*time.Hour {
+	}
+
+	// ⛔ The distance, not the fetch age. This counted clones that had not
+	// FETCHED in a week, and `git fetch` refreshes FETCH_HEAD without touching
+	// the working tree — so the signal said "fresh" for a tree twenty commits
+	// behind. testscan learnt this on 2026-09-27 and this copy did not, which
+	// is why both now call one function.
+	stale, furthest := 0, 0
+	for _, f := range found {
+		if f.behind > 0 {
 			stale++
 		}
-		if f.fetchAge > oldest {
-			oldest = f.fetchAge
+		if f.behind > furthest {
+			furthest = f.behind
 		}
 	}
 	if stale > 0 {
 		fmt.Fprintf(os.Stderr,
-			"\n⚠ %d of the %d repositories above have not fetched in over a week (oldest: %d days).\n"+
-				"  Refresh those clones and RE-RUN this: refreshing without re-deriving\n"+
-				"  the finding makes a stale one look confirmed.\n",
-			stale, len(found), int(oldest.Hours()/24))
+			"\n⚠ %d of the %d findings above come from a checkout BEHIND its remote (furthest: %d commits).\n"+
+				"  Pull those clones and RE-RUN this: refreshing without re-deriving makes a stale finding\n"+
+				"  look confirmed.\n", stale, len(found), furthest)
 	}
 
 	// A scan that cannot read reports zero, and zero reads as good news. Say
@@ -281,7 +315,7 @@ func scan(root, repo string) (finding, bool) {
 		return finding{}, false
 	}
 	f := finding{repo: repo, dynamic: dynamic}
-	f.fetchAge, f.fetchKnown = staleness(dir)
+	f.behind, f.fetchAge, f.fetchKnown = checkout.Staleness(dir)
 	yaml, n, err := readWorkflows(dir)
 	if err != nil || n == 0 {
 		f.noCI = "no workflows"
@@ -457,23 +491,4 @@ func mentioned(lowerInstall, tool string) bool {
 		}
 	}
 	return false
-}
-
-// staleness reports how long since this checkout last heard from its remote.
-//
-// This tool reads the WORKING TREE. A clone that has not fetched in weeks
-// yields a weeks-old diagnosis that looks exactly like a current one — and on
-// 2026-09-22 the sibling tool testscan produced three redundant pull requests
-// that way, re-fixing repositories that had been fixed weeks earlier. 31 of
-// the 34 it flagged had a stale working tree; refreshing them removed 13
-// findings outright.
-//
-// Unknown is reported as unknown: a clone with no FETCH_HEAD has never
-// fetched here, which is not the same as being current.
-func staleness(dir string) (age time.Duration, ok bool) {
-	st, err := os.Stat(filepath.Join(dir, ".git", "FETCH_HEAD"))
-	if err != nil {
-		return 0, false
-	}
-	return time.Since(st.ModTime()), true
 }
