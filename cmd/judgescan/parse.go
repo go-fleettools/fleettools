@@ -132,10 +132,29 @@ func discardsError(as *ast.AssignStmt) bool {
 	return is && id.Name == "_"
 }
 
-// comparesErrToNil reports `err == nil`, whatever the variable is called.
+// comparesErrToNil reports `err == nil`, whatever the variable is called —
+// including when it is one operand of a larger condition.
+//
+// ⛔ IT USED TO REQUIRE THE WHOLE CONDITION TO BE THE COMPARISON, and
+// go-ansible/facts writes it like this:
+//
+//	if _, err := exec.LookPath("lsb_release"); err == nil && !anySeen {
+//		t.Error("lsb_release is installed but the probe reported no label")
+//	}
+//
+// That is not a gate at all: the tool being ABSENT costs an assertion and
+// skips nothing. Read as a gate, it named lsb_release as a judge the CI never
+// installs, when there was no judge to install.
 func comparesErrToNil(cond ast.Expr) bool {
 	bin, is := cond.(*ast.BinaryExpr)
-	if !is || bin.Op != token.EQL {
+	if !is {
+		return false
+	}
+	// A conjunction: the comparison may be either side of it.
+	if bin.Op == token.LAND {
+		return comparesErrToNil(bin.X) || comparesErrToNil(bin.Y)
+	}
+	if bin.Op != token.EQL {
 		return false
 	}
 	id, is := bin.Y.(*ast.Ident)

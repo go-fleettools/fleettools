@@ -622,3 +622,71 @@ func TestAHelperAcrossTwoFilesIsFollowed(t *testing.T) {
 		t.Errorf("the helper's only caller is in another file and was not followed: %v", f.missing)
 	}
 }
+
+// TestErrIsNilInsideALargerConditionIsNotAGate. go-ansible/facts writes
+//
+//	if _, err := exec.LookPath("lsb_release"); err == nil && !anySeen {
+//		t.Error(...)
+//	}
+//
+// The tool being ABSENT costs an assertion and skips nothing. Read as a gate,
+// it named a judge the CI never installs when there was no judge to install.
+func TestErrIsNilInsideALargerConditionIsNotAGate(t *testing.T) {
+	root := t.TempDir()
+	repo(t, root, "o/conj",
+		`package p
+
+func TestProbe(t *testing.T) {
+	anySeen := false
+	if _, err := exec.LookPath("lsb_release"); err == nil && !anySeen {
+		t.Error("installed but nothing was reported")
+	}
+}`,
+		map[string]string{"ci.yml": "steps:\n  - run: go test ./...\n"})
+
+	if f, ok := scan(root, "o/conj"); ok {
+		t.Errorf("a strengthening check was treated as a gate: %v", f.missing)
+	}
+}
+
+// TestASkipInsideTheSameShapeIsStillAGate — the other direction. The
+// conjunction must not become a blanket excuse: a LookPath whose failure
+// really does skip is still a judge.
+func TestASkipInsideTheSameShapeIsStillAGate(t *testing.T) {
+	root := t.TempDir()
+	repo(t, root, "o/stillgate",
+		`package p
+
+func TestProbe(t *testing.T) {
+	if _, err := exec.LookPath("xorriso"); err != nil {
+		t.Skip("absent")
+	}
+}`,
+		map[string]string{"ci.yml": "steps:\n  - run: go test ./...\n"})
+
+	f, ok := scan(root, "o/stillgate")
+	if !ok || len(f.missing) != 1 || f.missing[0] != "xorriso" {
+		t.Errorf("missing = %v (ok=%v), want [xorriso]", f.missing, ok)
+	}
+}
+
+// TestAToolProvenPresentIsNotReported. bzip2 is in the runner image's apt
+// table and its judge was already running in CI.
+func TestAToolProvenPresentIsNotReported(t *testing.T) {
+	root := t.TempDir()
+	repo(t, root, "o/bz",
+		`package p
+
+func TestRef(t *testing.T) {
+	bin, err := exec.LookPath("bzip2")
+	if err != nil {
+		t.Skip("no bzip2")
+	}
+	_ = bin
+}`,
+		map[string]string{"ci.yml": "steps:\n  - run: go test ./...\n"})
+
+	if f, ok := scan(root, "o/bz"); ok {
+		t.Errorf("a tool the runner ships was reported: %v", f.missing)
+	}
+}
