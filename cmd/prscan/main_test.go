@@ -31,7 +31,7 @@ case "$*" in
   *search/issues*) echo '`+twoPRs+`' ;;
 esac`)
 	var out, errOut strings.Builder
-	if code := run(&out, &errOut); code != 0 {
+	if code := run(&out, &errOut, nil); code != 0 {
 		t.Errorf("exit = %d: %s", code, errOut.String())
 	}
 	got := out.String()
@@ -54,7 +54,7 @@ case "$*" in
   *search/issues*) echo "API rate limit exceeded for user ID 1." >&2; exit 1 ;;
 esac`)
 	var out, errOut strings.Builder
-	code := run(&out, &errOut)
+	code := run(&out, &errOut, nil)
 	got := out.String()
 	if code == 0 {
 		t.Errorf("an incomplete pass exited 0:\n%s", got)
@@ -76,7 +76,7 @@ esac`)
 func TestWithoutTheOrganisationsThereIsNothingToSearch(t *testing.T) {
 	withFakeGH(t, `echo "gh: not logged in" >&2; exit 1`)
 	var out, errOut strings.Builder
-	if code := run(&out, &errOut); code == 0 {
+	if code := run(&out, &errOut, nil); code == 0 {
 		t.Error("a pass that could not list the organisations exited 0")
 	}
 	if !strings.Contains(errOut.String(), "orgs:") {
@@ -102,5 +102,80 @@ func TestTheTwoRateLimitsWantOppositeTreatment(t *testing.T) {
 		if got := retryable(c.msg); got != c.want {
 			t.Errorf("retryable(%q) = %v, want %v", c.msg, got, c.want)
 		}
+	}
+}
+
+// thirtyPRs spreads one pull request over thirty repositories, which is more
+// than the list prints by default.
+const thirtyPRs = `{"items":[
+  {"html_url":"https://github.com/acme/r00/pull/1"},
+  {"html_url":"https://github.com/acme/r01/pull/1"},
+  {"html_url":"https://github.com/acme/r02/pull/1"},
+  {"html_url":"https://github.com/acme/r03/pull/1"},
+  {"html_url":"https://github.com/acme/r04/pull/1"},
+  {"html_url":"https://github.com/acme/r05/pull/1"},
+  {"html_url":"https://github.com/acme/r06/pull/1"},
+  {"html_url":"https://github.com/acme/r07/pull/1"},
+  {"html_url":"https://github.com/acme/r08/pull/1"},
+  {"html_url":"https://github.com/acme/r09/pull/1"},
+  {"html_url":"https://github.com/acme/r10/pull/1"},
+  {"html_url":"https://github.com/acme/r11/pull/1"},
+  {"html_url":"https://github.com/acme/r12/pull/1"},
+  {"html_url":"https://github.com/acme/r13/pull/1"},
+  {"html_url":"https://github.com/acme/r14/pull/1"},
+  {"html_url":"https://github.com/acme/r15/pull/1"},
+  {"html_url":"https://github.com/acme/r16/pull/1"},
+  {"html_url":"https://github.com/acme/r17/pull/1"},
+  {"html_url":"https://github.com/acme/r18/pull/1"},
+  {"html_url":"https://github.com/acme/r19/pull/1"},
+  {"html_url":"https://github.com/acme/r20/pull/1"},
+  {"html_url":"https://github.com/acme/r21/pull/1"},
+  {"html_url":"https://github.com/acme/r22/pull/1"},
+  {"html_url":"https://github.com/acme/r23/pull/1"},
+  {"html_url":"https://github.com/acme/r24/pull/1"},
+  {"html_url":"https://github.com/acme/r25/pull/1"},
+  {"html_url":"https://github.com/acme/r26/pull/1"},
+  {"html_url":"https://github.com/acme/r27/pull/1"},
+  {"html_url":"https://github.com/acme/r28/pull/1"},
+  {"html_url":"https://github.com/acme/r29/pull/1"}]}`
+
+func TestTheDefaultListIsATop25AndSaysSo(t *testing.T) {
+	// A reader who sums the printed lines gets 25, not 30, and the five
+	// repositories past the cut-off are invisible rather than absent. A
+	// census built from this output has been short by exactly that gap.
+	withFakeGH(t, `
+case "$*" in
+  *user/orgs*) echo "acme" ;;
+  *search/issues*) echo '`+thirtyPRs+`' ;;
+esac`)
+	var out, errOut strings.Builder
+	if code := run(&out, &errOut, nil); code != 0 {
+		t.Fatalf("exit = %d: %s", code, errOut.String())
+	}
+	got := out.String()
+	if n := strings.Count(got, "acme/r"); n != 25 {
+		t.Errorf("printed %d repo lines, want the 25 the cut-off allows:\n%s", n, got)
+	}
+	if !strings.Contains(got, "and 5 more repos") {
+		t.Errorf("the cut-off is silent about what it dropped:\n%s", got)
+	}
+}
+
+func TestAllListsEveryRepository(t *testing.T) {
+	withFakeGH(t, `
+case "$*" in
+  *user/orgs*) echo "acme" ;;
+  *search/issues*) echo '`+thirtyPRs+`' ;;
+esac`)
+	var out, errOut strings.Builder
+	if code := run(&out, &errOut, []string{"-all"}); code != 0 {
+		t.Fatalf("exit = %d: %s", code, errOut.String())
+	}
+	got := out.String()
+	if n := strings.Count(got, "acme/r"); n != 30 {
+		t.Errorf("printed %d repo lines, want all 30:\n%s", n, got)
+	}
+	if strings.Contains(got, "more repos") {
+		t.Errorf("-all still truncated:\n%s", got)
 	}
 }
