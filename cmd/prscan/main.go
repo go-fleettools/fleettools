@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -62,7 +63,7 @@ type item struct {
 	Number int    `json:"number"`
 }
 
-func main() { os.Exit(run(os.Stdout, os.Stderr)) }
+func main() { os.Exit(run(os.Stdout, os.Stderr, os.Args[1:])) }
 
 // betweenBatches is the pause the search API wants between queries. A test
 // drives many batches and must not wait for any of them.
@@ -71,7 +72,14 @@ var betweenBatches = 2500 * time.Millisecond
 // run is the whole program, so a test can drive it and read what it says.
 // Non-zero when the sweep could not search the whole fleet: a count missing
 // whole organisations is not a count of the fleet.
-func run(stdout, stderr io.Writer) int {
+func run(stdout, stderr io.Writer, args []string) int {
+	fs := flag.NewFlagSet("prscan", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	all := fs.Bool("all", false, "list every repository, not the busiest 25")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
 	out, err := gh("api", "user/orgs", "--paginate", "--jq", ".[].login")
 	if err != nil {
 		fmt.Fprintln(stderr, "orgs:", err)
@@ -169,9 +177,14 @@ func run(stdout, stderr io.Writer) int {
 		}
 		return list[i].repo < list[j].repo
 	})
+	// The cut-off is a display choice, and it has been mistaken for the
+	// census more than once: a reader who sums the lines gets a number
+	// smaller than the total printed two lines above, and the repositories
+	// that fall off the end are invisible rather than absent. -all prints
+	// them, so a sweep can be driven from this output instead of guessed at.
 	for i, e := range list {
-		if i >= 25 {
-			fmt.Fprintf(stdout, "  ... and %d more repos\n", len(list)-25)
+		if !*all && i >= 25 {
+			fmt.Fprintf(stdout, "  ... and %d more repos (-all to list them)\n", len(list)-25)
 			break
 		}
 		fmt.Fprintf(stdout, "  %-46s %d\n", e.repo, e.n)
