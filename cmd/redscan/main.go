@@ -110,6 +110,7 @@ func run(stdout, stderr io.Writer) int {
 
 	var reds []red
 	var unread, gone, stale []string
+	retried := 0
 	checked, rechecked := 0, 0
 	for _, r := range repos {
 		wg.Add(1)
@@ -118,6 +119,29 @@ func run(stdout, stderr io.Writer) int {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			runs, allRuns, err := latestRuns(r)
+			if err != nil {
+				// ⛔ AN UNREAD REPOSITORY IS AN UNASKED QUESTION, and this
+				// sweep was leaving 18 of 1983 of them per pass. Every one
+				// carried a transport error -- `dial tcp 140.82.112.6:443` --
+				// not an HTTP status, and every one of the five sampled by
+				// hand answered immediately on a second try:
+				//
+				//	go-browserhttp/gitcorsproxy  success
+				//	go-docutils/docutils         success
+				//	go-gnulinux/fido             success
+				//	go-hocon/docs                success
+				//	go-aiquota/plugin-chatgpt    no completed run at all
+				//
+				// One retry, only for the handful that failed, so the cost is
+				// 18 calls against 1983. A second failure is reported as
+				// before: the point is to shrink the blind spot, not to hide
+				// it, and the INCOMPLETE banner still names whatever is left.
+				time.Sleep(retryPause)
+				mu.Lock()
+				retried++
+				mu.Unlock()
+				runs, allRuns, err = latestRuns(r)
+			}
 			if err != nil {
 				mu.Lock()
 				unread = append(unread, r.FullName+": "+firstLine(err.Error()))
@@ -245,6 +269,10 @@ func run(stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "      %s\n", g)
 		}
 	}
+	if retried > 0 {
+		fmt.Fprintf(stdout, "  (%d repository read(s) failed and were asked again; %d still could not be read)\n",
+			retried, len(unread))
+	}
 	if rechecked > 0 {
 		// Said out loud rather than swallowed: a sweep that silently repaired
 		// its own readings would hide how often the endpoint does this.
@@ -324,6 +352,10 @@ func latestRuns(r repo) ([]wfRun, []wfRun, error) {
 // Both are GitHub's implicit `pages-build-deployment`, abandoned when the
 // repository adopted its own deploy workflow — whose runs are green and as
 // recent as yesterday. Five is below the smaller witness and far above zero.
+// retryPause is how long to wait before asking a second time. Short: the
+// failures are a connection that did not open, not a server saying slow down.
+const retryPause = 2 * time.Second
+
 const supersededAfter = 5
 
 // laterRuns counts the runs on the branch that finished after v did. It reads
