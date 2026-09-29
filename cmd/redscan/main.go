@@ -14,30 +14,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
 	"time"
-)
 
-func gh(args ...string) ([]byte, error) {
-	for attempt := 0; ; attempt++ {
-		cmd := exec.Command("gh", args...)
-		var errb strings.Builder
-		cmd.Stderr = &errb
-		out, err := cmd.Output()
-		if err == nil {
-			return out, nil
-		}
-		msg := errb.String()
-		if attempt < 5 && (strings.Contains(msg, "secondary rate") || strings.Contains(msg, "abuse") || strings.Contains(msg, "too quickly")) {
-			time.Sleep(time.Duration(20*(attempt+1)) * time.Second)
-			continue
-		}
-		return nil, fmt.Errorf("%s", strings.TrimSpace(msg))
-	}
-}
+	"github.com/go-fleettools/fleettools/internal/fleet"
+)
 
 type repo struct {
 	FullName string `json:"full_name"`
@@ -54,7 +37,7 @@ func main() { os.Exit(run(os.Stdout, os.Stderr)) }
 // It returns the exit status: non-zero when the sweep could not read the whole
 // fleet, which is not the same as finding nothing wrong with it.
 func run(stdout, stderr io.Writer) int {
-	out, err := gh("api", "user/orgs", "--paginate", "--jq", ".[].login")
+	out, err := fleet.GH("api", "user/orgs", "--paginate", "--jq", ".[].login")
 	if err != nil {
 		fmt.Fprintln(stderr, "orgs:", err)
 		return 1
@@ -78,7 +61,7 @@ func run(stdout, stderr io.Writer) int {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			b, err := gh("api", "orgs/"+o+"/repos?per_page=100", "--paginate")
+			b, err := fleet.GH("api", "orgs/"+o+"/repos?per_page=100", "--paginate")
 			if err != nil {
 				// An organisation whose repositories could not be listed
 				// contributes none, and the total below would read as its
@@ -325,7 +308,7 @@ type wfRun struct {
 // within the branch's last hundred runs does not appear, which is a dormant
 // workflow rather than a hidden failure.
 func latestRuns(r repo) ([]wfRun, []wfRun, error) {
-	b, err := gh("api",
+	b, err := fleet.GH("api",
 		"repos/"+r.FullName+"/actions/runs?branch="+r.Default+"&status=completed&per_page=100",
 		"--jq", "[.workflow_runs[] | {w: (.workflow_id // 0), c: (.conclusion // \"\"), "+
 			"n: (.name // \"\"), d: (.created_at // \"\")}]")
@@ -426,7 +409,7 @@ func firstLine(s string) string {
 // not disabled. GitHub reports a removed one as state "deleted" and keeps
 // serving its runs, which is how a branch stays red with nothing to fix.
 func activeWorkflows(r repo) (map[int]bool, error) {
-	out, err := gh("api", "repos/"+r.FullName+"/actions/workflows?per_page=100",
+	out, err := fleet.GH("api", "repos/"+r.FullName+"/actions/workflows?per_page=100",
 		"--jq", "[.workflows[] | {i: .id, s: .state}]")
 	if err != nil {
 		return nil, err

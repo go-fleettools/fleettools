@@ -15,43 +15,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
 
-func gh(args ...string) ([]byte, error) {
-	for attempt := 0; ; attempt++ {
-		cmd := exec.Command("gh", args...)
-		var errb strings.Builder
-		cmd.Stderr = &errb
-		out, err := cmd.Output()
-		if err == nil {
-			return out, nil
-		}
-		msg := errb.String()
-		// A transient network fault is worth retrying too, not just a rate
-		// limit. One pass lost 186 of 460 candidates to "no route to host"
-		// while the machine's link flapped -- they were not bad pull requests,
-		// and giving up on the first dial error turned a blip into a silent
-		// hole in the sweep.
-		transient := strings.Contains(msg, "no route to host") ||
-			strings.Contains(msg, "operation timed out") ||
-			strings.Contains(msg, "connection reset") ||
-			strings.Contains(msg, "i/o timeout") ||
-			strings.Contains(msg, "TLS handshake timeout") ||
-			strings.Contains(msg, "EOF") ||
-			// gh's own wording, which the Go-level strings above do not cover.
-			// A DNS outage mid-sweep produced 109 of these and the retry never
-			// fired, because I matched the errors I had SEEN rather than the
-			// ones the tool actually emits.
-			strings.Contains(msg, "error connecting to") ||
-			strings.Contains(msg, "no such host") ||
-			strings.Contains(msg, "check your internet connection")
-		if attempt < 5 && (transient || throttled(msg)) {
-			time.Sleep(time.Duration(20*(attempt+1)) * time.Second)
-			continue
-		}
-		return nil, fmt.Errorf("%s", strings.TrimSpace(msg))
-	}
-}
+	"github.com/go-fleettools/fleettools/internal/fleet"
+)
 
 type prRef struct {
 	repo string
@@ -88,7 +54,7 @@ func gh2(name string, args ...string) ([]byte, error) {
 			strings.Contains(msg, "connection reset") ||
 			strings.Contains(msg, "i/o timeout") ||
 			strings.Contains(msg, "error connecting to") ||
-			throttled(msg) ||
+			fleet.Throttled(msg) ||
 			// 405 on a merge means GitHub has not finished computing
 			// mergeability yet -- the PR reads mergeable=null, and the same
 			// merge succeeds a minute later. Measured: 31 of these in one
@@ -125,7 +91,7 @@ func refusalKind(err error) string {
 }
 
 func ghPR(repo string, num int) ([]byte, error) {
-	raw, err := gh("api", fmt.Sprintf("repos/%s/pulls/%d", repo, num))
+	raw, err := fleet.GH("api", fmt.Sprintf("repos/%s/pulls/%d", repo, num))
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +122,7 @@ func ghPR(repo string, num int) ([]byte, error) {
 		State      string `json:"state"`
 	}
 	rolls := []roll{}
-	if cr, err := gh("api", fmt.Sprintf("repos/%s/commits/%s/check-runs?per_page=100", repo, pr.Head.SHA)); err == nil {
+	if cr, err := fleet.GH("api", fmt.Sprintf("repos/%s/commits/%s/check-runs?per_page=100", repo, pr.Head.SHA)); err == nil {
 		var v struct {
 			CheckRuns []struct {
 				Conclusion string `json:"conclusion"`
@@ -188,15 +154,6 @@ func ghPR(repo string, num int) ([]byte, error) {
 // time, and no short backoff reaches it -- matching "rate limit" caught both,
 // so a spent budget slept 20+40+60+80+100 seconds and failed anyway, once per
 // call.
-func throttled(msg string) bool {
-	if strings.Contains(msg, "API rate limit exceeded") {
-		return false
-	}
-	return strings.Contains(msg, "secondary rate") ||
-		strings.Contains(msg, "rate limit") ||
-		strings.Contains(msg, "abuse") ||
-		strings.Contains(msg, "too quickly")
-}
 
 func heldByOthers() map[string]string {
 	out := map[string]string{}
@@ -286,7 +243,7 @@ func main() {
 		return
 	}
 	orgs, err := orgsToSweep(os.Args[1:], func() ([]byte, error) {
-		return gh("api", "user/orgs", "--paginate", "--jq", ".[].login")
+		return fleet.GH("api", "user/orgs", "--paginate", "--jq", ".[].login")
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "orgs:", err)
@@ -317,7 +274,7 @@ func main() {
 		for _, o := range b {
 			q += " org:" + o
 		}
-		raw, err := gh("api", "-X", "GET", "search/issues", "-f", "q="+q, "-f", "per_page=100", "--paginate")
+		raw, err := fleet.GH("api", "-X", "GET", "search/issues", "-f", "q="+q, "-f", "per_page=100", "--paginate")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "search:", err)
 			continue

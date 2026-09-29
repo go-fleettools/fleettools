@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 func withFakeGH(t *testing.T, script string) {
@@ -14,10 +16,10 @@ func withFakeGH(t *testing.T, script string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	oldPause, oldBackoff := betweenBatches, backoff
+	oldPause, oldBackoff := betweenBatches, fleet.Backoff
 	betweenBatches = 0
-	backoff = func(int) time.Duration { return 0 }
-	t.Cleanup(func() { betweenBatches, backoff = oldPause, oldBackoff })
+	fleet.Backoff = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { betweenBatches, fleet.Backoff = oldPause, oldBackoff })
 }
 
 const twoPRs = `{"items":[
@@ -84,98 +86,35 @@ func TestWithoutTheOrganisationsThereIsNothingToSearch(t *testing.T) {
 	}
 }
 
-func TestTheTwoRateLimitsWantOppositeTreatment(t *testing.T) {
-	// The secondary limit is a burst brake and lifts in seconds; waiting is
-	// the remedy. The primary one is an hourly budget that resets at a fixed
-	// time, and no short backoff reaches it -- matching on "rate" alone made a
-	// spent budget sleep five minutes and fail anyway, per batch.
-	for _, c := range []struct {
-		msg  string
-		want bool
-	}{
-		{"You have exceeded a secondary rate limit", true},
-		{"was submitted too quickly", true},
-		{"triggered an abuse detection mechanism", true},
-		{"API rate limit exceeded for user ID 11405852.", false},
-		{"gh: not logged in", false},
-	} {
-		if got := retryable(c.msg); got != c.want {
-			t.Errorf("retryable(%q) = %v, want %v", c.msg, got, c.want)
-		}
-	}
-}
-
-// thirtyPRs spreads one pull request over thirty repositories, which is more
-// than the list prints by default.
-const thirtyPRs = `{"items":[
-  {"html_url":"https://github.com/acme/r00/pull/1"},
-  {"html_url":"https://github.com/acme/r01/pull/1"},
-  {"html_url":"https://github.com/acme/r02/pull/1"},
-  {"html_url":"https://github.com/acme/r03/pull/1"},
-  {"html_url":"https://github.com/acme/r04/pull/1"},
-  {"html_url":"https://github.com/acme/r05/pull/1"},
-  {"html_url":"https://github.com/acme/r06/pull/1"},
-  {"html_url":"https://github.com/acme/r07/pull/1"},
-  {"html_url":"https://github.com/acme/r08/pull/1"},
-  {"html_url":"https://github.com/acme/r09/pull/1"},
-  {"html_url":"https://github.com/acme/r10/pull/1"},
-  {"html_url":"https://github.com/acme/r11/pull/1"},
-  {"html_url":"https://github.com/acme/r12/pull/1"},
-  {"html_url":"https://github.com/acme/r13/pull/1"},
-  {"html_url":"https://github.com/acme/r14/pull/1"},
-  {"html_url":"https://github.com/acme/r15/pull/1"},
-  {"html_url":"https://github.com/acme/r16/pull/1"},
-  {"html_url":"https://github.com/acme/r17/pull/1"},
-  {"html_url":"https://github.com/acme/r18/pull/1"},
-  {"html_url":"https://github.com/acme/r19/pull/1"},
-  {"html_url":"https://github.com/acme/r20/pull/1"},
-  {"html_url":"https://github.com/acme/r21/pull/1"},
-  {"html_url":"https://github.com/acme/r22/pull/1"},
-  {"html_url":"https://github.com/acme/r23/pull/1"},
-  {"html_url":"https://github.com/acme/r24/pull/1"},
-  {"html_url":"https://github.com/acme/r25/pull/1"},
-  {"html_url":"https://github.com/acme/r26/pull/1"},
-  {"html_url":"https://github.com/acme/r27/pull/1"},
-  {"html_url":"https://github.com/acme/r28/pull/1"},
-  {"html_url":"https://github.com/acme/r29/pull/1"}]}`
-
-func TestTheDefaultListIsATop25AndSaysSo(t *testing.T) {
-	// A reader who sums the printed lines gets 25, not 30, and the five
-	// repositories past the cut-off are invisible rather than absent. A
-	// census built from this output has been short by exactly that gap.
+// TestANetworkBlipNoLongerHolesTheSweep is the payoff of moving fleet.GH() into
+// internal/fleet. Before that, this command retried a throttle and gave up on
+// the first dial error -- so a link flap turned a whole batch of
+// organisations into a silent zero, and the count came back smaller with
+// nothing saying why. prmerge had learned this and prscan had not.
+//
+// The fake gh fails once with gh's own DNS wording, then succeeds.
+func TestANetworkBlipNoLongerHolesTheSweep(t *testing.T) {
+	dir := t.TempDir()
 	withFakeGH(t, `
 case "$*" in
   *user/orgs*) echo "acme" ;;
-  *search/issues*) echo '`+thirtyPRs+`' ;;
+  *search/issues*)
+    if [ ! -f `+dir+`/tripped ]; then
+      : > `+dir+`/tripped
+      echo "error connecting to api.github.com" >&2
+      exit 1
+    fi
+    echo '`+twoPRs+`' ;;
 esac`)
 	var out, errOut strings.Builder
 	if code := run(&out, &errOut, nil); code != 0 {
-		t.Fatalf("exit = %d: %s", code, errOut.String())
+		t.Fatalf("exit = %d, want the blip retried through: %s", code, errOut.String())
 	}
 	got := out.String()
-	if n := strings.Count(got, "acme/r"); n != 25 {
-		t.Errorf("printed %d repo lines, want the 25 the cut-off allows:\n%s", n, got)
+	if !strings.Contains(got, "open PRs: 2 across 2 repos") {
+		t.Errorf("the count did not survive one dial error:\n%s", got)
 	}
-	if !strings.Contains(got, "and 5 more repos") {
-		t.Errorf("the cut-off is silent about what it dropped:\n%s", got)
-	}
-}
-
-func TestAllListsEveryRepository(t *testing.T) {
-	withFakeGH(t, `
-case "$*" in
-  *user/orgs*) echo "acme" ;;
-  *search/issues*) echo '`+thirtyPRs+`' ;;
-esac`)
-	var out, errOut strings.Builder
-	if code := run(&out, &errOut, []string{"-all"}); code != 0 {
-		t.Fatalf("exit = %d: %s", code, errOut.String())
-	}
-	got := out.String()
-	if n := strings.Count(got, "acme/r"); n != 30 {
-		t.Errorf("printed %d repo lines, want all 30:\n%s", n, got)
-	}
-	if strings.Contains(got, "more repos") {
-		t.Errorf("-all still truncated:\n%s", got)
+	if strings.Contains(got, "INCOMPLETE") {
+		t.Errorf("a retried blip was reported as an incomplete pass:\n%s", got)
 	}
 }

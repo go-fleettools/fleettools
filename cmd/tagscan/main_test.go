@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 func withFakeGH(t *testing.T, script string) {
@@ -14,9 +16,9 @@ func withFakeGH(t *testing.T, script string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	old := backoff
-	backoff = func(int) time.Duration { return 0 }
-	t.Cleanup(func() { backoff = old })
+	old := fleet.Backoff
+	fleet.Backoff = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { fleet.Backoff = old })
 }
 
 // withRemote answers git ls-remote from a table instead of the network.
@@ -197,8 +199,8 @@ func TestTheTwoRateLimitsWantOppositeTreatment(t *testing.T) {
 		"API rate limit exceeded for user ID 11405852": false,
 		"gh: not logged in":                            false,
 	} {
-		if got := retryable(msg); got != want {
-			t.Errorf("retryable(%q) = %v", msg, got)
+		if got := fleet.Retryable(msg); got != want {
+			t.Errorf("fleet.Retryable(%q) = %v", msg, got)
 		}
 	}
 }
