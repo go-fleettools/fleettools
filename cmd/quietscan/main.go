@@ -23,13 +23,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-fleettools/fleettools/quiet"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 // readOnly refuses anything that is not a plain GET.
@@ -61,42 +62,6 @@ func readOnly(args []string) error {
 		}
 	}
 	return nil
-}
-
-func gh(args ...string) ([]byte, error) {
-	if err := readOnly(args); err != nil {
-		return nil, err
-	}
-	for attempt := 0; ; attempt++ {
-		cmd := exec.Command("gh", args...)
-		var errb strings.Builder
-		cmd.Stderr = &errb
-		out, err := cmd.Output()
-		if err == nil {
-			return out, nil
-		}
-		msg := errb.String()
-		// Same list as prmerge: a sweep that gives up on the first dial error
-		// turns a network blip into a silent hole, and a hole in a watcher
-		// reads as "all quiet".
-		transient := strings.Contains(msg, "no route to host") ||
-			strings.Contains(msg, "operation timed out") ||
-			strings.Contains(msg, "connection reset") ||
-			strings.Contains(msg, "i/o timeout") ||
-			strings.Contains(msg, "TLS handshake timeout") ||
-			strings.Contains(msg, "EOF") ||
-			strings.Contains(msg, "error connecting to") ||
-			strings.Contains(msg, "no such host") ||
-			strings.Contains(msg, "check your internet connection")
-		// The core budget will not refill inside this pass's backoff, so a
-		// refusal for it fails fast and the verdict becomes "unreadable" --
-		// which is exactly what a watcher should say when it could not look.
-		if attempt < 5 && (transient || rateLimited(msg)) {
-			time.Sleep(time.Duration(20*(attempt+1)) * time.Second)
-			continue
-		}
-		return nil, fmt.Errorf("%s", strings.TrimSpace(msg))
-	}
 }
 
 // isNotFound requires the 404 itself, not the words around it. A rate-limited
@@ -153,7 +118,16 @@ func counted(args ...string) ([]byte, error) {
 	calls.Lock()
 	calls.n++
 	calls.Unlock()
-	return gh(args...)
+	out, err := fleet.GH(args...)
+	if err != nil {
+		// The shared client decides whether to retry; what it cannot do is
+		// remember WHY a pass came back thin. Without this, a budget spent
+		// mid-sweep leaves every remaining runner reported as quiet rather
+		// than as unread -- which is the one answer a watcher must never give
+		// by accident, and the reason rateLimited records as well as decides.
+		rateLimited(err.Error())
+	}
+	return out, err
 }
 
 var (
@@ -543,6 +517,13 @@ func stamp(t time.Time) string {
 	}
 	return t.UTC().Format("2006-01-02 15:04Z")
 }
+
+// The read-only guard is installed on the shared client rather than written
+// into a private gh(), which is where it used to live. It is installed in an
+// init so that it is in force for every path into this binary, including a
+// test that calls a helper directly: a guard that only exists on one route is
+// a guard somebody will go around.
+func init() { fleet.Guard = readOnly }
 
 func main() {
 	flag.Parse()

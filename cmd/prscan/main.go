@@ -10,51 +10,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
-
-func gh(args ...string) ([]byte, error) {
-	for attempt := 0; ; attempt++ {
-		cmd := exec.Command("gh", args...)
-		var errb strings.Builder
-		cmd.Stderr = &errb
-		out, err := cmd.Output()
-		if err == nil {
-			return out, nil
-		}
-		msg := errb.String()
-		if attempt < 5 && retryable(msg) {
-			time.Sleep(backoff(attempt))
-			continue
-		}
-		return nil, fmt.Errorf("%s", strings.TrimSpace(msg))
-	}
-}
-
-// retryable separates the two rate limits, which want opposite treatment.
-//
-// The SECONDARY limit is a burst brake: it lifts in seconds, and waiting is the
-// whole remedy. The PRIMARY one is an hourly budget that resets at a fixed
-// time, and no amount of short backoff reaches it -- the old condition matched
-// on "rate" alone, so a spent budget slept 20+40+60+80+100 seconds and failed
-// anyway. Five minutes per batch, and there are 29 batches.
-func retryable(msg string) bool {
-	if strings.Contains(msg, "API rate limit exceeded") {
-		return false
-	}
-	return strings.Contains(msg, "rate") ||
-		strings.Contains(msg, "abuse") ||
-		strings.Contains(msg, "too quickly")
-}
-
-// backoff is how long to wait before the next attempt. A test sets it to
-// nothing.
-var backoff = func(attempt int) time.Duration {
-	return time.Duration(20*(attempt+1)) * time.Second
-}
 
 type item struct {
 	Title  string `json:"title"`
@@ -80,16 +41,10 @@ func run(stdout, stderr io.Writer, args []string) int {
 		return 2
 	}
 
-	out, err := gh("api", "user/orgs", "--paginate", "--jq", ".[].login")
+	orgs, err := fleet.Orgs()
 	if err != nil {
 		fmt.Fprintln(stderr, "orgs:", err)
 		return 1
-	}
-	var orgs []string
-	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			orgs = append(orgs, l)
-		}
 	}
 	sort.Strings(orgs)
 
@@ -118,7 +73,7 @@ func run(stdout, stderr io.Writer, args []string) int {
 		for _, o := range b {
 			q += " org:" + o
 		}
-		raw, err := gh("api", "-X", "GET", "search/issues", "-f", "q="+q, "-f", "per_page=100", "--paginate")
+		raw, err := fleet.GH("api", "-X", "GET", "search/issues", "-f", "q="+q, "-f", "per_page=100", "--paginate")
 		if err != nil {
 			// Also kept for the summary. A batch that failed covers ~15
 			// organisations, and its absence lowers the total silently: on

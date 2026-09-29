@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"testing"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 func TestRefusalKindSeparatesCausesThatNeedDifferentAnswers(t *testing.T) {
@@ -25,7 +27,7 @@ func TestRefusalKindSeparatesCausesThatNeedDifferentAnswers(t *testing.T) {
 func TestTheTwoRateLimitsWantOppositeTreatment(t *testing.T) {
 	// A sweep of 206 candidates makes thousands of calls. Treating the hourly
 	// budget as a burst brake slept five minutes per call and reached nothing:
-	// the budget resets at a fixed time, not after a backoff.
+	// the budget resets at a fixed time, not after a fleet.Backoff.
 	for _, c := range []struct {
 		msg  string
 		want bool
@@ -36,8 +38,8 @@ func TestTheTwoRateLimitsWantOppositeTreatment(t *testing.T) {
 		{"API rate limit exceeded for user ID 11405852.", false},
 		{"gh: not logged in", false},
 	} {
-		if got := throttled(c.msg); got != c.want {
-			t.Errorf("throttled(%q) = %v, want %v", c.msg, got, c.want)
+		if got := fleet.Throttled(c.msg); got != c.want {
+			t.Errorf("fleet.Throttled(%q) = %v, want %v", c.msg, got, c.want)
 		}
 	}
 }

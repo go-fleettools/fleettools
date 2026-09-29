@@ -27,7 +27,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 // gh runs the CLI, retrying only what waiting can fix.
@@ -36,36 +37,6 @@ import (
 // one is an hourly budget that resets at a fixed time, and no short backoff
 // reaches it — matching "rate" alone made a spent budget sleep five minutes per
 // call and fail anyway. See prscan.
-func gh(args ...string) ([]byte, error) {
-	for attempt := 0; ; attempt++ {
-		cmd := exec.Command("gh", args...)
-		var errb strings.Builder
-		cmd.Stderr = &errb
-		out, err := cmd.Output()
-		if err == nil {
-			return out, nil
-		}
-		msg := errb.String()
-		if attempt < 5 && retryable(msg) {
-			time.Sleep(backoff(attempt))
-			continue
-		}
-		return nil, fmt.Errorf("%s", strings.TrimSpace(msg))
-	}
-}
-
-func retryable(msg string) bool {
-	if strings.Contains(msg, "API rate limit exceeded") {
-		return false
-	}
-	return strings.Contains(msg, "secondary rate") ||
-		strings.Contains(msg, "abuse") ||
-		strings.Contains(msg, "too quickly")
-}
-
-var backoff = func(attempt int) time.Duration {
-	return time.Duration(20*(attempt+1)) * time.Second
-}
 
 type repo struct {
 	FullName string `json:"full_name"`
@@ -127,7 +98,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			b, err := gh("api", "orgs/"+o+"/repos?per_page=100", "--paginate")
+			b, err := fleet.GH("api", "orgs/"+o+"/repos?per_page=100", "--paginate")
 			if err != nil {
 				mu.Lock()
 				unreadOrgs = append(unreadOrgs, o+": "+firstLine(err.Error()))
@@ -247,7 +218,7 @@ func organisations(only string) ([]string, error) {
 		}
 		return out, nil
 	}
-	b, err := gh("api", "user/orgs", "--paginate", "--jq", ".[].login")
+	b, err := fleet.GH("api", "user/orgs", "--paginate", "--jq", ".[].login")
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +349,7 @@ func nums(tag string) [3]int {
 
 // aheadBy is how many commits the default branch has that the tag does not.
 func aheadBy(r repo, tag string) (int, error) {
-	b, err := gh("api", "repos/"+r.FullName+"/compare/"+tag+"..."+r.Default,
+	b, err := fleet.GH("api", "repos/"+r.FullName+"/compare/"+tag+"..."+r.Default,
 		"--jq", ".ahead_by")
 	if err != nil {
 		return 0, err

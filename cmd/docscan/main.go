@@ -8,47 +8,17 @@ import (
 	"io"
 	"maps"
 	"os"
-	"os/exec"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
-	"time"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 // gh runs the CLI, retrying only what waiting can fix. Same brake as the other
 // scanners: the SECONDARY limit lifts in seconds, the PRIMARY one is an hourly
 // budget no short backoff reaches.
-func gh(args ...string) ([]byte, error) {
-	for attempt := 0; ; attempt++ {
-		cmd := exec.Command("gh", args...)
-		var errb strings.Builder
-		cmd.Stderr = &errb
-		out, err := cmd.Output()
-		if err == nil {
-			return out, nil
-		}
-		msg := errb.String()
-		if attempt < 5 && retryable(msg) {
-			time.Sleep(backoff(attempt))
-			continue
-		}
-		return nil, fmt.Errorf("%s", strings.TrimSpace(msg))
-	}
-}
-
-func retryable(msg string) bool {
-	if strings.Contains(msg, "API rate limit exceeded") {
-		return false
-	}
-	return strings.Contains(msg, "secondary rate") ||
-		strings.Contains(msg, "abuse") ||
-		strings.Contains(msg, "too quickly")
-}
-
-var backoff = func(attempt int) time.Duration {
-	return time.Duration(20*(attempt+1)) * time.Second
-}
 
 // file is one path's contents, or "" when it is not there.
 //
@@ -60,7 +30,7 @@ func file(repo, path string) string {
 	if s, ok := treeFile(repo, path); ok {
 		return s
 	}
-	b, err := gh("api", "repos/"+repo+"/contents/"+path, "--jq", ".content")
+	b, err := fleet.GH("api", "repos/"+repo+"/contents/"+path, "--jq", ".content")
 	if err != nil {
 		return ""
 	}
@@ -76,7 +46,7 @@ func dir(repo, path string) []string {
 	if names, ok := treeDir(repo, path); ok {
 		return names
 	}
-	b, err := gh("api", "repos/"+repo+"/contents/"+path, "--jq", ".[].name")
+	b, err := fleet.GH("api", "repos/"+repo+"/contents/"+path, "--jq", ".[].name")
 	if err != nil {
 		return nil
 	}
@@ -246,7 +216,7 @@ func (f finding) drifted() bool {
 func scan(org string) finding {
 	f := finding{org: org, unlisted: map[string][]string{}, stale: map[string][]string{}, quiet: map[string]string{}, archived: map[string]bool{}}
 
-	b, err := gh("repo", "list", org, "--limit", "200", "--json", "name,isArchived,isFork,diskUsage")
+	b, err := fleet.GH("repo", "list", org, "--limit", "200", "--json", "name,isArchived,isFork,diskUsage")
 	if err != nil {
 		f.readError = err.Error()
 		return f
@@ -435,7 +405,7 @@ func organisations(only string) ([]string, error) {
 		}
 		return out, nil
 	}
-	b, err := gh("api", "user/orgs", "--paginate", "--jq", ".[].login")
+	b, err := fleet.GH("api", "user/orgs", "--paginate", "--jq", ".[].login")
 	if err != nil {
 		return nil, err
 	}

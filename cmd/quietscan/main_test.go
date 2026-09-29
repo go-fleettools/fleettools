@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/go-fleettools/fleettools/quiet"
 )
 
@@ -714,11 +715,11 @@ esac`},
 	// One attempt, not six. The stub logs every invocation, so this asserts the
 	// fail-fast without measuring a clock.
 	log := withFakeGH(t, `echo 'gh: API rate limit exceeded (HTTP 403)' >&2; exit 1`)
-	if _, err := gh("api", "repos/x/.github"); err == nil {
+	if _, err := fleet.GH("api", "repos/x/.github"); err == nil {
 		t.Fatal("want an error")
 	}
 	if n := len(callLog(t, *log)); n != 1 {
-		t.Errorf("attempts = %d, want 1: the core budget does not refill inside a backoff", n)
+		t.Errorf("attempts = %d, want 1: the core budget does not refill inside a fleet.Backoff", n)
 	}
 }
 
@@ -821,5 +822,24 @@ func TestPipelineOverFixtures(t *testing.T) {
 	}
 	if v := got["has-own-runner"].Verdict; v != quiet.Healthy {
 		t.Errorf("has-own-runner = %s -- an unread filter elsewhere says nothing about it", v)
+	}
+}
+
+// TestTheGuardIsActuallyWiredUp: the test above checks readOnly in isolation,
+// and would keep passing if nothing called it. It nearly did -- moving fleet.GH()
+// into internal/fleet removed its only call site, leaving the function
+// defined, tested, and inert. This goes through the real path instead.
+func TestTheGuardIsActuallyWiredUp(t *testing.T) {
+	if fleet.Guard == nil {
+		t.Fatal("no guard installed on the shared client: this watcher can write")
+	}
+	for _, args := range [][]string{
+		{"api", "-X", "POST", "repos/a/b/issues"},
+		{"api", "--method", "DELETE", "repos/a/b"},
+		{"pr", "merge", "1"},
+	} {
+		if _, err := fleet.GH(args...); err == nil {
+			t.Errorf("fleet.GH(%v) was not refused", args)
+		}
 	}
 }
