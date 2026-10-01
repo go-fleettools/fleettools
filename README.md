@@ -11,14 +11,47 @@ that cost a wrong answer to learn.
 | `cmd/prmerge` | Merges dependency PRs that are mergeable **and** fully green. |
 | `cmd/tagscan` | Every tagged Go module whose default branch is **ahead of its latest tag** — work that is merged and that `go get` cannot reach. Built after the same mistake twice: `ghmerge` alone on `go-widgets/toolkit` (2026-09-05) and on `go-pdfkit/ops` (2026-09-07), the second time with the rule already written down. It asks about **tags, not releases**: `go get` resolves a tag, and a first draft asking `/releases/latest` reported `ops` as behind fifteen minutes after `v0.12.0` had been pushed and proved to resolve. `git ls-remote` costs no API budget, and a tag that IS the head settles without a call. |
 | `cmd/quietscan` | Every organisation whose Renovate runner has **stopped**. `redscan` asks whether the last run FAILED; a runner that stopped does not fail, it says nothing. This is the other half of that lesson: check WHEN it last ran. |
-| `cmd/judgescan` | Every repository whose tests look for an external tool its CI **never installs** — a foreign judge that exists in the source and has never once run. Written after the same defect surfaced twice in one afternoon: `go-fde/luks` had a cryptsetup interop test gated on root (formatting a file needs none; only attaching a device does), and `go-filesystems/btrfs` had seven oracles whose `btrfs check` half — upstream judging OUR WRITES — was locked behind the same borrowed root gate, in a CI that installed no btrfs-progs. Both looked like a green lane over a file full of assertions, judging nothing. Reads the working tree only: no API budget, so it cannot starve Renovate. Knows that a step says `poppler-utils` and a test says `pdftotext`, and that a checkout `path: btrfs` is not an installation of btrfs-progs — the false negative that would have erased its own founding case. |
+| `cmd/judgescan` | Every repository whose tests look for an external tool its CI **never installs** — a foreign judge that exists in the source and has never once run. Written after the same defect surfaced twice in one afternoon: `go-fde/luks` had a cryptsetup interop test gated on root (formatting a file needs none; only attaching a device does), and `go-filesystems/btrfs` had seven oracles whose `btrfs check` half — upstream judging OUR WRITES — was locked behind the same borrowed root gate, in a CI that installed no btrfs-progs. Both looked like a green lane over a file full of assertions, judging nothing. Reads the working tree only, so it cannot starve Renovate: its ONE call is the staleness check below. Knows that a step says `poppler-utils` and a test says `pdftotext`, and that a checkout `path: btrfs` is not an installation of btrfs-progs — the false negative that would have erased its own founding case. |
 | `.github/workflows/docs-current.yml` | **Reusable.** An organisation's landing repository calls it and the check runs THERE, with no secret — listing a public organisation is a public read. Nine lines in the caller — ⛔ not `on: [push, pull_request]`, which both fire for a branch with a PR open and ran the check twice on the first three organisations that copied the snippet. |
 | `cmd/docscan` | Every repository an organisation **has** but does not **advertise** — and every one it advertises and no longer has. First pass (2026-09-25): 334 organisations, **87 modules named on no surface**. **2026-09-26: `0 organisations with drift`**, with the check adopted in eighteen organisations so it stays there — re-measure with `go run ./cmd/docscan` rather than trusting this line. Five of its six hardenings came from FALSE POSITIVES, which cost more than a miss: an entry carrying `org = "<other-org>"` is not a claim about this one, a nav line may name its module in its title (`- The client (reddit): client.md`), an **archived** repository is not a gone one, a YAML flow mapping on one line is a list the reader could not parse, and a PR check reading the published page judges `main` rather than the branch. Two definitions of drift — the printed count and the exit status — disagreed in both directions until one method served both. |
-| `cmd/testscan` | Every repository whose CI runs `go test` on only PART of what has tests — or on nothing at all. Written after `openweft/weft`: five workflows, `go test` in one of them naming four packages, and 83 packages with tests. Every lane green, about four of them. Switching on a plain `go test ./...` there found two tests that could not pass on Linux at all. One pass: 884 repositories, 519 have tests, 482 run them all. Reads the working tree only, so no API budget. It follows a `task ci` into the Taskfile rather than calling it absent, and reports a computed package set (`go test $PKGS`, `go list | xargs`) as unresolved rather than as zero — the false positive that named three dozen healthy repositories on its first run, including one fixed an hour earlier. |
+| `cmd/testscan` | Every repository whose CI runs `go test` on only PART of what has tests — or on nothing at all. Written after `openweft/weft`: five workflows, `go test` in one of them naming four packages, and 83 packages with tests. Every lane green, about four of them. Switching on a plain `go test ./...` there found two tests that could not pass on Linux at all. One pass: 884 repositories, 519 have tests, 482 run them all. Reads the working tree only, so it cannot starve Renovate: its ONE call is the staleness check below. It follows a `task ci` into the Taskfile rather than calling it absent, and reports a computed package set (`go test $PKGS`, `go list | xargs`) as unresolved rather than as zero — the false positive that named three dozen healthy repositories on its first run, including one fixed an hour earlier. |
 | `scripts/tidyall.sh` | Runs `go mod tidy` on a PR branch and pushes only if it changed something AND the tree still builds. |
 | `scripts/wfmerge.sh` | **Refuses by default.** It lands workflow-touching PRs by pushing to the default branch, which `git-pre-push-guard` exists to stop. The fix is `gh auth refresh -s workflow`, once. |
 
 ## What is built into them, and why
+
+### Every one of them says when it is not the code in this repository
+
+`fleet.WarnIfStale` runs first in every `main`, costs one `compare` call, and
+writes at most one line to stderr.
+
+It is here because of a measured failure. A guard landed on 2026-09-27 that
+sets aside a red belonging to a workflow every push skips. Nothing rebuilt the
+installed binaries, so for four days `redscan` reported the same three
+repositories as RED default branches — `go-fsctl/go-fsctl.github.io`,
+`go-ruby-hanami/go-ruby-hanami.github.io`, `nano-container-linux/dnsctl` — and
+the fix for exactly that was sitting on `main`, 32 commits ahead. Rebuilt:
+**1998 of 1998, 0 red.** Nothing was broken, every number was wrong, and no
+output said so.
+
+It reads the **VCS stamps**, not the module pseudo-version, because only the
+stamps carry whether the tree was clean, and a reading from a modified tree is
+not one anybody can reproduce.
+
+⛔ It is silent in exactly one case: built from the head of the default branch,
+from a clean tree. It says something in every other case **including "I could
+not tell"** — a check that falls silent when it cannot answer teaches you to
+trust a silence it never earned.
+
+The test that keeps it honest enumerates `cmd/` **on disk** rather than naming
+the commands: a list written in a test has to be remembered, a directory
+listing cannot be forgotten, so a ninth command fails the suite until it is
+wired up. Both sabotage directions are checked.
+
+To rebuild them all:
+
+    GOWORK=off GOBIN=~/.local/bin go install ./cmd/...
+
 
 **`prmerge` never merges a Go toolchain bump.** The org presets set
 `automerge: false` on it, and a sweep that merges whatever is green does not

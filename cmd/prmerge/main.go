@@ -242,6 +242,7 @@ func main() {
 		fmt.Println("    prmerge go-crdt openweft")
 		return
 	}
+	fleet.WarnIfStale(os.Stderr)
 	orgs, err := orgsToSweep(os.Args[1:], func() ([]byte, error) {
 		return fleet.GH("api", "user/orgs", "--paginate", "--jq", ".[].login")
 	})

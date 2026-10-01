@@ -31,7 +31,10 @@ type repo struct {
 
 type red struct{ repo, wf, when string }
 
-func main() { os.Exit(run(os.Stdout, os.Stderr)) }
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	os.Exit(run(os.Stdout, os.Stderr))
+}
 
 // run is the whole program, so that a test can drive it and read what it says.
 // It returns the exit status: non-zero when the sweep could not read the whole

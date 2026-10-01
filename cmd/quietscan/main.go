@@ -526,6 +526,7 @@ func stamp(t time.Time) string {
 func init() { fleet.Guard = readOnly }
 
 func main() {
+	fleet.WarnIfStale(os.Stderr)
 	flag.Parse()
 	started := time.Now().UTC()
 	now := started

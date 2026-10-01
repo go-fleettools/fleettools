@@ -24,7 +24,10 @@ type item struct {
 	Number int    `json:"number"`
 }
 
-func main() { os.Exit(run(os.Stdout, os.Stderr, os.Args[1:])) }
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	os.Exit(run(os.Stdout, os.Stderr, os.Args[1:]))
+}
 
 // betweenBatches is the pause the search API wants between queries. A test
 // drives many batches and must not wait for any of them.

@@ -49,6 +49,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 // lookPathRE finds the tool name in `exec.LookPath("name")`.
@@ -173,6 +175,7 @@ type finding struct {
 }
 
 func main() {
+	fleet.WarnIfStale(os.Stderr)
 	root := flag.String("root", defaultRoot(), "directory holding org/repo checkouts")
 	doFetch := flag.Bool("fetch", true, "git fetch each repository about to be reported, so its distance is measured and not remembered")
 	only := flag.String("repo", "", "scan a single org/repo, verbosely")

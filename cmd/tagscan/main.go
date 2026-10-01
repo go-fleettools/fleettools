@@ -67,7 +67,10 @@ type ahead struct {
 // that failed.
 const noCommonAncestor = "No common ancestor"
 
-func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
 
 // run is the whole program, so a test can drive it and read what it says.
 func run(args []string, stdout, stderr io.Writer) int {
