@@ -80,7 +80,10 @@ type finding struct {
 	readError string
 }
 
-func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
 
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("docscan", flag.ContinueOnError)

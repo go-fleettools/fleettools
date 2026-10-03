@@ -53,6 +53,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 // goTestRE finds a `go test` invocation and captures the rest of its line.
@@ -129,6 +131,7 @@ type finding struct {
 func (f finding) covered() bool { return f.catchAll || f.testedPkgs >= f.withTests }
 
 func main() {
+	fleet.WarnIfStale(os.Stderr)
 	root := flag.String("root", defaultRoot(), "directory holding org/repo checkouts")
 	doFetch := flag.Bool("fetch", true, "git fetch each repository about to be reported, so its distance is measured and not remembered")
 	only := flag.String("repo", "", "scan a single org/repo, verbosely")
