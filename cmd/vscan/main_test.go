@@ -168,3 +168,66 @@ func TestAFrozenBaseIsNeverSafe(t *testing.T) {
 		t.Error("the control: the same verdict unfrozen IS safe, so frozen is what decided it")
 	}
 }
+
+// TestAMinorWithNoChangesSectionIsNotAnAddition is the correction that cost the
+// most to find.
+//
+// ⛔ gorelease suggests a minor for THREE reasons, and only two of them are the
+// API: its requirementsChanged() also fires when a dependency moves up a minor,
+// when one is added, or when the go directive rises. go-simd/floats suggests
+// v0.2.0 printing NO changes section, and its only cause is
+// golang.org/x/sys v0.46.0 -> v0.48.0. Labelling that "additions only" was a
+// story this tool invented to fill a column.
+func TestAMinorWithNoChangesSectionIsNotAnAddition(t *testing.T) {
+	// Exactly what gorelease printed for go-simd/floats.
+	r := parseGorelease("# summary\nSuggested version: v0.2.0\n", "linux")
+	if r.err != "" {
+		t.Fatalf("unexpected error %q", r.err)
+	}
+	if r.breaks != 0 || r.grew != 0 {
+		t.Fatalf("no section was printed, so neither counter may move: breaks=%d grew=%d", r.breaks, r.grew)
+	}
+}
+
+func TestCompatibleAndIncompatibleAreCountedApart(t *testing.T) {
+	for _, c := range []struct {
+		name                string
+		out                 string
+		wantGrew, wantBreak int
+	}{
+		{"additions", "## compatible changes\nF: added\nSuggested version: v0.2.0\n", 1, 0},
+		{"a removal", "## incompatible changes\nF: removed\nSuggested version: v0.2.0\n", 0, 1},
+		{"both at once", "## incompatible changes\nF: removed\n## compatible changes\nG: added\nSuggested version: v0.2.0\n", 1, 1},
+		{"neither", "Suggested version: v0.1.1\n", 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := parseGorelease(c.out, "linux")
+			if r.grew != c.wantGrew || r.breaks != c.wantBreak {
+				t.Errorf("grew=%d breaks=%d, want grew=%d breaks=%d", r.grew, r.breaks, c.wantGrew, c.wantBreak)
+			}
+		})
+	}
+}
+
+// TestGrewIsFoldedPerPlatform: a module whose API grew on one platform only is
+// still a module whose API grew.
+func TestGrewIsFoldedPerPlatform(t *testing.T) {
+	saved := askGorelease
+	defer func() { askGorelease = saved }()
+	askGorelease = func(_, _, goos string) reading {
+		if goos == "linux" {
+			return reading{goos: goos, suggested: "v0.2.0", grew: 1}
+		}
+		return reading{goos: goos, suggested: "v0.1.1"}
+	}
+	v := read("o/r", "/nowhere", "v0.1.0", []string{"linux", "darwin"})
+	if v.grew != 1 {
+		t.Errorf("grew = %d, want 1", v.grew)
+	}
+	if !v.disagree {
+		t.Error("the platforms disagreed and that must be recorded")
+	}
+	if v.safe() {
+		t.Error("must not be safe")
+	}
+}
