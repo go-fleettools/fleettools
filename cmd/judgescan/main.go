@@ -414,54 +414,6 @@ func main() {
 	}
 }
 
-// defaultRoot is the GitHub checkout root on this machine.
-func defaultRoot() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "."
-	}
-	return filepath.Join(home, "Documents", "VCS", "GIT", "github.com")
-}
-
-// findRepos lists org/repo directories that are git checkouts.
-func findRepos(root, only string) ([]string, error) {
-	if only != "" {
-		if _, err := os.Stat(filepath.Join(root, only)); err != nil {
-			return nil, fmt.Errorf("%s: %w", only, err)
-		}
-		return []string{only}, nil
-	}
-	orgs, err := os.ReadDir(root)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, o := range orgs {
-		if !o.IsDir() {
-			continue
-		}
-		names, err := os.ReadDir(filepath.Join(root, o.Name()))
-		if err != nil {
-			continue
-		}
-		for _, n := range names {
-			if !n.IsDir() {
-				continue
-			}
-			rel := filepath.Join(o.Name(), n.Name())
-			// A worktree's .git is a FILE holding `gitdir: ...`, not a
-			// directory. It is the same repository checked out again, so
-			// counting it inflates the total and prints every finding once per
-			// worktree -- openweft/weft-loom-server appeared three times.
-			st, err := os.Stat(filepath.Join(root, rel, ".git"))
-			if err == nil && st.IsDir() {
-				out = append(out, rel)
-			}
-		}
-	}
-	return out, nil
-}
-
 // scan returns the finding for one repository, and whether its tests name any
 // external tool at all.
 func scan(root, repo string) (finding, bool) {
@@ -711,3 +663,10 @@ func mentioned(lowerInstall, tool string) bool {
 	}
 	return false
 }
+
+// defaultRoot and findRepos now delegate: both lived here AND in the other
+// working-tree sweep, and had begun to drift. The tests below keep pointing at
+// these names, so they exercise the shared implementation.
+func defaultRoot() string { return checkout.DefaultRoot() }
+
+func findRepos(root, only string) ([]string, error) { return checkout.Repos(root, only) }

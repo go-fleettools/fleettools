@@ -277,52 +277,6 @@ func boolCount(listed bool, n int) int {
 	return 0
 }
 
-// defaultRoot is the GitHub checkout root on this machine.
-func defaultRoot() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "."
-	}
-	return filepath.Join(home, "Documents", "VCS", "GIT", "github.com")
-}
-
-// findRepos lists org/repo directories that are git checkouts.
-//
-// A worktree's .git is a FILE holding `gitdir: ...`, not a directory. Counting
-// it makes one repository look like several.
-func findRepos(root, only string) ([]string, error) {
-	if only != "" {
-		if _, err := os.Stat(filepath.Join(root, only)); err != nil {
-			return nil, fmt.Errorf("%s: %w", only, err)
-		}
-		return []string{only}, nil
-	}
-	orgs, err := os.ReadDir(root)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, o := range orgs {
-		if !o.IsDir() {
-			continue
-		}
-		names, err := os.ReadDir(filepath.Join(root, o.Name()))
-		if err != nil {
-			continue
-		}
-		for _, n := range names {
-			if !n.IsDir() {
-				continue
-			}
-			rel := filepath.Join(o.Name(), n.Name())
-			if st, err := os.Stat(filepath.Join(root, rel, ".git")); err == nil && st.IsDir() {
-				out = append(out, rel)
-			}
-		}
-	}
-	return out, nil
-}
-
 // scan returns one repository's finding, and whether it has any tests at all.
 // isFinding is the ONE definition of "this repository is a problem".
 //
@@ -669,3 +623,10 @@ func render(f finding) string {
 			strings.Join(f.named, " "))
 	}
 }
+
+// defaultRoot and findRepos now delegate: both lived here AND in the other
+// working-tree sweep, and had begun to drift. The tests below keep pointing at
+// these names, so they exercise the shared implementation.
+func defaultRoot() string { return checkout.DefaultRoot() }
+
+func findRepos(root, only string) ([]string, error) { return checkout.Repos(root, only) }
