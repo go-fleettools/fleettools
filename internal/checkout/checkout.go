@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -358,4 +359,58 @@ func Ours(repos []string, owners map[string]bool, haveOwners bool, ask func(stri
 func OwnerOf(repo string) string {
 	o, _, _ := strings.Cut(repo, "/")
 	return o
+}
+
+// DefaultRoot is where this machine keeps its org/repo checkouts.
+func DefaultRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	return filepath.Join(home, "Documents", "VCS", "GIT", "github.com")
+}
+
+// Repos lists the org/repo directories under root that are git checkouts.
+//
+// ⛔ A worktree's .git is a FILE holding `gitdir: ...`, not a directory. It is
+// the same repository checked out again, so counting it inflates the total and
+// prints every finding once per worktree -- openweft/weft-loom-server appeared
+// three times.
+//
+// This lived in testscan and in judgescan, which is how this package came to
+// exist: two answers to one question is one answer being wrong. The copies had
+// already begun to drift when they were merged here.
+func Repos(root, only string) ([]string, error) {
+	if only != "" {
+		if _, err := os.Stat(filepath.Join(root, only)); err != nil {
+			return nil, fmt.Errorf("%s: %w", only, err)
+		}
+		return []string{only}, nil
+	}
+	orgs, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, o := range orgs {
+		if !o.IsDir() {
+			continue
+		}
+		repos, err := os.ReadDir(filepath.Join(root, o.Name()))
+		if err != nil {
+			continue
+		}
+		for _, r := range repos {
+			if !r.IsDir() {
+				continue
+			}
+			rel := filepath.Join(o.Name(), r.Name())
+			st, err := os.Stat(filepath.Join(root, rel, ".git"))
+			if err == nil && st.IsDir() {
+				out = append(out, rel)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
