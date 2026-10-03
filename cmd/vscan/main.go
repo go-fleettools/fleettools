@@ -20,6 +20,19 @@
 // is the HIGHEST suggestion across the platforms asked, and a module where any
 // platform could not be read is reported as unread, never as agreed.
 //
+// ⛔ A MINOR SUGGESTION IS NOT PROOF THE API GREW. gorelease bumps the minor
+// for THREE reasons, and its source is the only place that says so:
+//
+//	} else if r.haveCompatibleChanges || (r.haveIncompatibleChanges && major == "0") || r.requirementsChanged() {
+//
+// and requirementsChanged() is true when a requirement moved up a MINOR, when
+// one was added, or when the go directive rose. go-simd/floats suggests v0.2.0
+// with no changes section printed at all: its only cause is
+// golang.org/x/sys v0.46.0 -> v0.48.0. A first version of this labelled that
+// "additions only", which the tool never said -- a story invented to fill a
+// column. The three causes are now reported apart, and the absence of both
+// sections is reported as what it is: the exported API did not change.
+//
 // ⛔ A FROZEN TAG IS NOT AN ABSENT ONE. Eight modules carry a tag that
 // `git tag --merged` cannot see, because a history rewrite left it on an
 // orphaned line -- GitHub answers "No common ancestor". A first version filed
@@ -65,7 +78,8 @@ var defaultPlatforms = []string{"linux", "darwin", "windows"}
 type reading struct {
 	goos      string
 	suggested string
-	breaks    int
+	breaks    int // "## incompatible changes" sections
+	grew      int // "## compatible changes" sections
 	err       string
 }
 
@@ -75,6 +89,7 @@ type verdict struct {
 	next     string // the highest suggestion across platforms
 	breaks   int    // platforms reporting incompatible changes
 	disagree bool   // platforms suggested different versions
+	grew     int    // platforms reporting compatible (additive) changes
 	frozen   bool   // the base tag is unreachable from the branch: a rewritten history
 	unread   []string
 }
@@ -261,17 +276,24 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 		}
 	}
 	if len(look) > 0 {
-		fmt.Fprintf(stdout, "\nThe API moved. In v0.x the number cannot say whether something BROKE, so these want a person:\n")
+		fmt.Fprintf(stdout, "\nA patch is not enough for these. In v0.x the number alone cannot say whether\nsomething BROKE, and a minor does not even mean the API moved, so the reason is\nnamed next to each one:\n")
 		for _, v := range look {
 			why := []string{}
 			if v.breaks > 0 {
 				why = append(why, fmt.Sprintf("INCOMPATIBLE on %d platform(s)", v.breaks))
 			}
+			if v.grew > 0 {
+				why = append(why, fmt.Sprintf("API additions on %d platform(s)", v.grew))
+			}
 			if v.disagree {
 				why = append(why, "platforms disagreed")
 			}
+			// ⛔ Never invent a reason. When gorelease printed no changes
+			// section, the exported API did not move and the bump comes from
+			// its requirementsChanged() rule: a dependency up a minor, a new
+			// requirement, or a raised go directive.
 			if len(why) == 0 {
-				why = append(why, "additions only")
+				why = append(why, "no API change reported -- requirements moved (dependency minor, or the go directive)")
 			}
 			fmt.Fprintf(stdout, "  %-46s %s -> %s   %s\n", v.repo, v.base, v.next, strings.Join(why, "; "))
 		}
@@ -315,6 +337,9 @@ func read(repo, dir, base string, platforms []string) verdict {
 		if r.breaks > 0 {
 			v.breaks++
 		}
+		if r.grew > 0 {
+			v.grew++
+		}
 		seen[r.suggested] = true
 		if v.next == "" {
 			v.next = r.suggested
@@ -350,6 +375,8 @@ func parseGorelease(out, goos string) reading {
 			r.suggested = strings.TrimSpace(strings.TrimPrefix(line, "Suggested version: "))
 		case strings.HasPrefix(line, "## incompatible changes"):
 			r.breaks++
+		case strings.HasPrefix(line, "## compatible changes"):
+			r.grew++
 		case strings.HasPrefix(line, "gorelease: "):
 			r.err = strings.TrimSpace(strings.TrimPrefix(line, "gorelease: "))
 		}
