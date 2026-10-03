@@ -20,6 +20,15 @@
 // is the HIGHEST suggestion across the platforms asked, and a module where any
 // platform could not be read is reported as unread, never as agreed.
 //
+// ⛔ A FROZEN TAG IS NOT AN ABSENT ONE. Eight modules carry a tag that
+// `git tag --merged` cannot see, because a history rewrite left it on an
+// orphaned line -- GitHub answers "No common ancestor". A first version filed
+// them under "never tagged", which is false and dangerous in the one direction
+// that matters: go-filesystems/xfs v0.1.0 is published and required by SIX
+// repositories, and "never tagged" invites cutting it again. They get their own
+// section. gorelease still answers for them, because it fetches the base from
+// the module proxy and never consults git ancestry.
+//
 // ⛔ IT READS THE DEFAULT BRANCH, NEVER THE CHECKOUT. A first version ran
 // gorelease where the clone happened to be, and go-simd/floats -- six commits
 // behind -- came back v0.1.4 against v0.2.0 from its own branch head. A version
@@ -66,6 +75,7 @@ type verdict struct {
 	next     string // the highest suggestion across platforms
 	breaks   int    // platforms reporting incompatible changes
 	disagree bool   // platforms suggested different versions
+	frozen   bool   // the base tag is unreachable from the branch: a rewritten history
 	unread   []string
 }
 
@@ -73,7 +83,9 @@ type verdict struct {
 // every platform read, every platform agreed, nothing broke, and the bump is a
 // patch -- which in semver means the exported API did not change at all.
 func (v verdict) safe() bool {
-	return len(v.unread) == 0 && !v.disagree && v.breaks == 0 && isPatchOf(v.base, v.next)
+	// ⛔ A frozen base is never safe however small the number looks: the tag
+	// names a tree from before a rewrite, so a person has to see it.
+	return len(v.unread) == 0 && !v.disagree && !v.frozen && v.breaks == 0 && isPatchOf(v.base, v.next)
 }
 
 // isPatchOf reports whether next differs from base only in its patch field.
@@ -191,14 +203,14 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 				mu.Unlock()
 				return
 			}
-			base, ok := latestTag(dir, ref)
+			base, frozen, ok := latestTag(dir, ref)
 			if !ok {
 				mu.Lock()
 				noTag++
 				mu.Unlock()
 				return
 			}
-			if sameCommit(dir, base, ref) {
+			if !frozen && sameCommit(dir, base, ref) {
 				mu.Lock()
 				atTag++
 				mu.Unlock()
@@ -208,11 +220,12 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 			defer cleanup()
 			if !ok {
 				mu.Lock()
-				verdicts = append(verdicts, verdict{repo: repo, base: base, unread: []string{"could not materialise " + ref}})
+				verdicts = append(verdicts, verdict{repo: repo, base: base, frozen: frozen, unread: []string{"could not materialise " + ref}})
 				mu.Unlock()
 				return
 			}
 			v := read(repo, tree, base, platforms)
+			v.frozen = frozen
 			mu.Lock()
 			verdicts = append(verdicts, v)
 			mu.Unlock()
@@ -222,11 +235,13 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 
 	sort.Slice(verdicts, func(i, j int) bool { return verdicts[i].repo < verdicts[j].repo })
 
-	var safe, look, unread []verdict
+	var safe, look, frozen, unread []verdict
 	for _, v := range verdicts {
 		switch {
 		case len(v.unread) > 0:
 			unread = append(unread, v)
+		case v.frozen:
+			frozen = append(frozen, v)
 		case v.safe():
 			safe = append(safe, v)
 		default:
@@ -236,8 +251,8 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 
 	fmt.Fprintf(stdout, "checkouts: %d   not a Go module: %d   never tagged: %d   already at its tag: %d\n",
 		len(repos), notGo, noTag, atTag)
-	fmt.Fprintf(stdout, "ahead of their tag: %d   derived safely: %d   want a look: %d   UNREAD: %d\n",
-		len(verdicts), len(safe), len(look), len(unread))
+	fmt.Fprintf(stdout, "ahead of their tag: %d   derived safely: %d   want a look: %d   FROZEN base: %d   UNREAD: %d\n",
+		len(verdicts), len(safe), len(look), len(frozen), len(unread))
 
 	if len(safe) > 0 {
 		fmt.Fprintf(stdout, "\nPATCH, every platform agreed, nothing broke -- the exported API did not change:\n")
@@ -259,6 +274,15 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 				why = append(why, "additions only")
 			}
 			fmt.Fprintf(stdout, "  %-46s %s -> %s   %s\n", v.repo, v.base, v.next, strings.Join(why, "; "))
+		}
+	}
+
+	if len(frozen) > 0 {
+		fmt.Fprintf(stdout, "\nFROZEN base: the latest tag sits on a history the branch no longer shares, so\n")
+		fmt.Fprintf(stdout, "`go get -u` can never move off it. The suggestion still holds -- gorelease reads\n")
+		fmt.Fprintf(stdout, "the base from the module proxy, not from git -- but a person should see these:\n")
+		for _, v := range frozen {
+			fmt.Fprintf(stdout, "  %-46s %s -> %s\n", v.repo, v.base, v.next)
 		}
 	}
 
@@ -344,8 +368,20 @@ func parseGorelease(out, goos string) reading {
 // ⛔ From REF, not from HEAD. A tag merged into the branch but not into the
 // checkout's HEAD would otherwise be invisible, and the base would be an older
 // release than the one consumers actually resolve.
-func latestTag(dir, ref string) (string, bool) {
-	out, ok := git(dir, "tag", "--list", "v*", "--merged", ref)
+func latestTag(dir, ref string) (tag string, frozen bool, ok bool) {
+	if t, found := highestTag(dir, "--merged", ref); found {
+		return t, false, true
+	}
+	// Nothing reachable. A tag that exists anyway sits on a history the branch
+	// no longer shares, which is a different answer from "never tagged".
+	if t, found := highestTag(dir); found {
+		return t, true, true
+	}
+	return "", false, false
+}
+
+func highestTag(dir string, extra ...string) (string, bool) {
+	out, ok := git(dir, append([]string{"tag", "--list", "v*"}, extra...)...)
 	if !ok {
 		return "", false
 	}

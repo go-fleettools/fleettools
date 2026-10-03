@@ -153,3 +153,18 @@ func TestGoreleaseOutputIsReadLineByLineNotSearched(t *testing.T) {
 		t.Errorf("prose was read as a verdict: %q", r.suggested)
 	}
 }
+
+// TestAFrozenBaseIsNeverSafe pins the one-way risk. A module whose tag sits on
+// a rewritten history was first filed under "never tagged", and
+// go-filesystems/xfs v0.1.0 is published and required by six repositories --
+// "never tagged" is an invitation to cut it a second time.
+func TestAFrozenBaseIsNeverSafe(t *testing.T) {
+	v := verdict{base: "v0.1.0", next: "v0.1.1", frozen: true}
+	if v.safe() {
+		t.Error("a frozen base must never be called safe, however small the bump")
+	}
+	v.frozen = false
+	if !v.safe() {
+		t.Error("the control: the same verdict unfrozen IS safe, so frozen is what decided it")
+	}
+}
