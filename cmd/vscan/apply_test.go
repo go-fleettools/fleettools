@@ -308,3 +308,20 @@ func TestAnArchivedRepositoryIsSkippedNotFatal(t *testing.T) {
 		t.Error("a 404 write failure that is not an archive must stop the run")
 	}
 }
+
+// TestAPrereleaseBaseIsNeverPromoted. openweft/weft-ha-irods is at v0.4.0-rc9
+// and gorelease suggests v0.4.0 -- arithmetically a tiny step, in fact the
+// decision to call a release candidate finished. Nothing in an API diff knows.
+func TestAPrereleaseBaseIsNeverPromoted(t *testing.T) {
+	all := applyPlan{safe: true, noAPI: true, additions: true, frozen: true}
+	rc := verdict{repo: "openweft/weft-ha-irods", base: "v0.4.0-rc9", next: "v0.4.0"}
+	if all.wants(rc) {
+		t.Error("promoting a release candidate is an editorial decision, not a derivation")
+	}
+	// The control: the same shape from a plain version IS wanted, so the
+	// prerelease is what decided it.
+	rc.base, rc.next = "v0.3.9", "v0.4.0"
+	if !all.wants(rc) {
+		t.Error("the control failed")
+	}
+}

@@ -80,6 +80,12 @@ func (p applyPlan) wants(v verdict) bool {
 	switch {
 	case len(v.unread) > 0 || v.disagree || v.breaks > 0:
 		return false
+	// ⛔ A PRERELEASE BASE IS NEVER PROMOTED HERE. openweft/weft-ha-irods sits
+	// at v0.4.0-rc9 and gorelease suggests v0.4.0: arithmetically a tiny step,
+	// in fact the decision to call a release candidate finished. Nothing in an
+	// API diff knows whether it is. Four openweft modules carry -rc tags.
+	case splitSemver(v.base) == nil:
+		return false
 	case v.frozen:
 		return p.frozen
 	case v.safe():
