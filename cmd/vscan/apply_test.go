@@ -219,12 +219,15 @@ func TestADryRunStopsForNothing(t *testing.T) {
 func TestADeletedRepositoryIsSkippedNotFatal(t *testing.T) {
 	created := map[string]string{}
 	stubGitHub(t, headA, nil, created)
+	re := repoExists
+	t.Cleanup(func() { repoExists = re })
 	remoteHead = func(string, string) (string, error) { return "", errString("gh: Not Found (HTTP 404)") }
+	repoExists = func(string) (string, error) { return "", errString("gh: Not Found (HTTP 404)") }
 	o := applyOne(verdict{repo: "go-compressions/matchlen", next: "v0.1.2", sha: headA, branch: "main"}, false)
 	if o.fatal {
 		t.Error("a repository that is gone must not end the run")
 	}
-	if o.ok || !strings.Contains(o.note, "stale local clone") {
+	if o.ok || !strings.Contains(o.note, "no longer exists") {
 		t.Errorf("note = %q", o.note)
 	}
 
@@ -251,3 +254,29 @@ func TestAVerdictWithNoRecordedCommitIsRefused(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// TestA404OnTheBranchIsNotA404OnTheRepository is go-richdoc/markdown.
+//
+// ⛔ It exists. Its head read 404s because the local checkout's origin/HEAD
+// still names a branch deleted months ago -- so the version had been derived
+// from the WRONG branch, and a message blaming "a stale local clone" would
+// have hidden the one fact worth knowing.
+func TestA404OnTheBranchIsNotA404OnTheRepository(t *testing.T) {
+	created := map[string]string{}
+	stubGitHub(t, headA, nil, created)
+	re := repoExists
+	t.Cleanup(func() { repoExists = re })
+	remoteHead = func(string, string) (string, error) { return "", errString("gh: Not Found (HTTP 404)") }
+	repoExists = func(string) (string, error) { return "main", nil } // the repository is there
+
+	o := applyOne(verdict{repo: "go-richdoc/markdown", next: "v0.7.1", sha: headA, branch: "markdown-converter"}, false)
+	if o.ok || o.fatal {
+		t.Fatalf("o = %+v", o)
+	}
+	if !strings.Contains(o.note, "WRONG branch") {
+		t.Errorf("the message must name what is actually wrong, got %q", o.note)
+	}
+	if strings.Contains(o.note, "no longer exists") {
+		t.Errorf("it must NOT claim the repository is gone: %q", o.note)
+	}
+}

@@ -143,7 +143,12 @@ func applyOne(v verdict, dryRun bool) tagOutcome {
 		// there -- deleted, renamed or out of this token's reach. It says
 		// nothing about the next repository, so it must not end the run.
 		if isGone(err) {
-			o.note = "SKIPPED: " + v.repo + " is not reachable (404) -- a stale local clone?"
+			// ⛔ Do not guess WHICH thing is missing. The first version of this
+			// line said "a stale local clone?" for every 404, and
+			// go-richdoc/markdown -- which exists -- got that message because
+			// the BRANCH was gone, not the repository. Ask, and say what the
+			// answer was.
+			o.note = "SKIPPED: " + describeGone(v.repo, v.branch)
 			return o
 		}
 		o.fatal = true
@@ -193,6 +198,23 @@ func applyOne(v verdict, dryRun bool) tagOutcome {
 func isGone(err error) bool {
 	m := err.Error()
 	return strings.Contains(m, "Not Found") || strings.Contains(m, "HTTP 404")
+}
+
+// describeGone asks which of the two things a 404 was about. One extra call,
+// on a path that is already not going to write anything.
+func describeGone(repo, branch string) string {
+	if _, err := repoExists(repo); err != nil {
+		if isGone(err) {
+			return repo + " no longer exists (404) -- a stale local clone"
+		}
+		return repo + ": branch " + branch + " reads 404, and the repository could not be asked about either (" + err.Error() + ")"
+	}
+	return repo + " exists, but its branch " + branch + " does not (404) -- this checkout's origin/HEAD is stale, so the version was derived from the WRONG branch"
+}
+
+var repoExists = func(repo string) (string, error) {
+	b, err := fleet.GH("api", "repos/"+repo, "--jq", ".default_branch")
+	return strings.TrimSpace(string(b)), err
 }
 
 func short(sha string) string {
