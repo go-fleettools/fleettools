@@ -31,7 +31,23 @@ func prBody(f finding, want string) string {
 		"Same file, same run, one variable.\n\n")
 	b.WriteString("So pinning is not rigidity — it is the condition for the review rule to apply at all.\n\n")
 
-	if f.GoMod != "" {
+	held, isHeld := heldBackBy(f.Literals, mustParse(want))
+	switch {
+	case f.GoMod != "" && isHeld:
+		fmt.Fprintf(&b, "## `go.mod` is deliberately NOT raised\n\nIt stays at `go %s`, because a job "+
+			"here names `%s` on purpose and raising the directive past that would break the pin rather "+
+			"than merely look inconsistent with it. With `GOTOOLCHAIN` unset — the default, and what "+
+			"`setup-go` leaves in place — `go` satisfies a directive it is too old for by "+
+			"**downloading** a newer toolchain. Measured on go1.26.4 against a module asking for "+
+			"1.27.1:\n\n"+
+			"```\nGOTOOLCHAIN=go1.26.4+auto  ->  runs go1.27.1\n"+
+			"GOTOOLCHAIN=go1.26.4       ->  go.mod requires go >= 1.27.1, refused\n```\n\n"+
+			"So the lane would keep printing `%s` in its setup step while running the version it was "+
+			"pinned away from, and whatever that pin was protecting would come back with nothing to "+
+			"show it.\n\nThe aliases in this repository still become `go %s`; it is only the "+
+			"directive that stays where it is, and a later commit can raise it once the pin goes.\n\n",
+			f.GoMod, held, held, want)
+	case f.GoMod != "":
 		fmt.Fprintf(&b, "## `go.mod`\n\nRaised from `go %s` to `go %s`, so the module says the version "+
 			"CI has in fact been using. Note that an importer on an older Go with `GOTOOLCHAIN=local` "+
 			"can no longer build it — that is a compatibility change, and worth a minor version if this "+
