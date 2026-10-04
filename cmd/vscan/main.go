@@ -223,7 +223,12 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 			// Fetch first: the distance is the signal, and a clone is only ever
 			// as current as its last fetch.
 			if doFetch {
-				_, _ = git(dir, "fetch", "--quiet", "--tags", "origin")
+				_, _ = git(dir, "fetch", "--quiet", "--prune", "--tags", "origin")
+				// ⛔ `git fetch` does NOT move origin/HEAD. go-richdoc/markdown's
+				// pointed at a branch deleted months ago, so the whole reading
+				// -- gorelease, the suggestion, the frozen verdict -- was taken
+				// from the wrong branch. Only this moves it.
+				_, _ = git(dir, "remote", "set-head", "origin", "--auto")
 			}
 			ref, ok := checkout.DefaultRef(dir)
 			if !ok {
