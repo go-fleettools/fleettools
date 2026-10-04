@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseGoVersionRefusesTheValuesThisToolReplaces(t *testing.T) {
 	// Accepting one of these as -version would let gopin write back exactly
@@ -63,5 +66,31 @@ func TestOlderGoModIsSilentOnWhatItCannotRead(t *testing.T) {
 	}
 	if olderGoMod("1.28.0", target) {
 		t.Error("olderGoMod(1.28.0) = true; want false — ahead is not behind")
+	}
+}
+
+// A rewrite must not change anything the diff did not ask for. The first
+// pilot repository came out with `\ No newline at end of file` on go.mod,
+// because `\s*$` ate it.
+func TestGoDirectiveRewriteKeepsTheFileByteForByteOtherwise(t *testing.T) {
+	for _, in := range []string{
+		"module x\n\ngo 1.26.4\n",
+		"module x\n\ngo 1.26.4\n\nrequire (\n\tx v1.0.0\n)\n",
+		"module x\n\ngo 1.26.4",    // genuinely no trailing newline: keep it that way
+		"module x\n\ngo 1.26.4 \n", // trailing space before the newline
+	} {
+		got := reGoDirective.ReplaceAllString(in, "go 1.27.1")
+		if !strings.Contains(got, "go 1.27.1") {
+			t.Errorf("not rewritten: %q", in)
+			continue
+		}
+		wantTrailing := strings.HasSuffix(in, "\n")
+		if strings.HasSuffix(got, "\n") != wantTrailing {
+			t.Errorf("trailing newline changed for %q -> %q", in, got)
+		}
+		// Everything before and after the directive line must be untouched.
+		if strings.Count(got, "\n") != strings.Count(in, "\n") {
+			t.Errorf("line count changed: %q -> %q", in, got)
+		}
 	}
 }

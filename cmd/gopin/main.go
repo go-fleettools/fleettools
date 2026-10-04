@@ -73,7 +73,18 @@ var reStable = regexp.MustCompile(`(?m)(go-version:\s*)stable([^\w.-]|$)`)
 var reLiteral = regexp.MustCompile(`go-version:\s*['"]?(\d+\.\d+(?:\.\d+)?)['"]?`)
 
 // reGoDirective is go.mod's own version line.
-var reGoDirective = regexp.MustCompile(`(?m)^go\s+(\d+\.\d+(?:\.\d+)?)\s*$`)
+//
+// `[ \t]` and not `\s`, and a test says why. `\s` matches a newline, so
+// `\s*$` under `(?m)` ate the file's final newline and the replacement put
+// none back:
+//
+//	-go 1.26.4
+//	+go 1.27.1
+//	\ No newline at end of file
+//
+// Caught by the first pilot repository, which is the whole reason a sweep
+// over 258 of them starts with one.
+var reGoDirective = regexp.MustCompile(`(?m)^go[ \t]+(\d+\.\d+(?:\.\d+)?)[ \t]*$`)
 
 // finding is what one repository needs, or why it needs nothing.
 type finding struct {
