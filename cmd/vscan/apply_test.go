@@ -280,3 +280,31 @@ func TestA404OnTheBranchIsNotA404OnTheRepository(t *testing.T) {
 		t.Errorf("it must NOT claim the repository is gone: %q", o.note)
 	}
 }
+
+// TestAnArchivedRepositoryIsSkippedNotFatal: GitHub refuses writes to an
+// archived repository with 404, the same status as "no such thing".
+// go-composites/nonnil ended a run after 22 of 227 tags that way.
+func TestAnArchivedRepositoryIsSkippedNotFatal(t *testing.T) {
+	created := map[string]string{}
+	stubGitHub(t, headA, nil, created)
+	ar := archived
+	t.Cleanup(func() { archived = ar })
+	createTag = func(string, string, string) error { return errString("gh: Not Found (HTTP 404)") }
+
+	archived = func(string) bool { return true }
+	o := applyOne(verdict{repo: "go-composites/nonnil", next: "v0.1.1", sha: headA, branch: "main"}, false)
+	if o.fatal {
+		t.Error("an archived repository must not end the run")
+	}
+	if o.ok || !strings.Contains(o.note, "ARCHIVED") {
+		t.Errorf("note = %q", o.note)
+	}
+
+	// The control: the same 404 on a repository that is NOT archived is fatal.
+	// A write refused for a reason nobody identified must stop the run.
+	archived = func(string) bool { return false }
+	o = applyOne(verdict{repo: "o/r", next: "v0.1.1", sha: headA, branch: "main"}, false)
+	if !o.fatal {
+		t.Error("a 404 write failure that is not an archive must stop the run")
+	}
+}
