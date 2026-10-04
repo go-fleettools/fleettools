@@ -15,6 +15,7 @@ func main() {
 	fleet.WarnIfStale(os.Stderr)
 
 	quiet := flag.Bool("q", false, "print only the hazardous frames")
+	prefix := flag.String("prefix", "", "consider only functions whose symbol starts with this (e.g. a module path)")
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, `usage: truncspill [-q] [file...]
 
@@ -55,7 +56,7 @@ pass, because a clobbered byte can be rewritten before anyone reads it.
 			defer f.Close()
 			in = f
 		}
-		rep, err := Scan(in)
+		rep, err := Scan(in, *prefix)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "truncspill:", err)
 			os.Exit(2)
@@ -72,6 +73,23 @@ pass, because a clobbered byte can be rewritten before anyone reads it.
 
 // report prints one dump's verdict and says whether anything was hazardous.
 func report(rep Report, quiet bool) bool {
+	// `go build -gcflags=-S` prints nothing for a package it does not have to
+	// compile, so a warm build cache yields an EMPTY dump -- and an empty dump
+	// read as "0 conversions, 0 hazardous", which is indistinguishable from a
+	// clean sweep. Say it instead, and exit 2 so a script cannot mistake it
+	// for a pass. Build with `-a` to be sure the assembly is emitted.
+	if rep.Seen == 0 {
+		fmt.Fprintln(os.Stderr, "truncspill: no STEXT symbol in the input -- nothing was read,\n"+
+			"  which is NOT the same as nothing found. `go build -gcflags=-S` prints\n"+
+			"  nothing for a package it does not recompile: add -a.")
+		os.Exit(2)
+	}
+	if rep.Funcs == 0 {
+		fmt.Fprintf(os.Stderr, "truncspill: %d functions in the dump, none matching the prefix --\n"+
+			"  this measures nothing. Check the prefix against a symbol in the dump.\n", rep.Seen)
+		os.Exit(2)
+	}
+	fmt.Printf("functions read           : %d of %d in the dump\n", rep.Funcs, rep.Seen)
 	fmt.Printf("TRUNCD* conversions      : %d\n", rep.Truncs)
 	fmt.Printf("  straight to a GPR      : %d\n", rep.Drained)
 	fmt.Printf("  spilled as 8-byte MOVD : %d  (in %d frame(s))\n", rep.Spilled(), len(rep.Frames))

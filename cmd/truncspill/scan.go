@@ -63,6 +63,8 @@ type Frame struct {
 
 // Report is the whole of one assembly dump.
 type Report struct {
+	Seen    int // STEXT symbols in the dump, prefix or not: zero means nothing was read
+	Funcs   int // STEXT symbols matching the prefix
 	Truncs  int // TRUNCD* instructions seen
 	Drained int // results moved straight to a general register: cannot be spilled as a float
 	Fpgp    int // MOV[WV]fpgp, i.e. CL 820040 is present
@@ -89,13 +91,18 @@ func (r Report) Hazards() int {
 	return n
 }
 
-// Scan reads `go build -gcflags=-S` output for GOARCH=loong64.
-func Scan(in io.Reader) (Report, error) {
+// Scan reads `go build -gcflags=-S` output for GOARCH=loong64, considering
+// only functions whose symbol starts with prefix. An empty prefix takes
+// everything -- which includes the standard library when the dump was
+// produced with a cold build cache, so a measurement about one module has to
+// name that module.
+func Scan(in io.Reader, prefix string) (Report, error) {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 
 	var rep Report
 	fn := "?"
+	skip := false
 	live := map[string]string{} // FP register -> where its TRUNCD* was
 	seen := map[Spill]bool{}
 	byFunc := map[string][]Spill{}
@@ -105,7 +112,15 @@ func Scan(in io.Reader) (Report, error) {
 		l := sc.Text()
 		if m := reText.FindStringSubmatch(l); m != nil {
 			fn = m[1]
+			rep.Seen++
+			skip = prefix != "" && !strings.HasPrefix(fn, prefix)
+			if !skip {
+				rep.Funcs++
+			}
 			live = map[string]string{}
+			continue
+		}
+		if skip {
 			continue
 		}
 		if reFpgp.MatchString(l) {
