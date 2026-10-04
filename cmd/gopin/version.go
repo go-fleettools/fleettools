@@ -89,12 +89,33 @@ func mustParse(s string) goVersion {
 //
 // A pin NEWER than the target does not hold anything back, so it does not
 // count; neither does an unparsable one, which this cannot reason about.
+//
+// A pin that names no patch is NOT a hold within its own minor, because
+// setup-go resolves it to the newest patch there. Measured on
+// cloud-boot/tamago-uefi, whose workflow says 1.27.x:
+//
+//	Setup go version spec 1.27.x
+//	go version go1.27.1 linux/amd64
+//
+// So against a target of 1.27.1 that job already runs 1.27.1, and holding
+// go.mod back for it would withhold a raise nothing objects to. `1.26` does
+// hold, because no patch of 1.26 reaches 1.27.1.
 func heldBackBy(literals []string, target goVersion) (string, bool) {
 	var oldest goVersion
 	name, found := "", false
 	for _, l := range literals {
 		v, err := parseGoVersion(l)
-		if err != nil || !v.olderThan(target) {
+		if err != nil {
+			continue
+		}
+		// reLiteral captures 1.27 out of both `1.27` and `1.27.x`, so a
+		// literal with one dot names a minor and no patch.
+		behind := v.olderThan(target)
+		if strings.Count(l, ".") == 1 {
+			behind = v.major < target.major ||
+				(v.major == target.major && v.minor < target.minor)
+		}
+		if !behind {
 			continue
 		}
 		if !found || v.olderThan(oldest) {

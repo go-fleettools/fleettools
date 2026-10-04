@@ -18,8 +18,12 @@ func TestHeldBackByNamesTheOldestPinThatIsBehindTheTarget(t *testing.T) {
 		{"the oldest of several wins", []string{"1.26.4", "1.25.0", "1.26.8"}, "1.25.0", true},
 		{"a newer pin holds nothing", []string{"1.28.0"}, "", false},
 		{"the target itself holds nothing", []string{"1.27.1"}, "", false},
-		// 1.27 and 1.27.0 are the same release, so 1.27 is behind 1.27.1.
-		{"a minor-only pin still counts", []string{"1.27"}, "1.27", true},
+		// A spec with no patch resolves to the newest patch in its minor:
+		// measured on cloud-boot/tamago-uefi, `1.27.x` installed go1.27.1. So
+		// it is NOT behind 1.27.1, and withholding go.mod for it would be a
+		// raise refused for nothing. reLiteral captures `1.27` from `1.27.x`.
+		{"a patchless pin in the target's own minor holds nothing", []string{"1.27"}, "", false},
+		{"a patchless pin in an older minor does hold", []string{"1.26"}, "1.26", true},
 		{"an unparsable pin is not reasoned about", []string{"stable"}, "", false},
 		{"an older pin wins over an unparsable one", []string{"stable", "1.26.4"}, "1.26.4", true},
 	} {
