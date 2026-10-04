@@ -328,12 +328,18 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 
 	if plan.any() {
 		fmt.Fprintf(stdout, "\n%s tags for: %s\n", map[bool]string{true: "WOULD create", false: "Creating"}[dryRun], apply)
-		done, failed := applyTags(stdout, verdicts, plan, pause, dryRun)
-		fmt.Fprintf(stdout, "  %d tag(s) %s\n", len(done), map[bool]string{true: "would be created", false: "created and read back"}[dryRun])
+		done, skipped, failed := applyTags(stdout, verdicts, plan, pause, dryRun)
+		fmt.Fprintf(stdout, "  %d tag(s) %s, %d skipped\n",
+			len(done), map[bool]string{true: "would be created", false: "created and read back"}[dryRun], len(skipped))
 		if failed != nil {
 			fmt.Fprintf(stdout, "  STOPPED at %s: %s\n", failed.repo, failed.note)
 			fmt.Fprintf(stdout, "  Nothing after it was attempted. Fix that one and run again; what is done is skipped.\n")
 			return 1
+		}
+		if len(skipped) > 0 {
+			// Said out loud: a run that quietly left things alone is a run
+			// whose total nobody can reconcile with the plan.
+			fmt.Fprintf(stdout, "  (the %d skipped are listed above, each with its reason; none was written to)\n", len(skipped))
 		}
 	}
 
