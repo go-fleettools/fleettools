@@ -85,6 +85,11 @@ type finding struct {
 }
 
 func main() {
+	// Every command here does this first: a binary built from an older
+	// checkout than HEAD says so rather than quietly doing an older thing.
+	// It matters more for this one than most, since it writes to other
+	// people's repositories.
+	fleet.WarnIfStale(os.Stderr)
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
