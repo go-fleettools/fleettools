@@ -104,7 +104,7 @@ func TestAnExistingTagIsNeverOverwritten(t *testing.T) {
 	created := map[string]string{}
 	stubGitHub(t, headA, map[string]bool{"v0.1.1": true}, created)
 	o := applyOne(verdict{repo: "o/r", next: "v0.1.1", sha: headA, branch: "main"}, false)
-	if o.ok || !strings.Contains(o.note, "already exists") {
+	if o.ok || o.fatal || !strings.Contains(o.note, "already exists") {
 		t.Fatalf("o = %+v", o)
 	}
 	if len(created) != 0 {
@@ -138,26 +138,102 @@ func TestADryRunCreatesNothing(t *testing.T) {
 	}
 }
 
-// TestItStopsAtTheFirstFailure: 231 permanent writes that half-succeed leave
-// nobody able to say which half.
-func TestItStopsAtTheFirstFailure(t *testing.T) {
+// TestItStopsAtAFailureButNotAtASkip is the distinction that cost a whole dry
+// run: one orphaned clone of a deleted repository ended the pass after 34 of
+// 231. A tag that already exists, a branch that moved and a repository that is
+// gone all mean "leave this one alone", not "stop".
+func TestItStopsAtAFailureButNotAtASkip(t *testing.T) {
 	created := map[string]string{}
 	stubGitHub(t, headA, map[string]bool{"v0.0.2": true}, created)
 	vs := []verdict{
 		{repo: "o/first", base: "v0.0.0", next: "v0.0.1", sha: headA, branch: "main"},
-		{repo: "o/second", base: "v0.0.1", next: "v0.0.2", sha: headA, branch: "main"}, // exists -> refused
+		{repo: "o/second", base: "v0.0.1", next: "v0.0.2", sha: headA, branch: "main"}, // exists -> SKIP
 		{repo: "o/third", base: "v0.0.2", next: "v0.0.3", sha: headA, branch: "main"},
 	}
 	var b strings.Builder
-	done, failed := applyTags(&b, vs, applyPlan{safe: true}, 0, false)
-	if len(done) != 1 || done[0].repo != "o/first" {
-		t.Fatalf("done = %+v", done)
+	done, skipped, failed := applyTags(&b, vs, applyPlan{safe: true}, 0, false)
+	if failed != nil {
+		t.Fatalf("a skip must not stop the run: %+v", failed)
 	}
+	if len(done) != 2 || done[0].repo != "o/first" || done[1].repo != "o/third" {
+		t.Fatalf("done = %+v -- the third must still have been reached", done)
+	}
+	if len(skipped) != 1 || skipped[0].repo != "o/second" {
+		t.Fatalf("skipped = %+v", skipped)
+	}
+
+	// The control: a real FAILURE in the same position does stop it.
+	created = map[string]string{}
+	stubGitHub(t, headA, nil, created)
+	createTag = func(repo, tag, sha string) error {
+		if repo == "o/second" {
+			return errString("boom")
+		}
+		created[repo+" "+tag] = sha
+		return nil
+	}
+	done, _, failed = applyTags(&b, vs, applyPlan{safe: true}, 0, false)
 	if failed == nil || failed.repo != "o/second" {
-		t.Fatalf("failed = %+v", failed)
+		t.Fatalf("a failed write must stop the run: %+v", failed)
+	}
+	if len(done) != 1 {
+		t.Fatalf("done = %+v", done)
 	}
 	if _, reached := created["o/third v0.0.3"]; reached {
 		t.Error("the third was attempted after a failure")
+	}
+}
+
+// TestADryRunStopsForNothing: it writes nothing, so there is no half-finished
+// state to protect, and its whole purpose is to show every problem at once.
+func TestADryRunStopsForNothing(t *testing.T) {
+	created := map[string]string{}
+	stubGitHub(t, headA, nil, created)
+	remoteHead = func(repo, _ string) (string, error) {
+		if repo == "o/gone" {
+			return "", errString("gh: Not Found (HTTP 404)")
+		}
+		return headA, nil
+	}
+	createTag = func(string, string, string) error { return errString("boom") }
+	vs := []verdict{
+		{repo: "o/first", base: "v0.0.0", next: "v0.0.1", sha: headA, branch: "main"},
+		{repo: "o/gone", base: "v0.0.1", next: "v0.0.2", sha: headA, branch: "main"},
+		{repo: "o/third", base: "v0.0.2", next: "v0.0.3", sha: headA, branch: "main"},
+	}
+	var b strings.Builder
+	done, skipped, failed := applyTags(&b, vs, applyPlan{safe: true}, 0, true)
+	if failed != nil {
+		t.Fatalf("a dry run must never stop: %+v", failed)
+	}
+	if len(done) != 2 || len(skipped) != 1 {
+		t.Fatalf("done=%d skipped=%d, want 2 and 1 -- every repository must be reported on", len(done), len(skipped))
+	}
+	if len(created) != 0 {
+		t.Fatalf("a dry run created %v", created)
+	}
+}
+
+// TestADeletedRepositoryIsSkippedNotFatal names the real case:
+// go-compressions/matchlen, whose repository git reports as "not found".
+func TestADeletedRepositoryIsSkippedNotFatal(t *testing.T) {
+	created := map[string]string{}
+	stubGitHub(t, headA, nil, created)
+	remoteHead = func(string, string) (string, error) { return "", errString("gh: Not Found (HTTP 404)") }
+	o := applyOne(verdict{repo: "go-compressions/matchlen", next: "v0.1.2", sha: headA, branch: "main"}, false)
+	if o.fatal {
+		t.Error("a repository that is gone must not end the run")
+	}
+	if o.ok || !strings.Contains(o.note, "stale local clone") {
+		t.Errorf("note = %q", o.note)
+	}
+
+	// The control: any OTHER error from the same call IS fatal, because it
+	// says nothing about whether the next repository can be read.
+	remoteHead = func(string, string) (string, error) { return "", errString("no route to host") }
+	o = applyOne(verdict{repo: "o/r", next: "v0.1.1", sha: headA, branch: "main"}, false)
+	if !o.fatal {
+		t.Error("an unreachable GitHub must stop the run")
 	}
 }
 
@@ -169,3 +245,9 @@ func TestAVerdictWithNoRecordedCommitIsRefused(t *testing.T) {
 		t.Fatalf("o = %+v", o)
 	}
 }
+
+// errString is an error that is just its message, so a test can hand the code
+// under test the exact wording GitHub produces.
+type errString string
+
+func (e errString) Error() string { return string(e) }

@@ -22,10 +22,22 @@ import (
 //     one.
 //   - It creates the ref and then READS IT BACK, because a 201 says the request
 //     was accepted, not that the tag resolves.
-//   - It stops at the first failure rather than carrying on. A sweep that
+//   - It stops at the first FAILURE rather than carrying on. A sweep that
 //     half-succeeds across 231 repositories leaves nobody able to say which
 //     half.
 //   - It never creates a tag that already exists, whatever it points at.
+//
+// ⛔ A SKIP IS NOT A FAILURE, and conflating them cost a whole dry run. The
+// first version stopped on anything that was not a tag, so one orphaned local
+// clone -- go-compressions/matchlen, whose repository has been deleted, git
+// says "Repository not found" -- ended the pass after 34 of 231. A branch that
+// moved, a tag that already exists and a repository that is gone are all
+// reasons to leave that one alone and carry on. Only a write that went wrong
+// stops the run.
+//
+// ⛔ AND A DRY RUN STOPS FOR NOTHING AT ALL. It writes nothing, so there is no
+// half-finished state to protect; its whole purpose is to show you every
+// problem before you start, and one that reports the first is worth little.
 
 // applyPlan is what -apply names: the categories a person decided on.
 type applyPlan struct {
@@ -82,7 +94,8 @@ func (p applyPlan) wants(v verdict) bool {
 // tagOutcome is one line of the record this leaves behind.
 type tagOutcome struct {
 	repo, tag, sha, note string
-	ok                   bool
+	ok                   bool // the tag now exists and points where it should
+	fatal                bool // stop: this says nothing good about what follows
 }
 
 // applyTags creates one lightweight tag ref per verdict, in order, stopping at
@@ -91,35 +104,50 @@ type tagOutcome struct {
 // Lightweight, not annotated: `go get` resolves a tag ref, most of the fleet's
 // existing tags are lightweight, and an annotated tag would need an author
 // identity this tool has no business inventing.
-func applyTags(stdout io.Writer, vs []verdict, p applyPlan, pause time.Duration, dryRun bool) (done []tagOutcome, failed *tagOutcome) {
+func applyTags(stdout io.Writer, vs []verdict, p applyPlan, pause time.Duration, dryRun bool) (done, skipped []tagOutcome, failed *tagOutcome) {
 	for _, v := range vs {
 		if !p.wants(v) {
 			continue
 		}
 		o := applyOne(v, dryRun)
 		fmt.Fprintf(stdout, "  %-46s %-10s %s\n", o.repo, o.tag, o.note)
-		if !o.ok {
-			return done, &o
+		if o.fatal && !dryRun {
+			return done, skipped, &o
 		}
-		done = append(done, o)
-		if !dryRun && pause > 0 {
-			time.Sleep(pause)
+		switch {
+		case o.ok:
+			done = append(done, o)
+			if !dryRun && pause > 0 {
+				time.Sleep(pause)
+			}
+		default:
+			skipped = append(skipped, o)
 		}
 	}
-	return done, nil
+	return done, skipped, nil
 }
 
 func applyOne(v verdict, dryRun bool) tagOutcome {
 	o := tagOutcome{repo: v.repo, tag: v.next, sha: v.sha}
 
 	if v.sha == "" {
-		o.note = "REFUSED: the scan recorded no commit for this verdict"
+		// Nothing was measured here, so there is nothing to write and nothing
+		// to be alarmed about further down the list.
+		o.note = "SKIPPED: the scan recorded no commit for this verdict"
 		return o
 	}
 	// The branch must still be where it was when the API was read.
 	head, err := remoteHead(v.repo, v.branch)
 	if err != nil {
-		o.note = "REFUSED: could not re-read " + v.branch + ": " + err.Error()
+		// ⛔ A 404 here is a local clone of a repository that is no longer
+		// there -- deleted, renamed or out of this token's reach. It says
+		// nothing about the next repository, so it must not end the run.
+		if isGone(err) {
+			o.note = "SKIPPED: " + v.repo + " is not reachable (404) -- a stale local clone?"
+			return o
+		}
+		o.fatal = true
+		o.note = "FAILED: could not re-read " + v.branch + ": " + err.Error()
 		return o
 	}
 	if head != v.sha {
@@ -128,10 +156,11 @@ func applyOne(v verdict, dryRun bool) tagOutcome {
 		return o
 	}
 	if exists, err := tagExists(v.repo, v.next); err != nil {
-		o.note = "REFUSED: could not ask whether " + v.next + " exists: " + err.Error()
+		o.fatal = true
+		o.note = "FAILED: could not ask whether " + v.next + " exists: " + err.Error()
 		return o
 	} else if exists {
-		o.note = "REFUSED: " + v.next + " already exists"
+		o.note = "SKIPPED: " + v.next + " already exists"
 		return o
 	}
 	if dryRun {
@@ -139,21 +168,31 @@ func applyOne(v verdict, dryRun bool) tagOutcome {
 		return o
 	}
 	if err := createTag(v.repo, v.next, v.sha); err != nil {
+		o.fatal = true
 		o.note = "FAILED: " + err.Error()
 		return o
 	}
 	// ⛔ A 201 says the request was accepted. Read it back.
 	got, err := tagTarget(v.repo, v.next)
 	if err != nil {
+		o.fatal = true
 		o.note = "FAILED: created, but could not read it back: " + err.Error()
 		return o
 	}
 	if got != v.sha {
+		o.fatal = true
 		o.note = fmt.Sprintf("FAILED: created, but it points at %s and not %s", short(got), short(v.sha))
 		return o
 	}
 	o.ok, o.note = true, "tagged "+short(v.sha)
 	return o
+}
+
+// isGone recognises the one error that means "there is no such repository
+// here", as opposed to one that means "I could not ask".
+func isGone(err error) bool {
+	m := err.Error()
+	return strings.Contains(m, "Not Found") || strings.Contains(m, "HTTP 404")
 }
 
 func short(sha string) string {
