@@ -259,3 +259,64 @@ func TestTheCountAndTheGateCountAlike(t *testing.T) {
 		t.Errorf("the headline disagrees with the gate:\n%s", b.String())
 	}
 }
+
+// TestAnOrganisationThatAdvertisesNothingIsPrinted.
+//
+// ⛔ 24 organisations had no profile README and no landing page, and every one
+// of them sat under a headline reading "0 organisations with drift" —
+// openstack-terraform-modules with eight repositories, go-sicp with seven.
+// With no surface there is nothing to compare, so it is not drift; saying
+// nothing at all made an organisation that advertises nothing look exactly
+// like one that advertises everything correctly.
+func TestAnOrganisationThatAdvertisesNothingIsPrinted(t *testing.T) {
+	var b strings.Builder
+	code := report([]finding{{
+		org: "go-sicp", modules: 7, silent: true,
+		unlisted: map[string][]string{}, stale: map[string][]string{},
+		archived: map[string]bool{}, quiet: map[string]string{},
+	}}, &b)
+	out := b.String()
+	if !strings.Contains(out, "advertise NOTHING") {
+		t.Errorf("a silent organisation was not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "go-sicp (7)") {
+		t.Errorf("the count of invisible repositories is the point:\n%s", out)
+	}
+	// It is NOT drift, and it must not become an exit status: there is no
+	// defect to fix in a pull request, only a page nobody has written.
+	if !strings.Contains(out, "0 organisations with drift") {
+		t.Errorf("absence counted as drift:\n%s", out)
+	}
+	if code != 0 {
+		t.Errorf("exit status = %d, want 0", code)
+	}
+}
+
+// TestAnEmptyOrganisationIsNotWorthALine is the control: silent is only set
+// when there is something to be invisible. Eight of the 24 held no
+// repositories at all, and a line about them is noise.
+func TestAnEmptyOrganisationIsNotWorthALine(t *testing.T) {
+	var b strings.Builder
+	report([]finding{{
+		org: "go-ruby-tiktok", modules: 0, silent: false,
+		unlisted: map[string][]string{}, stale: map[string][]string{},
+		archived: map[string]bool{}, quiet: map[string]string{},
+	}}, &b)
+	if out := b.String(); strings.Contains(out, "advertise NOTHING") {
+		t.Errorf("an organisation with no repositories needs no line:\n%s", out)
+	}
+}
+
+// TestSilentOrgNeedsBothHalves covers the decision scan makes and a report
+// test cannot reach.
+func TestSilentOrgNeedsBothHalves(t *testing.T) {
+	if !silentOrg(nil, 7) {
+		t.Error("no surface and seven repositories is the case this exists for")
+	}
+	if silentOrg(nil, 0) {
+		t.Error("an empty organisation advertises nothing and loses nothing")
+	}
+	if silentOrg([]string{"profile"}, 7) {
+		t.Error("an organisation with a surface is judged by comparison, not by this")
+	}
+}

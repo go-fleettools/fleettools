@@ -77,6 +77,7 @@ type finding struct {
 	badAllow  string              // the .docs-unlisted file is malformed
 	modules   int
 	surfaces  []string // the surfaces that were readable
+	silent    bool     // no surface at all: this org advertises nothing
 	readError string
 }
 
@@ -211,6 +212,17 @@ func classify(org string, all []ghRepo, f *finding) (have map[string]bool, modul
 // is the dangerous way round: the file that grants exemptions could be
 // unparseable and the check would still pass. I wrote that one while adding the
 // file, in the same change where I said an allowance must never be silent.
+// silentOrg reports whether an organisation advertises nothing while having
+// something to advertise.
+//
+// Split out of scan so a test can reach it: scan talks to GitHub, and the
+// three lines that decide this would otherwise be covered by nothing — the
+// same shape as the two lines filling f.archived, which once went missing with
+// the whole suite still green.
+func silentOrg(surfaces []string, modules int) bool {
+	return len(surfaces) == 0 && modules > 0
+}
+
 func (f finding) drifted() bool {
 	return len(f.unlisted) > 0 || len(f.stale) > 0 || f.badAllow != ""
 }
@@ -302,7 +314,21 @@ func scan(org string) finding {
 	}
 	surfaces = kept
 	if len(f.surfaces) == 0 {
-		return f // nothing advertises here at all; not drift, just absence
+		// Not drift: with no surface there is nothing to compare the
+		// organisation against, and the comparison is what this tool does.
+		//
+		// ⛔ BUT IT IS NOT NOTHING EITHER, and reporting it as nothing is how
+		// 24 organisations came to sit under a headline reading "0
+		// organisations with drift" — among them openstack-terraform-modules
+		// with eight repositories and go-sicp with seven, advertised nowhere
+		// at all. An organisation that says nothing was indistinguishable
+		// from one that says everything correctly.
+		//
+		// So it is counted and printed, separately, and it does NOT move the
+		// drift count or the exit status: there is no defect here to fix in a
+		// pull request, only a page nobody has written.
+		f.silent = silentOrg(f.surfaces, f.modules)
+		return f
 	}
 
 	for _, m := range modules {
@@ -387,6 +413,21 @@ func report(found []finding, w io.Writer) int {
 			if len(frozen) > 0 {
 				fmt.Fprintf(w, "  %s lists as current, and the org has ARCHIVED: %s\n", s, strings.Join(frozen, " "))
 			}
+		}
+	}
+	var silent []string
+	for _, f := range found {
+		if f.silent {
+			silent = append(silent, fmt.Sprintf("%s (%d)", f.org, f.modules))
+		}
+	}
+	if len(silent) > 0 {
+		sort.Strings(silent)
+		fmt.Fprintf(w, "\n%d organisation(s) advertise NOTHING: no profile README, no landing page.\n", len(silent))
+		fmt.Fprintf(w, "Not drift — there is no surface to compare — but not nothing either. The\n")
+		fmt.Fprintf(w, "number in brackets is how many repositories are invisible as a result.\n")
+		for _, o := range silent {
+			fmt.Fprintf(w, "      %s\n", o)
 		}
 	}
 	fmt.Fprintf(w, "\n%d organisations with drift, %d unreadable\n", drift, unread)
