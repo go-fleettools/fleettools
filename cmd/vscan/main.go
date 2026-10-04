@@ -79,8 +79,9 @@ var defaultPlatforms = []string{"linux", "darwin", "windows"}
 type reading struct {
 	goos      string
 	suggested string
-	breaks    int // "## incompatible changes" sections
-	grew      int // "## compatible changes" sections
+	wantBase  string // the base gorelease says it can only compare against
+	breaks    int    // "## incompatible changes" sections
+	grew      int    // "## compatible changes" sections
 	err       string
 }
 
@@ -370,6 +371,22 @@ func read(repo, dir, base string, platforms []string) verdict {
 			continue
 		}
 		r := askGorelease(dir, base, goos)
+		// ⛔ gorelease asks the module PROXY for the most recent published
+		// version of this major; latestTag asks git which tag is REACHABLE
+		// from the branch. When a release sits off the branch, or a peer
+		// session tagged one a minute ago, the two disagree and gorelease
+		// refuses rather than compare against a stale base. It names the base
+		// it wants, so take it.
+		if want := r.wantBase; want != "" && want != base {
+			// ⛔ Hold the name BEFORE the retry overwrites r. Reading
+			// r.wantBase after the reassignment read the retry's own (empty)
+			// field, so the verdict reported no base at all -- it even erased
+			// the base it had started from.
+			r = askGorelease(dir, want, goos)
+			if r.err == "" {
+				v.base = want
+			}
+		}
 		if r.err != "" {
 			v.unread = append(v.unread, goos+": "+r.err)
 			continue
@@ -409,6 +426,8 @@ var askGorelease = func(dir, base, goos string) reading {
 // exactly like a module with nothing to report.
 func parseGorelease(out, goos string) reading {
 	r := reading{goos: goos}
+	var refusal string
+	var wantReason bool
 	for _, line := range strings.Split(out, "\n") {
 		switch {
 		case strings.HasPrefix(line, "Suggested version: "):
@@ -419,10 +438,33 @@ func parseGorelease(out, goos string) reading {
 			r.grew++
 		case strings.HasPrefix(line, "gorelease: "):
 			r.err = strings.TrimSpace(strings.TrimPrefix(line, "gorelease: "))
+		case strings.HasPrefix(line, "Cannot suggest a release version."):
+			// ⛔ Keep gorelease's OWN words. An earlier version replaced every
+			// one of these with "said nothing this could read", and eleven
+			// modules sat in the unread pile with their cause printed in full,
+			// thrown away one line before it was read. gorelease prints the
+			// reason on the NEXT line, and there are at least four of them:
+			// "Errors were found.", "Incompatible changes were detected.",
+			// "Base module path is different from release.", and the one that
+			// names a base it would accept.
+			refusal = "cannot suggest a version"
+			wantReason = true
+		case wantReason && strings.TrimSpace(line) != "":
+			refusal = "cannot suggest a version: " + strings.TrimSpace(line)
+			wantReason = false
+			if strings.Contains(line, "most recent version of this major:") {
+				if i := strings.LastIndex(line, ": "); i >= 0 {
+					r.wantBase = strings.TrimSuffix(strings.TrimSpace(line[i+2:]), ".")
+				}
+			}
 		}
 	}
 	if r.suggested == "" && r.err == "" {
-		r.err = "said nothing this could read"
+		if refusal != "" {
+			r.err = refusal
+		} else {
+			r.err = "said nothing this could read"
+		}
 	}
 	if r.err != "" {
 		r.suggested = ""

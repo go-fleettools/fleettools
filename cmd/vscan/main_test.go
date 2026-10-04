@@ -231,3 +231,91 @@ func TestGrewIsFoldedPerPlatform(t *testing.T) {
 		t.Error("must not be safe")
 	}
 }
+
+// TestARefusalKeepsGoreleasesOwnWords: eleven modules sat in the unread pile
+// reported as "said nothing this could read", with their cause printed in full
+// one line above, thrown away by the parser.
+func TestARefusalKeepsGoreleasesOwnWords(t *testing.T) {
+	const out = "# summary\nCannot suggest a release version.\n" +
+		"Can only suggest a release version when compared against the most recent version of this major: v0.2.0.\n"
+	r := parseGorelease(out, "linux")
+	if r.err == "" {
+		t.Fatal("a refusal must be an error")
+	}
+	if strings.Contains(r.err, "said nothing") {
+		t.Errorf("gorelease said plenty; the parser threw it away: %q", r.err)
+	}
+	if !strings.Contains(r.err, "most recent version of this major") {
+		t.Errorf("err = %q, want gorelease's own sentence", r.err)
+	}
+	if r.wantBase != "v0.2.0" {
+		t.Errorf("wantBase = %q, want v0.2.0 -- gorelease names the base it will accept", r.wantBase)
+	}
+}
+
+// TestTheNamedBaseIsRetriedOnce. latestTag asks git which tag is REACHABLE;
+// gorelease asks the proxy for the most recent PUBLISHED one. When they
+// disagree, gorelease refuses and names what it wants.
+func TestTheNamedBaseIsRetriedOnce(t *testing.T) {
+	saved := askGorelease
+	defer func() { askGorelease = saved }()
+	var asked []string
+	askGorelease = func(_, base, goos string) reading {
+		asked = append(asked, base)
+		if base == "v0.1.1" {
+			return reading{goos: goos, err: "...most recent version of this major: v0.2.0", wantBase: "v0.2.0"}
+		}
+		return reading{goos: goos, suggested: "v0.2.1"}
+	}
+	v := read("o/r", "/nowhere", "v0.1.1", []string{"linux"})
+	if len(v.unread) != 0 {
+		t.Fatalf("the retry should have succeeded: %v", v.unread)
+	}
+	if v.base != "v0.2.0" {
+		t.Errorf("base = %q; the verdict must report the base actually compared against", v.base)
+	}
+	if v.next != "v0.2.1" {
+		t.Errorf("next = %q", v.next)
+	}
+	if len(asked) != 2 || asked[0] != "v0.1.1" || asked[1] != "v0.2.0" {
+		t.Errorf("asked = %v, want exactly one retry with the named base", asked)
+	}
+}
+
+// TestARetryThatAlsoFailsIsStillUnread: it must not loop, and it must not
+// pretend.
+func TestARetryThatAlsoFailsIsStillUnread(t *testing.T) {
+	saved := askGorelease
+	defer func() { askGorelease = saved }()
+	n := 0
+	askGorelease = func(_, base, goos string) reading {
+		n++
+		return reading{goos: goos, err: "nope", wantBase: "v9.9.9"}
+	}
+	v := read("o/r", "/nowhere", "v0.1.1", []string{"linux"})
+	if len(v.unread) != 1 {
+		t.Fatalf("unread = %v", v.unread)
+	}
+	if n != 2 {
+		t.Errorf("asked %d times, want exactly 2 -- one retry, never a loop", n)
+	}
+}
+
+// TestEveryRefusalReasonSurvives. gorelease has at least four, and the useful
+// part is always the line AFTER "Cannot suggest a release version."
+func TestEveryRefusalReasonSurvives(t *testing.T) {
+	for _, c := range []struct{ reason, wantBase string }{
+		{"Errors were found.", ""},
+		{"Incompatible changes were detected.", ""},
+		{"Base module path is different from release.", ""},
+		{"Can only suggest a release version when compared against the most recent version of this major: v0.22.0.", "v0.22.0"},
+	} {
+		r := parseGorelease("# summary\nCannot suggest a release version.\n"+c.reason+"\n", "linux")
+		if !strings.Contains(r.err, c.reason) {
+			t.Errorf("err = %q, want it to carry %q", r.err, c.reason)
+		}
+		if r.wantBase != c.wantBase {
+			t.Errorf("wantBase = %q, want %q", r.wantBase, c.wantBase)
+		}
+	}
+}
