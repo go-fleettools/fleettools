@@ -58,3 +58,26 @@ func prBody(f finding, want string) string {
 // writeFile is os.WriteFile, named here so the test helper does not pull os
 // into a file that otherwise has no business with it.
 func writeFile(path, body string) error { return osWriteFile(path, []byte(body), 0o600) }
+
+// commitMessage is what lands in the repository's own history, which outlives
+// the pull request description.
+func commitMessage(f finding, want string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "ci: pin Go %s instead of `stable`\n\n", want)
+	b.WriteString("`stable` is a channel alias, not a version, and that is the\n" +
+		"defect: the toolchain moves with no commit and nothing to review.\n" +
+		"Measured on go-pkgx on 2026-10-04, CI had been building and running\n" +
+		"on go1.27.1 -- `Setup go version spec stable` / `go version go1.27.1`\n" +
+		"in the job log -- while every go.mod there still said `go 1.26.4`.\n\n")
+	b.WriteString("Worse, the shared Renovate preset carries a rule written for\n" +
+		"exactly this (dep name `go`, automerge false, ungrouped, citing\n" +
+		"golang/go#81000) and it had never produced a pull request: an alias\n" +
+		"has no version to compare or rewrite. Demonstrated rather than\n" +
+		"argued -- in ONE ci.yml, the job saying `stable` got nothing and the\n" +
+		"job saying \"1.26.4\" got a Renovate PR, same file, same run.\n\n")
+	if f.GoMod != "" {
+		fmt.Fprintf(&b, "go.mod moves from %s to %s, so the module says the version CI\nhas in fact been using.\n\n", f.GoMod, want)
+	}
+	b.WriteString("Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>\n")
+	return b.String()
+}
