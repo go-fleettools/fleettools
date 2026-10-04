@@ -175,6 +175,15 @@ func applyOne(v verdict, dryRun bool) tagOutcome {
 		return o
 	}
 	if dryRun {
+		// ⛔ Ask the one question a dry run would otherwise get wrong. It
+		// promised "would tag" for go-composites/nonnil and
+		// go-freedesktop/dbus, both archived and both impossible to write to.
+		// A dry run exists to say what will happen; a confident wrong answer
+		// is the one thing it must not give.
+		if archived(v.repo) {
+			o.note = "SKIPPED: " + v.repo + " is ARCHIVED -- GitHub refuses every write to it, with 404"
+			return o
+		}
 		o.ok, o.note = true, "would tag "+short(v.sha)
 		return o
 	}

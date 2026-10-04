@@ -325,3 +325,30 @@ func TestAPrereleaseBaseIsNeverPromoted(t *testing.T) {
 		t.Error("the control failed")
 	}
 }
+
+// TestADryRunDoesNotPromiseAnImpossibleWrite. The dry run said "would tag" for
+// two archived repositories and the real run then skipped both. A dry run
+// exists to say what will happen; a confident wrong answer is the one thing it
+// must not give.
+func TestADryRunDoesNotPromiseAnImpossibleWrite(t *testing.T) {
+	created := map[string]string{}
+	stubGitHub(t, headA, nil, created)
+	ar := archived
+	t.Cleanup(func() { archived = ar })
+
+	archived = func(string) bool { return true }
+	o := applyOne(verdict{repo: "go-freedesktop/dbus", next: "v0.1.2", sha: headA, branch: "main"}, true)
+	if o.ok || !strings.Contains(o.note, "ARCHIVED") {
+		t.Errorf("a dry run must not promise a write GitHub will refuse: %+v", o)
+	}
+
+	// The control: a live repository still reads as "would tag".
+	archived = func(string) bool { return false }
+	o = applyOne(verdict{repo: "o/r", next: "v0.1.1", sha: headA, branch: "main"}, true)
+	if !o.ok || !strings.Contains(o.note, "would tag") {
+		t.Errorf("the control failed: %+v", o)
+	}
+	if len(created) != 0 {
+		t.Errorf("a dry run created %v", created)
+	}
+}
