@@ -143,7 +143,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		changed++
 		fmt.Fprintf(stdout, "ALIAS   %s: %d in %s", repo, f.Aliases, strings.Join(f.Files, " "))
-		if olderGoMod(f.GoMod, target) {
+		held, isHeld := heldBackBy(f.Literals, target)
+		switch {
+		case olderGoMod(f.GoMod, target) && isHeld:
+			fmt.Fprintf(stdout, " ; go.mod HELD at %s by the %s pin", f.GoMod, held)
+		case olderGoMod(f.GoMod, target):
 			fmt.Fprintf(stdout, " ; go.mod %s -> %s", f.GoMod, *version)
 		}
 		if len(f.Literals) > 0 {
@@ -291,7 +295,8 @@ func open(repo string, f finding, want string) error {
 			return err
 		}
 	}
-	if cur, err := parseGoVersion(f.GoMod); f.GoMod != "" && err == nil && cur.olderThan(mustParse(want)) {
+	_, isHeld := heldBackBy(f.Literals, mustParse(want))
+	if cur, err := parseGoVersion(f.GoMod); !isHeld && f.GoMod != "" && err == nil && cur.olderThan(mustParse(want)) {
 		body, fsha, err := getFileOn(repo, "go.mod", branch)
 		if err != nil {
 			return err
