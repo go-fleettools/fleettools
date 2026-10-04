@@ -65,6 +65,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-fleettools/fleettools/internal/checkout"
 	"github.com/go-fleettools/fleettools/internal/fleet"
@@ -91,6 +92,8 @@ type verdict struct {
 	disagree bool   // platforms suggested different versions
 	grew     int    // platforms reporting compatible (additive) changes
 	frozen   bool   // the base tag is unreachable from the branch: a rewritten history
+	sha      string // the commit the verdict was measured on
+	branch   string // the default branch that commit was the head of
 	unread   []string
 }
 
@@ -169,17 +172,28 @@ func main() {
 	platforms := flag.String("platforms", strings.Join(defaultPlatforms, ","), "comma-separated GOOS values to read the API under")
 	jobs := flag.Int("jobs", 4, "how many modules to read at once")
 	doFetch := flag.Bool("fetch", true, "fetch each checkout, so the version is derived from the branch head and not from whatever the clone was left at")
+	apply := flag.String("apply", "", "CREATE TAGS for these categories, comma-separated: safe, no-api-change, additions, frozen. There is deliberately no value for incompatible.")
+	dryRun := flag.Bool("dry-run", false, "with -apply, say what would be tagged and create nothing")
+	pause := flag.Duration("pause", 2*time.Second, "with -apply, wait this long between tags; GitHub's SECONDARY limit brakes a burst and waiting is the whole remedy")
 	flag.Parse()
-	os.Exit(run(os.Stdout, os.Stderr, *root, *only, strings.Split(*platforms, ","), *jobs, *doFetch))
+	os.Exit(run(os.Stdout, os.Stderr, *root, *only, strings.Split(*platforms, ","), *jobs, *doFetch, *apply, *dryRun, *pause))
 }
 
-func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs int, doFetch bool) int {
+func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs int, doFetch bool, apply string, dryRun bool, pause time.Duration) int {
+	plan, err := parseApply(apply)
+	if err != nil {
+		fmt.Fprintln(stderr, "-apply:", err)
+		return 2
+	}
 	if _, err := exec.LookPath("gorelease"); err != nil {
 		fmt.Fprintln(stderr, "vscan needs gorelease on PATH:")
 		fmt.Fprintln(stderr, "    go install golang.org/x/exp/cmd/gorelease@latest")
 		return 2
 	}
-	repos, err := checkout.Repos(root, only)
+	repos, err2 := checkout.Repos(root, only)
+	if err2 != nil {
+		err = err2
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, "repos:", err)
 		return 2
@@ -241,6 +255,10 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 			}
 			v := read(repo, tree, base, platforms)
 			v.frozen = frozen
+			v.branch = strings.TrimPrefix(ref, "origin/")
+			if h, ok := git(dir, "rev-parse", ref); ok {
+				v.sha = strings.TrimSpace(h)
+			}
 			mu.Lock()
 			verdicts = append(verdicts, v)
 			mu.Unlock()
@@ -305,6 +323,17 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 		fmt.Fprintf(stdout, "the base from the module proxy, not from git -- but a person should see these:\n")
 		for _, v := range frozen {
 			fmt.Fprintf(stdout, "  %-46s %s -> %s\n", v.repo, v.base, v.next)
+		}
+	}
+
+	if plan.any() {
+		fmt.Fprintf(stdout, "\n%s tags for: %s\n", map[bool]string{true: "WOULD create", false: "Creating"}[dryRun], apply)
+		done, failed := applyTags(stdout, verdicts, plan, pause, dryRun)
+		fmt.Fprintf(stdout, "  %d tag(s) %s\n", len(done), map[bool]string{true: "would be created", false: "created and read back"}[dryRun])
+		if failed != nil {
+			fmt.Fprintf(stdout, "  STOPPED at %s: %s\n", failed.repo, failed.note)
+			fmt.Fprintf(stdout, "  Nothing after it was attempted. Fix that one and run again; what is done is skipped.\n")
+			return 1
 		}
 	}
 
