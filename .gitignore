@@ -1,0 +1,20 @@
+# Built command binaries land in the repository ROOT, named after the command:
+# `go build ./cmd/docscan/` writes `./docscan`. Nothing ignored them, and
+# `git add -A` duly committed one -- a 3.8 MB arm64 Mach-O executable was
+# tracked on `main` from #11 onwards, and `go build ./cmd/truncspill/` staged a
+# second one before this file existed.
+#
+# This is an ALLOW-LIST, deliberately, rather than a list of binary names. A
+# rule that names the binaries it has already met goes stale at the first
+# rename and at every new command -- and the artefact nobody has a rule for is
+# exactly the one that walks in. Verify BOTH directions after changing it:
+#
+#     git check-ignore -v docscan        # must be ignored
+#     git check-ignore -v README.md      # must print nothing, exit 1
+#
+/*
+!/*/
+!/.gitignore
+!/README.md
+!/go.mod
+!/go.sum
