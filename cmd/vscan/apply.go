@@ -173,6 +173,15 @@ func applyOne(v verdict, dryRun bool) tagOutcome {
 		return o
 	}
 	if err := createTag(v.repo, v.next, v.sha); err != nil {
+		// ⛔ An ARCHIVED repository refuses every write, and GitHub says so
+		// with 404 rather than 403 -- the same status as "no such thing". One
+		// archived repository, go-composites/nonnil, ended a run after 22 of
+		// 227 tags. Read-only by design is a reason to leave it alone, not to
+		// doubt the next one.
+		if isGone(err) && archived(v.repo) {
+			o.note = "SKIPPED: " + v.repo + " is ARCHIVED -- GitHub refuses every write to it, with 404"
+			return o
+		}
 		o.fatal = true
 		o.note = "FAILED: " + err.Error()
 		return o
@@ -210,6 +219,14 @@ func describeGone(repo, branch string) string {
 		return repo + ": branch " + branch + " reads 404, and the repository could not be asked about either (" + err.Error() + ")"
 	}
 	return repo + " exists, but its branch " + branch + " does not (404) -- this checkout's origin/HEAD is stale, so the version was derived from the WRONG branch"
+}
+
+// archived reports whether a write was refused because the repository is
+// read-only. A repository this cannot ask about is NOT reported as archived:
+// the caller then treats the failure as a failure, which is the safe way round.
+var archived = func(repo string) bool {
+	b, err := fleet.GH("api", "repos/"+repo, "--jq", ".archived")
+	return err == nil && strings.TrimSpace(string(b)) == "true"
 }
 
 var repoExists = func(repo string) (string, error) {
