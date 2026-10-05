@@ -42,11 +42,13 @@ package main
 
 import (
 	"encoding/base64"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -72,7 +74,10 @@ var reStable = regexp.MustCompile(`(?m)(go-version:\s*)stable([^\w.-]|$)`)
 var reLiteral = regexp.MustCompile(`go-version:\s*['"]?(\d+\.\d+(?:\.\d+)?)['"]?`)
 
 // reGoDirective is go.mod's own version line.
-var reGoDirective = regexp.MustCompile(`(?m)^go\s+(\d+\.\d+(?:\.\d+)?)\s*$`)
+// `[ \t]` and not `\s`, and a test says why. `\s` matches a newline, so
+// `\s*$` under `(?m)` ate the file's final newline and the replacement put
+// none back; it also swallowed the blank line before a `require` block.
+var reGoDirective = regexp.MustCompile(`(?m)^go[ \t]+(\d+\.\d+(?:\.\d+)?)[ \t]*$`)
 
 // finding is what one repository needs, or why it needs nothing.
 type finding struct {
@@ -126,7 +131,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	var changed, skipped, failed, opened int
+	var changed, skipped, failed, opened, archived int
 	for _, repo := range repos {
 		f := inspect(repo, *version)
 		switch {
@@ -155,10 +160,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintln(stdout)
 		if *apply {
-			if err := open(repo, f, *version); err != nil {
+			switch err := open(repo, f, *version); {
+			case errors.Is(err, errArchived):
+				archived++
+				fmt.Fprintf(stdout, "        skipped: %v\n", err)
+			case err != nil:
 				failed++
 				fmt.Fprintf(stdout, "        pull request FAILED: %v\n", err)
-			} else {
+			default:
 				opened++
 			}
 			time.Sleep(*pause)
@@ -171,6 +180,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "\n%d read · %d hold the alias · %d already explicit · %d unreadable", len(repos), changed, skipped, failed)
 	if *apply {
 		fmt.Fprintf(stdout, " · %d pull request(s) opened", opened)
+		if archived > 0 {
+			fmt.Fprintf(stdout, " · %d archived and skipped", archived)
+		}
 	}
 	fmt.Fprintln(stdout)
 	if failed > 0 {
@@ -264,111 +276,171 @@ func getFile(repo, path string) (string, error) {
 	return string(dec), nil
 }
 
-// open creates the branch, writes each file and opens the pull request.
+// open clones the repository, edits it, pushes with gitpush and opens the
+// pull request.
 //
-// The contents API is used rather than the git data API: it costs one call per
-// file instead of five or six per repository, and two commits in a pull
-// request read better here than one — each says what it changed and why.
+// NOT the contents API. GitHub's create-or-update-file endpoint REFUSES a
+// path under .github/workflows/ with a flat 404 — measured directly, on the
+// same branch, with the same token, in the same repository where a PUT to
+// go.mod succeeded seconds earlier:
+//
+//	PUT repos/O/R/contents/go.mod                     -> 201, commit created
+//	PUT repos/O/R/contents/.github/workflows/ci.yml   -> 404 Not Found
+//
+// It is not a missing scope, which was the comfortable first guess:
+// `ghscopes workflow` reports that both tokens on this machine carry it. It
+// is the OAuth-app path gh authenticates through, and no scope lifts it.
+// Workflow files go in over git or they do not go in. scripts/pinapply.sh
+// worked around it from outside; this fixes `-apply` itself, so there is one
+// implementation and not two.
+//
+// The push is gitpush, never `git push`: it names a credential helper instead
+// of reading a token, refuses a remote URL that carries a credential, and
+// redacts what it prints. A token must never reach a URL, a command line or
+// an environment variable.
 func open(repo string, f finding, want string) error {
-	base, sha, err := defaultBranch(repo)
+	base, err := defaultBranch(repo)
 	if err != nil {
 		return err
 	}
-	branch := "go-" + strings.ReplaceAll(want, ".", "") + "-pinned-because-an-alias-cannot-be-reviewed"
-	if _, err := ghJSON("api", "-X", "POST", "repos/"+repo+"/git/refs",
-		"-f", "ref=refs/heads/"+branch, "-f", "sha="+sha); err != nil &&
-		!strings.Contains(err.Error(), "Reference already exists") {
+	dir, err := osMkdirTemp("", "gopin-*")
+	if err != nil {
 		return err
 	}
+	defer os.RemoveAll(dir)
+
+	// Shallow and single-branch: this needs one commit's worth of tree, and
+	// 258 full clones would be minutes spent on history nobody reads.
+	if out, err := git("", "clone", "--depth", "1", "--single-branch",
+		"--branch", base, "https://github.com/"+repo+".git", dir); err != nil {
+		return fmt.Errorf("clone: %v: %s", err, out)
+	}
+	branch := "go-" + strings.ReplaceAll(want, ".", "") + "-pinned-because-an-alias-cannot-be-reviewed"
+	if out, err := git(dir, "checkout", "-b", branch); err != nil {
+		return fmt.Errorf("branch: %v: %s", err, out)
+	}
+
+	changed := 0
 	for _, n := range f.Files {
-		path := ".github/workflows/" + n
-		body, fsha, err := getFileOn(repo, path, branch)
+		path := filepath.Join(dir, ".github", "workflows", n)
+		b, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		next := reStable.ReplaceAllString(body, "${1}'"+want+"'${2}")
-		if next == body {
+		next := reStable.ReplaceAllString(string(b), "${1}'"+want+"'${2}")
+		if next == string(b) {
 			continue
 		}
-		if err := putFile(repo, path, branch, fsha, next,
-			"ci: pin Go "+want+" instead of `stable`"); err != nil {
+		if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
 			return err
 		}
+		changed++
 	}
+	// heldBackBy is why this is not simply "is go.mod older": a workflow that
+	// names an older version on purpose breaks the moment the directive goes
+	// past it, because setup-go sets GOTOOLCHAIN=local and the pin is then
+	// enforced rather than re-downloaded.
 	_, isHeld := heldBackBy(f.Literals, mustParse(want))
 	if cur, err := parseGoVersion(f.GoMod); !isHeld && f.GoMod != "" && err == nil && cur.olderThan(mustParse(want)) {
-		body, fsha, err := getFileOn(repo, "go.mod", branch)
-		if err != nil {
-			return err
-		}
-		next := reGoDirective.ReplaceAllString(body, "go "+want)
-		if next != body {
-			if err := putFile(repo, "go.mod", branch, fsha, next,
-				"go.mod: say the version CI has been using"); err != nil {
-				return err
+		path := filepath.Join(dir, "go.mod")
+		if b, err := os.ReadFile(path); err == nil {
+			next := reGoDirective.ReplaceAllString(string(b), "go "+want)
+			if next != string(b) {
+				if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
+					return err
+				}
+				changed++
 			}
 		}
 	}
-	_, err = ghJSON("api", "-X", "POST", "repos/"+repo+"/pulls",
-		"-f", "title=ci: pin Go "+want+" instead of `stable`",
-		"-f", "head="+branch, "-f", "base="+base,
-		"-f", "body="+prBody(f, want))
+	// Nothing to say is not a failure, but it must not become an empty pull
+	// request either.
+	if changed == 0 {
+		return nil
+	}
+
+	if out, err := git(dir, "commit", "-aqm", commitMessage(f, want)); err != nil {
+		return fmt.Errorf("commit: %v: %s", err, out)
+	}
+	if out, err := push(dir, branch); err != nil {
+		return fmt.Errorf("gitpush: %v: %s", err, out)
+	}
+	bodyFile, err := osCreateTempFile(prBody(f, want))
+	if err != nil {
+		return err
+	}
+	defer os.Remove(bodyFile)
+	_, err = ghJSON("pr", "create", "--repo", repo, "--base", base, "--head", branch,
+		"--title", "ci: pin Go "+want+" instead of `stable`", "--body-file", bodyFile)
 	return err
 }
 
-func defaultBranch(repo string) (string, string, error) {
-	b, err := ghJSON("api", "repos/"+repo, "--jq", ".default_branch")
-	if err != nil {
-		return "", "", err
-	}
-	base := strings.TrimSpace(string(b))
-	s, err := ghJSON("api", "repos/"+repo+"/git/ref/heads/"+base, "--jq", ".object.sha")
-	if err != nil {
-		return "", "", err
-	}
-	return base, strings.TrimSpace(string(s)), nil
+// git runs git in dir (or anywhere, for a clone) and returns its combined
+// output, which is what makes a failure readable.
+var git = func(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
-func getFileOn(repo, path, ref string) (string, string, error) {
-	b, err := ghJSON("api", "repos/"+repo+"/contents/"+path+"?ref="+ref, "--jq", ".content + \"\\n\" + .sha")
+// push is gitpush, deliberately not git. See open's comment.
+var push = func(dir, branch string) (string, error) {
+	cmd := exec.Command("gitpush", "-u", "origin", branch)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+var osMkdirTemp = os.MkdirTemp
+
+// osCreateTempFile writes body to a temp file and returns its path, because a
+// long markdown body on a command line is mangled and --body-file is not.
+var osCreateTempFile = func(body string) (string, error) {
+	fh, err := os.CreateTemp("", "gopin-body-*.md")
 	if err != nil {
-		return "", "", err
+		return "", err
+	}
+	if _, err := fh.WriteString(body); err != nil {
+		fh.Close()
+		return "", err
+	}
+	return fh.Name(), fh.Close()
+}
+
+// errArchived is returned for a repository GitHub will not accept a push to.
+var errArchived = errors.New("archived, so read-only")
+
+// defaultBranch is the branch a pull request targets and the one to clone,
+// and it also reports an archived repository.
+//
+// Archived is a SKIP and not a failure. The sweep hit go-freedesktop/dbus and
+// spent a clone, an edit and a push to learn
+//
+//	remote: This repository was archived so it is read-only.
+//	fatal: ... The requested URL returned error: 403
+//
+// which reads like something went wrong. Nothing did: a repository nobody can
+// push to is one this tool has no business with, and saying so costs the same
+// single call that was already being made. The lists fed to this tool come
+// from local checkouts, which hold archived repositories like any other.
+//
+// One call for both facts. The ref's sha is no longer fetched: the contents
+// design needed it to create a branch server-side, the git design does not,
+// and that was 258 calls against a REST budget shared with Renovate's walk.
+func defaultBranch(repo string) (string, error) {
+	b, err := ghJSON("api", "repos/"+repo, "--jq", `.default_branch + "\n" + (.archived|tostring)`)
+	if err != nil {
+		return "", err
 	}
 	parts := strings.Split(strings.TrimSpace(string(b)), "\n")
-	if len(parts) < 2 {
-		return "", "", fmt.Errorf("%s: unexpected contents response", path)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("%s: unexpected repository response", repo)
 	}
-	sha := parts[len(parts)-1]
-	dec, err := base64.StdEncoding.DecodeString(strings.Join(parts[:len(parts)-1], ""))
-	if err != nil {
-		return "", "", fmt.Errorf("%s: %w", path, err)
+	if parts[1] == "true" {
+		return "", fmt.Errorf("%s is %w", repo, errArchived)
 	}
-	return string(dec), sha, nil
-}
-
-func putFile(repo, path, branch, sha, body, msg string) error {
-	payload := map[string]string{
-		"message": msg + "\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>",
-		"content": base64.StdEncoding.EncodeToString([]byte(body)),
-		"branch":  branch,
-		"sha":     sha,
-	}
-	j, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp("", "gopin-*.json")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(j); err != nil {
-		tmp.Close()
-		return err
-	}
-	tmp.Close()
-	_, err = ghJSON("api", "-X", "PUT", "repos/"+repo+"/contents/"+path, "--input", tmp.Name())
-	return err
+	return parts[0], nil
 }
 
 // readListFrom is readList's parser, split out so the refusals are testable

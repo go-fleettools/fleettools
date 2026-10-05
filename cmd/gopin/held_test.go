@@ -49,28 +49,24 @@ func TestHeldBackByNamesTheOldestPinThatIsBehindTheTarget(t *testing.T) {
 // golang/go#81000 miscompiles that package there, and golang/go#81147 — the
 // 1.27 backport — is still open.
 func TestOpenHoldsTheGoDirectiveWhenAJobPinsAnOlderVersion(t *testing.T) {
-	const ci = "          go-version: stable\n          go-version: '1.26.4'\n"
-	rec := newRecorder(map[string]string{
-		".github/workflows/ci.yml": ci,
+	r := &fakeRepo{files: map[string]string{
+		".github/workflows/ci.yml": "          go-version: stable\n          go-version: '1.26.4'\n",
 		"go.mod":                   "module x\n\ngo 1.26.4\n",
-	})
-	defer rec.install(t)()
+	}}
+	defer r.install(t)()
 
 	f := finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1, GoMod: "1.26.4", Literals: []string{"1.26.4"}}
 	if err := open("o/r", f, "1.27.1"); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 
-	if got, wrote := rec.puts["go.mod"]; wrote {
+	if got := r.read(t, "go.mod"); !strings.Contains(got, "go 1.26.4") {
 		t.Errorf("go.mod was raised past the 1.26.4 pin, which defeats it: %q", got)
 	}
 
 	// The alias is still pinned: withholding the directive must not turn into
 	// withholding the whole change, or the repository keeps its moving channel.
-	wf, wrote := rec.puts[".github/workflows/ci.yml"]
-	if !wrote {
-		t.Fatal("the workflow was not written at all")
-	}
+	wf := r.read(t, ".github/workflows/ci.yml")
 	if strings.Contains(wf, "stable") {
 		t.Errorf("an alias survived:\n%s", wf)
 	}
