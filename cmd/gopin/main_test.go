@@ -96,6 +96,17 @@ func TestReplacementKeepsTheSurroundingSyntax(t *testing.T) {
 		{"          go-version: oldstable\n", "          go-version: oldstable\n"},
 		// Last line of a file, no trailing newline.
 		{"  go-version: stable", "  go-version: '1.27.1'"},
+		// QUOTED, which is as common in this fleet as the bare form and was
+		// missed entirely until 2026-10-07: a sweep that pinned 489
+		// repositories left six holding the alias, go-compressions/b3sum
+		// among them, on `go-version: 'stable'` in release.yml. The quotes are
+		// consumed, not doubled.
+		{"          go-version: 'stable'\n", "          go-version: '1.27.1'\n"},
+		{"          go-version: \"stable\"\n", "          go-version: '1.27.1'\n"},
+		{"        with: { go-version: 'stable' }\n", "        with: { go-version: '1.27.1' }\n"},
+		// ... and the quoted forms of what must still survive untouched.
+		{"          go-version: 'oldstable'\n", "          go-version: 'oldstable'\n"},
+		{"          go-version: \"stable-1\"\n", "          go-version: \"stable-1\"\n"},
 	} {
 		if got := reStable.ReplaceAllString(tc.in, "${1}'1.27.1'${2}"); got != tc.want {
 			t.Errorf("replace(%q) = %q; want %q", tc.in, got, tc.want)

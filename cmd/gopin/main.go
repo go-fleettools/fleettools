@@ -67,7 +67,16 @@ import (
 // `oldstable` is safe without any of this -- `\s*` cannot consume `old` --
 // but it has a test too, because "safe by construction" is exactly how the
 // first one got through.
-var reStable = regexp.MustCompile(`(?m)(go-version:\s*)stable([^\w.-]|$)`)
+//
+// The quotes are optional and are CONSUMED, not preserved: `go-version:
+// 'stable'` is as common in this fleet as the bare form, and without
+// `['"]?` the pattern misses it silently -- the repository is then reported
+// as "already explicit" and skipped, which is the worst of both outcomes.
+// Measured: after a sweep that pinned 489 repositories, six still held the
+// alias and go-compressions/b3sum was one of them, on the line
+// `go-version: 'stable'` in release.yml. Note that reLiteral, two lines
+// below, has been quote-aware all along.
+var reStable = regexp.MustCompile(`(?m)(go-version:\s*)['"]?stable['"]?([^\w.-]|$)`)
 
 // reLiteral finds a job that already names a version, which this tool leaves
 // alone and reports.
