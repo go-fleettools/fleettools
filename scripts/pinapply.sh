@@ -60,7 +60,11 @@ while IFS= read -r line; do
         p=$d/.github/workflows/$f
         [ -f "$p" ] || continue
         # Both spellings the fleet uses: block mapping and inline flow mapping.
-        perl -0pi -e "s/(go-version:\s*)stable/\${1}'$want'/g" "$p"
+        # ['\"]? and CONSUMED, not preserved: `go-version: 'stable'` is as
+        # common here as the bare form, and gopin had the identical blind spot
+        # until go-fleettools/fleettools#57 -- it reported a repository holding
+        # the quoted form as "already explicit" and skipped it.
+        perl -0pi -e "s/(go-version:\s*)['\"]?stable['\"]?/\${1}'$want'/g" "$p"
         changed=1
     done
     if [ "$raise" = yes ] && [ -f "$d/go.mod" ]; then
