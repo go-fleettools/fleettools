@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out the scanner
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: go-fleettools/fleettools
           ref: main
@@ -61,7 +61,7 @@ jobs:
       # is the harmless half; the same blindness passes a pull request that
       # DELETES every card.
       - name: check out the branch under review
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           path: caller
 
