@@ -49,7 +49,7 @@ func TestInspectFindsBothSpellingsOfTheAlias(t *testing.T) {
 			"        with: { go-version: stable }\n",
 		"go.mod": "module x\n\ngo 1.26.4\n",
 	})()
-	f := inspect("o/r", "1.27.1")
+	f := inspect("o/r", "1.27.1", "")
 	if f.Err != "" {
 		t.Fatalf("err = %q", f.Err)
 	}
@@ -67,7 +67,7 @@ func TestInspectLeavesAnExplicitVersionAloneAndReportsIt(t *testing.T) {
 	defer stubGH(t, map[string]string{
 		".github/workflows/ci.yml": "        with: { go-version: \"1.24.0\" }\n",
 	})()
-	f := inspect("o/r", "1.27.1")
+	f := inspect("o/r", "1.27.1", "")
 	if f.Aliases != 0 {
 		t.Fatalf("aliases = %d; want 0 — a chosen version is not this tool's business", f.Aliases)
 	}
@@ -80,7 +80,7 @@ func TestInspectLeavesAnExplicitVersionAloneAndReportsIt(t *testing.T) {
 // treating absence as failure would drown the real failures.
 func TestInspectIsQuietAboutARepositoryWithNoWorkflows(t *testing.T) {
 	defer stubGH(t, map[string]string{})()
-	f := inspect("o/r", "1.27.1")
+	f := inspect("o/r", "1.27.1", "")
 	if f.Err != "" || f.Aliases != 0 {
 		t.Fatalf("got err=%q aliases=%d; want a quiet zero", f.Err, f.Aliases)
 	}

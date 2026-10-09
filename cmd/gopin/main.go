@@ -82,6 +82,27 @@ var reStable = regexp.MustCompile(`(?m)(go-version:\s*)['"]?stable['"]?([^\w.-]|
 // alone and reports.
 var reLiteral = regexp.MustCompile(`go-version:\s*['"]?(\d+\.\d+(?:\.\d+)?)['"]?`)
 
+// reExplicit matches `go-version:` naming ONE exact version, for -from.
+//
+// ⛔ EXACTNESS IS THE WHOLE SAFETY OF -from. "move anything older" cannot tell
+// a stale pin from a deliberate one, and this fleet has been burned by that:
+// a loong64 pin held back on purpose was removed as an outlier because it was
+// the odd one out. Naming the version to move FROM means a repository held at
+// 1.22 is not even a candidate, and the operator states what they believe is
+// out there rather than the tool guessing.
+// prTitle names the job this pull request actually does. A repository that
+// never said `stable` must not receive a title claiming otherwise.
+func prTitle(f finding, want, from string) string {
+	if f.Aliases == 0 && f.Moves > 0 {
+		return "ci: move the Go pin from " + from + " to " + want
+	}
+	return "ci: pin Go " + want + " instead of `stable`"
+}
+
+func reExplicit(v string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)(go-version:\s*)['"]?` + regexp.QuoteMeta(v) + `['"]?([^\w.-]|$)`)
+}
+
 // reGoDirective is go.mod's own version line.
 // `[ \t]` and not `\s`, and a test says why. `\s` matches a newline, so
 // `\s*$` under `(?m)` ate the file's final newline and the replacement put
@@ -96,6 +117,14 @@ type finding struct {
 	GoMod    string   `json:"gomod,omitempty"`    // the current go directive, "" if none
 	Literals []string `json:"literals,omitempty"` // versions already pinned, left alone
 	Err      string   `json:"error,omitempty"`
+
+	// MoveFiles / Moves are the -from case: workflows naming the exact
+	// version being moved away from. Separate from Files because the two are
+	// different claims — "this repository cannot be reviewed" and "this
+	// repository is on a Go with a known vulnerability" — and they get
+	// different pull requests.
+	MoveFiles []string `json:"movefiles,omitempty"`
+	Moves     int      `json:"moves,omitempty"`
 }
 
 func main() {
@@ -111,6 +140,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("gopin", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	version := fs.String("version", "", "the Go version to pin, e.g. 1.27.1 (required)")
+	from := fs.String("from", "", "also move workflows pinned to EXACTLY this version to -version, e.g. -from 1.27.1 -version 1.27.2 after a Go security release; an exact match, so a repository held back on purpose at some other version is not a candidate")
 	list := fs.String("list", "", "file of org/repo lines, # comments; default: read stdin")
 	apply := fs.Bool("apply", false, "open pull requests; without it this only reports")
 	pause := fs.Duration("pause", 3*time.Second, "wait this long between repositories; GitHub's SECONDARY limit brakes a burst and waiting is the whole remedy")
@@ -127,6 +157,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gopin: %v\n", err)
 		return 2
 	}
+	if *from != "" {
+		fromV, err := parseGoVersion(*from)
+		if err != nil {
+			fmt.Fprintf(stderr, "gopin: -from %v\n", err)
+			return 2
+		}
+		if *from == *version {
+			fmt.Fprintln(stderr, "gopin: -from and -version name the same version, so there is nothing to move")
+			return 2
+		}
+		// ⛔ FORWARD ONLY. The reason to move an explicit pin is a release
+		// that fixes something; moving one BACKWARDS is a different act and
+		// not one to perform across a fleet by accident.
+		if target.olderThan(fromV) {
+			fmt.Fprintf(stderr, "gopin: -version %s is older than -from %s; this moves pins forward, and going back is not a sweep\n", *version, *from)
+			return 2
+		}
+	}
 
 	repos, err := readList(*list)
 	if err != nil {
@@ -142,34 +190,42 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	var changed, skipped, failed, opened, archived int
 	for _, repo := range repos {
-		f := inspect(repo, *version)
+		f := inspect(repo, *version, *from)
 		switch {
 		case f.Err != "":
 			failed++
 			fmt.Fprintf(stdout, "ERROR   %s: %s\n", repo, f.Err)
 			continue
+		case f.Aliases == 0 && f.Moves > 0:
+			// An explicit pin on the version being moved away from. Reported
+			// under its own word, because "ALIAS" would say the opposite of
+			// what is true here: this repository CAN be reviewed, it is
+			// simply on a Go that something is wrong with.
+			changed++
+			fmt.Fprintf(stdout, "REPIN   %s: %d × %s -> %s in %s\n", repo, f.Moves, *from, *version, strings.Join(f.MoveFiles, " "))
 		case f.Aliases == 0:
 			skipped++
 			if len(f.Literals) > 0 {
 				fmt.Fprintf(stdout, "pinned  %s (%s)\n", repo, strings.Join(f.Literals, " "))
 			}
 			continue
+		default:
+			changed++
+			fmt.Fprintf(stdout, "ALIAS   %s: %d in %s", repo, f.Aliases, strings.Join(f.Files, " "))
+			held, isHeld := heldBackBy(f.Literals, target)
+			switch {
+			case olderGoMod(f.GoMod, target) && isHeld:
+				fmt.Fprintf(stdout, " ; go.mod HELD at %s by the %s pin", f.GoMod, held)
+			case olderGoMod(f.GoMod, target):
+				fmt.Fprintf(stdout, " ; go.mod %s -> %s", f.GoMod, *version)
+			}
+			if len(f.Literals) > 0 {
+				fmt.Fprintf(stdout, " ; leaving %s alone", strings.Join(f.Literals, " "))
+			}
+			fmt.Fprintln(stdout)
 		}
-		changed++
-		fmt.Fprintf(stdout, "ALIAS   %s: %d in %s", repo, f.Aliases, strings.Join(f.Files, " "))
-		held, isHeld := heldBackBy(f.Literals, target)
-		switch {
-		case olderGoMod(f.GoMod, target) && isHeld:
-			fmt.Fprintf(stdout, " ; go.mod HELD at %s by the %s pin", f.GoMod, held)
-		case olderGoMod(f.GoMod, target):
-			fmt.Fprintf(stdout, " ; go.mod %s -> %s", f.GoMod, *version)
-		}
-		if len(f.Literals) > 0 {
-			fmt.Fprintf(stdout, " ; leaving %s alone", strings.Join(f.Literals, " "))
-		}
-		fmt.Fprintln(stdout)
 		if *apply {
-			switch err := open(repo, f, *version); {
+			switch err := open(repo, f, *version, *from); {
 			case errors.Is(err, errArchived):
 				archived++
 				fmt.Fprintf(stdout, "        skipped: %v\n", err)
@@ -219,7 +275,7 @@ func readList(path string) ([]string, error) {
 var ghJSON = func(args ...string) ([]byte, error) { return fleet.GH(args...) }
 
 // inspect reads a repository's default branch and says what it needs.
-func inspect(repo, want string) finding {
+func inspect(repo, want, from string) finding {
 	f := finding{Repo: repo}
 	names, err := workflowNames(repo)
 	if err != nil {
@@ -236,6 +292,12 @@ func inspect(repo, want string) finding {
 		if m := reStable.FindAllString(body, -1); len(m) > 0 {
 			f.Files = append(f.Files, n)
 			f.Aliases += len(m)
+		}
+		if from != "" {
+			if m := reExplicit(from).FindAllString(body, -1); len(m) > 0 {
+				f.MoveFiles = append(f.MoveFiles, n)
+				f.Moves += len(m)
+			}
 		}
 		for _, m := range reLiteral.FindAllStringSubmatch(body, -1) {
 			lits[m[1]] = true
@@ -307,7 +369,7 @@ func getFile(repo, path string) (string, error) {
 // of reading a token, refuses a remote URL that carries a credential, and
 // redacts what it prints. A token must never reach a URL, a command line or
 // an environment variable.
-func open(repo string, f finding, want string) error {
+func open(repo string, f finding, want, from string) error {
 	base, err := defaultBranch(repo)
 	if err != nil {
 		return err
@@ -324,7 +386,14 @@ func open(repo string, f finding, want string) error {
 		"--branch", base, "https://github.com/"+repo+".git", dir); err != nil {
 		return fmt.Errorf("clone: %v: %s", err, out)
 	}
+	// The branch and the title say which of the two jobs this is. A pull
+	// request titled "instead of `stable`" against a repository that never
+	// said `stable` is a claim its reviewer can check and find false, and
+	// then nothing else in the body is worth their time either.
 	branch := "go-" + strings.ReplaceAll(want, ".", "") + "-pinned-because-an-alias-cannot-be-reviewed"
+	if f.Aliases == 0 {
+		branch = "go-" + strings.ReplaceAll(want, ".", "") + "-moved-from-" + strings.ReplaceAll(from, ".", "")
+	}
 	if out, err := git(dir, "checkout", "-b", branch); err != nil {
 		return fmt.Errorf("branch: %v: %s", err, out)
 	}
@@ -337,6 +406,25 @@ func open(repo string, f finding, want string) error {
 			return err
 		}
 		next := reStable.ReplaceAllString(string(b), "${1}'"+want+"'${2}")
+		if next == string(b) {
+			continue
+		}
+		if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
+			return err
+		}
+		changed++
+	}
+	// The -from case. A file can appear in BOTH lists — one job saying
+	// `stable` beside another naming the old version is exactly the mixture
+	// that made `stable` worth replacing — so this reads whatever the loop
+	// above may already have written rather than the original.
+	for _, n := range f.MoveFiles {
+		path := filepath.Join(dir, ".github", "workflows", n)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		next := reExplicit(from).ReplaceAllString(string(b), "${1}'"+want+"'${2}")
 		if next == string(b) {
 			continue
 		}
@@ -380,7 +468,7 @@ func open(repo string, f finding, want string) error {
 	}
 	defer os.Remove(bodyFile)
 	_, err = ghJSON("pr", "create", "--repo", repo, "--base", base, "--head", branch,
-		"--title", "ci: pin Go "+want+" instead of `stable`", "--body-file", bodyFile)
+		"--title", prTitle(f, want, from), "--body-file", bodyFile)
 	return err
 }
 
