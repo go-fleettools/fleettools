@@ -188,7 +188,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	var changed, skipped, failed, opened, archived int
+	// ⛔ ONE COUNTER CANNOT CARRY TWO CLAIMS. The totals said "N hold the
+	// alias" off the shared `changed`, so the first -from run reported
+	// "5 hold the alias" about five repositories that held no alias at all —
+	// every line above it saying REPIN. A summary that contradicts its own
+	// detail is worse than no summary, because the summary is what gets
+	// quoted.
+	var changed, aliased, repinned, skipped, failed, opened, archived int
 	for _, repo := range repos {
 		f := inspect(repo, *version, *from)
 		switch {
@@ -202,6 +208,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			// what is true here: this repository CAN be reviewed, it is
 			// simply on a Go that something is wrong with.
 			changed++
+			repinned++
 			fmt.Fprintf(stdout, "REPIN   %s: %d × %s -> %s in %s\n", repo, f.Moves, *from, *version, strings.Join(f.MoveFiles, " "))
 		case f.Aliases == 0:
 			skipped++
@@ -211,6 +218,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			continue
 		default:
 			changed++
+			aliased++
 			fmt.Fprintf(stdout, "ALIAS   %s: %d in %s", repo, f.Aliases, strings.Join(f.Files, " "))
 			held, isHeld := heldBackBy(f.Literals, target)
 			switch {
@@ -242,7 +250,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			break
 		}
 	}
-	fmt.Fprintf(stdout, "\n%d read · %d hold the alias · %d already explicit · %d unreadable", len(repos), changed, skipped, failed)
+	fmt.Fprintf(stdout, "\n%d read · %d hold the alias · %d already explicit · %d unreadable", len(repos), aliased, skipped, failed)
+	if repinned > 0 {
+		fmt.Fprintf(stdout, " · %d to move from %s", repinned, *from)
+	}
 	if *apply {
 		fmt.Fprintf(stdout, " · %d pull request(s) opened", opened)
 		if archived > 0 {
