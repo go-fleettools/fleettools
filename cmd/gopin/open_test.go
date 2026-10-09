@@ -191,7 +191,7 @@ func TestOpenReportsAFailedClone(t *testing.T) {
 }
 
 func TestCommitMessageCarriesTheAttributionAndTheReason(t *testing.T) {
-	m := commitMessage(finding{GoMod: "1.26.4"}, "1.27.1")
+	m := commitMessage(finding{GoMod: "1.26.4"}, "1.27.1", "")
 	for _, want := range []string{"Co-Authored-By: Claude Opus 5", "golang/go#81000", "go1.27.1", "1.26.4"} {
 		if !strings.Contains(m, want) {
 			t.Errorf("commit message lacks %q", want)

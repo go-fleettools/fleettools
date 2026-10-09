@@ -467,13 +467,13 @@ func open(repo string, f finding, want, from string) error {
 		return nil
 	}
 
-	if out, err := git(dir, "commit", "-aqm", commitMessage(f, want)); err != nil {
+	if out, err := git(dir, "commit", "-aqm", commitMessage(f, want, from)); err != nil {
 		return fmt.Errorf("commit: %v: %s", err, out)
 	}
 	if out, err := push(dir, branch); err != nil {
 		return fmt.Errorf("gitpush: %v: %s", err, out)
 	}
-	bodyFile, err := osCreateTempFile(prBody(f, want))
+	bodyFile, err := osCreateTempFile(prBody(f, want, from))
 	if err != nil {
 		return err
 	}
