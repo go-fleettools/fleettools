@@ -56,7 +56,7 @@ func TestOpenHoldsTheGoDirectiveWhenAJobPinsAnOlderVersion(t *testing.T) {
 	defer r.install(t)()
 
 	f := finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1, GoMod: "1.26.4", Literals: []string{"1.26.4"}}
-	if err := open("o/r", f, "1.27.1"); err != nil {
+	if err := open("o/r", f, "1.27.1", ""); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 

@@ -104,7 +104,7 @@ func TestOpenEditsTheWorkflowAndTheGoDirective(t *testing.T) {
 		"go.mod":                   "module x\n\ngo 1.26.4\n",
 	}}
 	defer r.install(t)()
-	if err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 2, GoMod: "1.26.4"}, "1.27.1"); err != nil {
+	if err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 2, GoMod: "1.26.4"}, "1.27.1", ""); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	wf := r.read(t, ".github/workflows/ci.yml")
@@ -128,7 +128,7 @@ func TestOpenNeverAsksGitToPush(t *testing.T) {
 		".github/workflows/ci.yml": "          go-version: stable\n",
 	}}
 	defer r.install(t)()
-	if err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1}, "1.27.1"); err != nil {
+	if err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1}, "1.27.1", ""); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	for _, c := range r.gitLog {
@@ -153,7 +153,7 @@ func TestOpenLeavesAGoModThatIsAlreadyCurrent(t *testing.T) {
 		"go.mod":                   "module x\n\ngo 1.28.0\n",
 	}}
 	defer r.install(t)()
-	if err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1, GoMod: "1.28.0"}, "1.27.1"); err != nil {
+	if err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1, GoMod: "1.28.0"}, "1.27.1", ""); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if got := r.read(t, "go.mod"); !strings.Contains(got, "go 1.28.0") {
@@ -168,7 +168,7 @@ func TestOpenOpensNothingWhenThereIsNothingToChange(t *testing.T) {
 		".github/workflows/ci.yml": "          go-version: '1.27.1'\n",
 	}}
 	defer r.install(t)()
-	if err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1}, "1.27.1"); err != nil {
+	if err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1}, "1.27.1", ""); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	if r.pushed != "" || r.prArgs != "" {
@@ -184,7 +184,7 @@ func TestOpenOpensNothingWhenThereIsNothingToChange(t *testing.T) {
 func TestOpenReportsAFailedClone(t *testing.T) {
 	r := &fakeRepo{noClone: true, files: map[string]string{}}
 	defer r.install(t)()
-	err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1}, "1.27.1")
+	err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1}, "1.27.1", "")
 	if err == nil || !strings.Contains(err.Error(), "clone") {
 		t.Fatalf("open: %v; want the clone named", err)
 	}
@@ -207,7 +207,7 @@ func TestOpenSkipsAnArchivedRepositoryBeforeCloning(t *testing.T) {
 		".github/workflows/ci.yml": "          go-version: stable\n",
 	}}
 	defer r.install(t)()
-	err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1}, "1.27.1")
+	err := open("o/r", finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1}, "1.27.1", "")
 	if !errors.Is(err, errArchived) {
 		t.Fatalf("open = %v; want errArchived", err)
 	}
