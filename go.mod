@@ -15,3 +15,10 @@ go 1.27.1
 // Deleting the git tag would change nothing. So the honest remedy is the one Go
 // provides for exactly this: say so, in the module, where `go get` will read it.
 retract v0.1.0 // tracked 8.4 MB of compiled executables; use v0.1.1 or later
+
+require golang.org/x/tools v0.51.0
+
+require (
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+)
