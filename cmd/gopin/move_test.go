@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -161,4 +163,50 @@ func TestFromRefusesWhatItCannotMean(t *testing.T) {
 			t.Errorf("%s: refused in silence", name)
 		}
 	}
+}
+
+// ⛔ A SUMMARY MUST NOT CONTRADICT ITS OWN DETAIL. The totals were printed
+// off one shared counter, so the first -from run reported
+//
+//	REPIN   go-pkgx/bottle: 8 × 1.27.1 -> 1.27.2 in ci.yml
+//	…
+//	5 read · 5 hold the alias · 0 already explicit · 0 unreadable
+//
+// about five repositories that held no alias at all. The summary is the line
+// that gets quoted, so a false one travels further than the detail above it.
+func TestTheSummaryDoesNotCallARepinAnAlias(t *testing.T) {
+	defer stubGH(t, map[string]string{
+		".github/workflows/ci.yml": "          go-version: '1.27.1'\n",
+	})()
+	t.Setenv("GOPIN_LIST_UNUSED", "")
+
+	var out, errb strings.Builder
+	code := run([]string{"-version", "1.27.2", "-from", "1.27.1", "-list", writeList(t, "o/r")}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errb.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "REPIN") {
+		t.Fatalf("the repin was not detected at all, so the summary proves nothing:\n%s", got)
+	}
+	if strings.Contains(got, "1 hold the alias") {
+		t.Errorf("a repin was counted as holding the alias:\n%s", got)
+	}
+	if !strings.Contains(got, "0 hold the alias") {
+		t.Errorf("the alias count is not zero where there is no alias:\n%s", got)
+	}
+	if !strings.Contains(got, "1 to move from 1.27.1") {
+		t.Errorf("the summary does not count the move:\n%s", got)
+	}
+}
+
+// writeList puts repository names in a file, because -list reads one and
+// stdin is not available to a test running beside others.
+func writeList(t *testing.T, repos ...string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "list.txt")
+	if err := os.WriteFile(p, []byte(strings.Join(repos, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
