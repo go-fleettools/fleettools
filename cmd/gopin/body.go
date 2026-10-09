@@ -8,9 +8,62 @@ import (
 
 var osWriteFile = os.WriteFile
 
+// ⛔ A MESSAGE THAT APPEARS IN THREE PLACES MUST BE CORRECTED IN THREE.
+//
+// The -from case shipped with a corrected pull-request TITLE and these two
+// untouched. ghmerge squash-merges the COMMIT, so five go-pkgx repositories
+// now carry "ci: pin Go 1.27.2 instead of `stable`" in their permanent
+// history, about workflows that never said `stable` — while the pull request
+// above them said the right thing.
+//
+// Fixing one surface of three is worse than fixing none: the inconsistency
+// looks deliberate, and a reader who checks the commit against the title
+// cannot tell which to believe. The test now reads all three.
+func moveBody(f finding, want, from string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "This repository pins Go **%s** in `%s` — **%d** occurrence(s). "+
+		"This moves them to **%s**.\n\n", from, strings.Join(f.MoveFiles, "`, `"), f.Moves, want)
+	b.WriteString("## Why move a pin that is already explicit\n\n")
+	b.WriteString("Pinning was the right thing: an alias has no version to review. " +
+		"But a pinned fleet cannot move, and a Go patch release is usually a " +
+		"**security** release — the standard library is compiled into every binary, " +
+		"so the toolchain that built it is the toolchain it carries.\n\n")
+	b.WriteString("Check what this one fixes with `govulncheck ./...` against both versions, " +
+		"rather than taking the release notes' word for whether it reaches this code.\n\n")
+	b.WriteString("## It moves an exact version, and only that one\n\n")
+	fmt.Fprintf(&b, "`-from %s` names the version to move. \"Anything older\" cannot tell a stale "+
+		"pin from a deliberate one, so a job held back on purpose at some other version is "+
+		"not a candidate here and is left exactly as it is.\n\n", from)
+	b.WriteString("`go.mod` is **not** raised. The directive is a minimum for consumers; " +
+		"the workflow pin is what builds the artefacts.\n\n")
+	b.WriteString("🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
+	return b.String()
+}
+
+// moveCommitMessage is moveBody's counterpart, and the one that outlives it.
+func moveCommitMessage(f finding, want, from string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "ci: move the Go pin from %s to %s\n\n", from, want)
+	fmt.Fprintf(&b, "%d occurrence(s) in %s.\n\n", f.Moves, strings.Join(f.MoveFiles, ", "))
+	b.WriteString("Pinning was right: an alias has no version to review. But a pinned\n" +
+		"fleet cannot move, and a Go patch release is usually a SECURITY\n" +
+		"release -- the standard library is compiled into every binary, so the\n" +
+		"toolchain that built it is the toolchain it carries.\n\n")
+	fmt.Fprintf(&b, "An EXACT move: -from %s names the version to change, so a job held\n"+
+		"back on purpose at some other version is not a candidate and is left\n"+
+		"as it is.\n\n", from)
+	b.WriteString("go.mod is not raised: the directive is a minimum for consumers, and\n" +
+		"the workflow pin is what builds the artefacts.\n\n")
+	b.WriteString("Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>\n")
+	return b.String()
+}
+
 // prBody explains the change in the pull request, with this repository's own
 // numbers rather than a generic paragraph.
-func prBody(f finding, want string) string {
+func prBody(f finding, want, from string) string {
+	if f.Aliases == 0 && f.Moves > 0 {
+		return moveBody(f, want, from)
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "`go-version: stable` is a channel alias, not a version. "+
 		"This repository has **%d** of them, in `%s`.\n\n", f.Aliases, strings.Join(f.Files, "`, `"))
@@ -77,7 +130,10 @@ func writeFile(path, body string) error { return osWriteFile(path, []byte(body),
 
 // commitMessage is what lands in the repository's own history, which outlives
 // the pull request description.
-func commitMessage(f finding, want string) string {
+func commitMessage(f finding, want, from string) string {
+	if f.Aliases == 0 && f.Moves > 0 {
+		return moveCommitMessage(f, want, from)
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "ci: pin Go %s instead of `stable`\n\n", want)
 	b.WriteString("`stable` is a channel alias, not a version, and that is the\n" +

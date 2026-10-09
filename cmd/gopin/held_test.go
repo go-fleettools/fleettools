@@ -79,7 +79,7 @@ func TestOpenHoldsTheGoDirectiveWhenAJobPinsAnOlderVersion(t *testing.T) {
 // that raised it: the next reader cannot see a decision nobody wrote down.
 func TestPRBodySaysWhyTheDirectiveStayed(t *testing.T) {
 	f := finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1, GoMod: "1.26.4", Literals: []string{"1.26.4"}}
-	body := prBody(f, "1.27.1")
+	body := prBody(f, "1.27.1", "")
 	for _, want := range []string{
 		"deliberately NOT raised",
 		"GOTOOLCHAIN=go1.26.4+auto",
@@ -97,7 +97,7 @@ func TestPRBodySaysWhyTheDirectiveStayed(t *testing.T) {
 // Without a pin behind the target, nothing changes: the raise is the normal case.
 func TestPRBodyStillPromisesTheRaiseWithoutAnOlderPin(t *testing.T) {
 	f := finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 1, GoMod: "1.26.4"}
-	body := prBody(f, "1.27.1")
+	body := prBody(f, "1.27.1", "")
 	if !strings.Contains(body, "Raised from `go 1.26.4` to `go 1.27.1`") {
 		t.Errorf("the ordinary raise is no longer announced:\n%s", body)
 	}

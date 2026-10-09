@@ -210,3 +210,46 @@ func writeList(t *testing.T, repos ...string) string {
 	}
 	return p
 }
+
+// ⛔⛔ ALL THREE SURFACES, because fixing one of three is worse than fixing
+// none. The first version of -from corrected the pull-request TITLE and left
+// the commit message and the body telling the alias story. ghmerge
+// squash-merges the COMMIT, so five go-pkgx repositories now carry
+//
+//	ci: pin Go 1.27.2 instead of `stable` (#62)
+//
+// in their permanent history, about workflows that never said `stable`, under
+// a pull request whose title said the right thing. A reader checking one
+// against the other cannot tell which to believe.
+//
+// This test exists because the earlier one read prTitle ALONE and was green
+// the whole time.
+func TestEverySurfaceNamesTheJobItActuallyDoes(t *testing.T) {
+	f := finding{Repo: "o/r", MoveFiles: []string{"ci.yml"}, Moves: 3}
+	for name, got := range map[string]string{
+		"title":  prTitle(f, "1.27.2", "1.27.1"),
+		"commit": commitMessage(f, "1.27.2", "1.27.1"),
+		"body":   prBody(f, "1.27.2", "1.27.1"),
+	} {
+		if strings.Contains(got, "instead of `stable`") {
+			t.Errorf("the %s claims the alias job:\n%s", name, got)
+		}
+		for _, want := range []string{"1.27.1", "1.27.2"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("the %s does not name %s:\n%s", name, want, got)
+			}
+		}
+	}
+	// AND THE ALIAS CASE STILL SAYS WHAT IT ALWAYS DID: a guard that made
+	// every surface talk about moving would break the original job silently.
+	alias := finding{Repo: "o/r", Files: []string{"ci.yml"}, Aliases: 2}
+	for name, got := range map[string]string{
+		"title":  prTitle(alias, "1.27.2", ""),
+		"commit": commitMessage(alias, "1.27.2", ""),
+		"body":   prBody(alias, "1.27.2", ""),
+	} {
+		if !strings.Contains(got, "stable") {
+			t.Errorf("the alias %s lost its subject:\n%s", name, got)
+		}
+	}
+}

@@ -140,7 +140,7 @@ func TestReadListRejectsSomethingThatIsNotOrgRepo(t *testing.T) {
 }
 
 func TestPrBodyCarriesThisRepositorysOwnNumbers(t *testing.T) {
-	b := prBody(finding{Aliases: 3, Files: []string{"ci.yml"}, GoMod: "1.26.4", Literals: []string{"1.24.0"}}, "1.27.1")
+	b := prBody(finding{Aliases: 3, Files: []string{"ci.yml"}, GoMod: "1.26.4", Literals: []string{"1.24.0"}}, "1.27.1", "")
 	for _, want := range []string{"**3**", "`ci.yml`", "go 1.26.4", "go 1.27.1", "1.24.0", "golang/go#81147"} {
 		if !strings.Contains(b, want) {
 			t.Errorf("body does not mention %q", want)
