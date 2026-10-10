@@ -17,6 +17,7 @@ go 1.27.1
 retract v0.1.0 // tracked 8.4 MB of compiled executables; use v0.1.1 or later
 
 require (
+	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/mod v0.41.0
 	golang.org/x/tools v0.51.0
 )
