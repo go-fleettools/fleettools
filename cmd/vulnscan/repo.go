@@ -43,9 +43,50 @@ func clone(ctx context.Context, run runner, repo, dir string) error {
 	return nil
 }
 
-// skipDir is a directory no module of the repository's own lives under.
+// skipDir is a directory no module of the repository's own lives under. The go
+// command itself ignores a directory whose name starts with "_" or ".", so a
+// go.mod there is a snapshot nobody builds -- cloud-boot/tamago-uefi keeps one
+// as `_ufs_at_head`, whose replace has no target, and scanning it made the
+// repository UNREAD.
 func skipDir(name string) bool {
-	return name == ".git" || name == "node_modules"
+	return name == "node_modules" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
+}
+
+// hasGoCode reports whether a module holds a non-test .go file of its own --
+// outside nested modules, testdata and ignored directories.
+//
+// ⛔ A go.mod IS NOT GO CODE. Hugo sites declare their theme as a Go module:
+// go-fft/docs, go-pdfkit/docs and pocketdesk/docs each have a go.mod and not
+// one .go file, and govulncheck answers "no packages matched" (exit 2). That is
+// neither a finding nor a failure to read, so such a module is not scanned, and
+// a repository made only of them is NO-GO. A module that DOES hold Go files
+// and still matches nothing (every file constrained to another GOOS) is
+// scanned, and stays UNREAD.
+func hasGoCode(modDir string) bool {
+	found := false
+	filepath.WalkDir(modDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || found {
+			return filepath.SkipAll
+		}
+		if d.IsDir() {
+			if p == modDir {
+				return nil
+			}
+			if skipDir(d.Name()) || d.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			if _, err := os.Stat(filepath.Join(p, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".go") && !strings.HasSuffix(d.Name(), "_test.go") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // fixtureDir reports whether a module directory sits under testdata or vendor,

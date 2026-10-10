@@ -372,12 +372,23 @@ func scanRepo(ctx context.Context, exe runner, cfg config, repo, jobDir string) 
 		res.Status, res.Err = Unread, "listing modules: "+err.Error()
 		return res
 	}
+	var withCode []string
+	for _, m := range mods {
+		if hasGoCode(filepath.Join(repoDir, m)) {
+			withCode = append(withCode, m)
+		} else {
+			res.Notes = append(res.Notes, m+": go.mod without Go code, not scanned")
+		}
+	}
+	mods = withCode
 	if len(mods) == 0 {
 		res.Status = NoGo
 		return res
 	}
 	cctx, cancel = context.WithTimeout(ctx, cfg.timeout)
-	res.Siblings, res.Notes = siblings(cctx, exe, jobDir, repo, repoDir, mods)
+	var problems []string
+	res.Siblings, problems = siblings(cctx, exe, jobDir, repo, repoDir, mods)
+	res.Notes = append(res.Notes, problems...)
 	cancel()
 
 	wantGo := cfg.goTool

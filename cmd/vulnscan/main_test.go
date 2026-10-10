@@ -56,10 +56,19 @@ func (f *fake) run(ctx context.Context, dir string, env []string, name string, a
 		if !ok || files == nil {
 			return nil, []byte("remote: Repository not found.\nfatal: repository '" + url + "' not found\n"), errors.New("exit status 128")
 		}
+		_, noCode := files["!nocode"]
 		for p, body := range files {
+			if p == "!nocode" {
+				continue
+			}
 			full := filepath.Join(dest, p)
 			os.MkdirAll(filepath.Dir(full), 0o755)
 			os.WriteFile(full, []byte(body), 0o644)
+			// Every module gets a Go file unless the repository says it has
+			// none: a go.mod alone is not Go code (see hasGoCode).
+			if filepath.Base(p) == "go.mod" && !noCode {
+				os.WriteFile(filepath.Join(filepath.Dir(full), "x.go"), []byte("package x\n"), 0o644)
+			}
 		}
 		os.MkdirAll(dest, 0o755)
 		return nil, nil, nil
@@ -444,5 +453,34 @@ func TestCIGoVersionsAreRecorded(t *testing.T) {
 	_, rep, _ := sweep(t, f, "acme/a\n")
 	if got := strings.Join(rep.Repos[0].CIGo, " "); got != "1.27.1 file:go.mod" {
 		t.Errorf("ci_go = %q", got)
+	}
+}
+
+// TestAGoModWithoutGoCodeIsNotScanned: a Hugo site declares its theme as a Go
+// module, and govulncheck answers "no packages matched" -- neither a finding
+// nor a failure to read. Four repositories were UNREAD for that in the first
+// sweep. A directory the go command ignores ("_", ".") is not scanned either.
+func TestAGoModWithoutGoCodeIsNotScanned(t *testing.T) {
+	f := &fake{repos: map[string]map[string]string{
+		"acme/docs":  {"go.mod": gomod, "content/index.md": "# hi", "!nocode": ""},
+		"acme/tests": {"go.mod": gomod, "a_test.go": "package a\n", "!nocode": ""},
+		"acme/app":   {"go.mod": gomod, "_snapshot/go.mod": gomod + "\nreplace example.com/i => ../interface\n", ".hidden/go.mod": gomod},
+	}}
+	_, rep, _ := sweep(t, f, "acme/docs\nacme/tests\nacme/app\n")
+	got := byRepo(rep)
+	if got["acme/docs"].Status != NoGo || got["acme/tests"].Status != NoGo {
+		t.Errorf("docs %s, tests-only %s; want NO-GO for both", got["acme/docs"].Status, got["acme/tests"].Status)
+	}
+	if !strings.Contains(strings.Join(got["acme/docs"].Notes, " "), "go.mod without Go code") {
+		t.Errorf("the skipped module was not named: %v", got["acme/docs"].Notes)
+	}
+	app := got["acme/app"]
+	if app.Status != Clean || len(app.Modules) != 1 || app.Modules[0].Dir != "." {
+		t.Errorf("acme/app: %s, modules %+v; want only the root scanned", app.Status, app.Modules)
+	}
+	for _, c := range f.clones {
+		if c == "acme/interface" {
+			t.Errorf("a sibling was cloned for a module the go command ignores")
+		}
 	}
 }
