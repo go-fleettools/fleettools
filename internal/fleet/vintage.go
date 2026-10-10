@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"runtime/debug"
+	"strings"
+
+	"golang.org/x/mod/module"
 )
 
 // Repository is where these tools live. The staleness check below asks GitHub
@@ -13,13 +16,24 @@ const Repository = "go-fleettools/fleettools"
 
 // Vintage is what a running binary can say about its own provenance.
 //
-// It comes from the VCS stamps the Go toolchain embeds, NOT from the module
-// pseudo-version. Both carry a commit, but only the stamps carry whether the
-// tree was clean, and a reading taken from a modified tree is not one anybody
-// can reproduce.
+// It comes from the VCS stamps the Go toolchain embeds when they are there,
+// NOT from the module version: a checkout build may carry both, and only the
+// stamps say whether that tree was clean -- a reading taken from a modified
+// tree is not one anybody can reproduce. The module version is used only when
+// there are no stamps at all, which is a module-mode build (see Module), whose
+// tree is the published zip and cannot have been modified.
 type Vintage struct {
 	Revision string // full commit sha, empty when the binary does not say
 	Modified bool   // the working tree had uncommitted changes
+
+	// Module is the main module's version when the binary was built in
+	// module mode -- `go install github.com/go-fleettools/fleettools/cmd/x@v0.4.0`
+	// -- and so carries no VCS stamp at all. Such a build is made from the
+	// module zip the proxy serves and sum.golang.org vouches for, so it is
+	// clean by construction, and its version (a tag, or a pseudo-version
+	// ending in a commit) is enough to compare with the default branch.
+	// Empty for a checkout build, which says "(devel)" or carries stamps.
+	Module string
 }
 
 // BuildVintage reads the stamps out of the running binary.
@@ -28,7 +42,30 @@ func BuildVintage() Vintage {
 	if !ok {
 		return Vintage{}
 	}
-	return vintageFrom(info.Settings)
+	v := vintageFrom(info.Settings)
+	v.Module = moduleVersion(info.Main.Version)
+	return v
+}
+
+// moduleVersion keeps a version a module-mode build records, and drops what a
+// checkout build says instead: "(devel)", or nothing. Split out for the same
+// reason as vintageFrom: a `go test` binary always says "(devel)".
+func moduleVersion(m string) string {
+	if m == "" || m == "(devel)" {
+		return ""
+	}
+	return m
+}
+
+// moduleRef is what GitHub's compare endpoint accepts for a module version:
+// the commit of a pseudo-version, the tag itself otherwise.
+func moduleRef(version string) string {
+	if module.IsPseudoVersion(version) {
+		if rev, err := module.PseudoVersionRev(version); err == nil {
+			return rev
+		}
+	}
+	return strings.TrimSuffix(version, "+incompatible")
 }
 
 // vintageFrom is split out because a `go test` binary carries NO vcs stamps at
@@ -95,15 +132,27 @@ func WarnIfStale(w io.Writer) { warnStale(w, BuildVintage(), compareWithHead) }
 // happens to be clean -- and it is a test for the modified-tree branch that
 // would have been the first casualty.
 func warnStale(w io.Writer, v Vintage, compare func(string) (comparison, error)) {
+	// What the binary was built from, and how to rebuild it from the head.
+	ref, name := v.Revision, short(v.Revision)
+	rebuild := "GOWORK=off GOBIN=~/.local/bin go install ./cmd/..."
 	switch {
+	case v.Revision == "" && v.Module != "":
+		// ⛔ This branch said "carries no VCS stamp, so whether it is current
+		// cannot be told" for every binary installed the way Go installs
+		// tools -- `go install …@v0.4.0` -- although its own build info names
+		// the version. A note that fires on the canonical install teaches
+		// people to read past it, which is the failure this function exists
+		// to refuse.
+		ref, name = moduleRef(v.Module), v.Module
+		rebuild = "GOBIN=~/.local/bin go install github.com/" + Repository + "/cmd/...@latest"
 	case v.Revision == "":
-		fmt.Fprintln(w, "note: this binary carries no VCS stamp, so whether it is current cannot be told (built with `go run`, or from outside a checkout).")
+		fmt.Fprintln(w, "note: this binary carries no VCS stamp and no module version, so whether it is current cannot be told (built with `go run`, or from outside a checkout).")
 		return
 	case v.Modified:
 		fmt.Fprintf(w, "note: built from a MODIFIED tree at %s -- this reading is not reproducible from any commit.\n", short(v.Revision))
 		return
 	}
-	c, err := compare(v.Revision)
+	c, err := compare(ref)
 	if err != nil {
 		fmt.Fprintf(w, "note: could not tell whether this binary is current (%s).\n", err)
 		return
@@ -116,14 +165,14 @@ func warnStale(w io.Writer, v Vintage, compare func(string) (comparison, error))
 	case "identical":
 		return
 	case "ahead":
-		fmt.Fprintf(w, "note: STALE -- %s is %d commit(s) behind %s. Those commits may change what this pass reports. Rebuild: GOWORK=off GOBIN=~/.local/bin go install ./cmd/...\n",
-			short(v.Revision), c.AheadBy, Repository)
+		fmt.Fprintf(w, "note: STALE -- %s is %d commit(s) behind %s. Those commits may change what this pass reports. Rebuild: %s\n",
+			name, c.AheadBy, Repository, rebuild)
 	case "behind":
 		fmt.Fprintf(w, "note: built from %s, which is %d commit(s) AHEAD of %s -- unmerged work, not a stale binary.\n",
-			short(v.Revision), c.BehindBy, Repository)
+			name, c.BehindBy, Repository)
 	default:
 		fmt.Fprintf(w, "note: built from %s, which has DIVERGED from %s: %d commit(s) it lacks, %d it carries alone (not on the default branch).\n",
-			short(v.Revision), Repository, c.AheadBy, c.BehindBy)
+			name, Repository, c.AheadBy, c.BehindBy)
 	}
 }
 
