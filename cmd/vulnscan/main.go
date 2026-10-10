@@ -501,6 +501,9 @@ func line(r result) string {
 	case Clean:
 		return fmt.Sprintf("%-6s %-50s 0 called (%d imported only, %d required only)", r.Status, r.Repo, r.Imported, r.Required)
 	case NoGo:
+		if len(r.Notes) > 0 {
+			return fmt.Sprintf("%-6s %-50s no Go code (%s)", r.Status, r.Repo, strings.Join(r.Notes, "; "))
+		}
 		return fmt.Sprintf("%-6s %-50s no go.mod", r.Status, r.Repo)
 	}
 	return fmt.Sprintf("%-6s %-50s could not scan: %s", r.Status, r.Repo, firstLine(r.Err))
