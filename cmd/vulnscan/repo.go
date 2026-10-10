@@ -119,24 +119,27 @@ func localReplaces(gomod string) []string {
 	return out
 }
 
-// siblings clones every repository of the same organisation that a module's
-// `replace => ../X` reaches, and the ones THOSE reach in turn.
+// siblings clones every repository that a module's `replace => ../X` reaches,
+// and the ones THOSE reach in turn.
 //
 // ⛔ WITHOUT THIS THE SCAN IS UNREAD, NOT SMALLER. A replace whose directory is
 // missing stops `go list` cold -- fixtures/loadfail.stderr is that failure --
 // so a repository developed beside its siblings could never be scanned alone.
 //
-// orgDir is the directory the repository was cloned into (…/org), so a target
-// that leaves the clone lands in orgDir/X, which is where X is cloned. A target
-// that leaves orgDir as well names another organisation and is reported, not
+// Clones are laid out as root/org/repo, the layout these replaces are written
+// against: ../X from a repository's root is root/org/X, a sibling in the same
+// organisation, and ../../other-org/X is root/other-org/X. The first real run
+// met the second kind in its first fifty repositories
+// (cloud-boot/tamago-uefi -> go-filesystems/interface), so it is cloned too. A
+// target that leaves root entirely, or stops at root/org, is reported, not
 // guessed at.
-func siblings(ctx context.Context, run runner, org, orgDir, repoDir string, mods []string) (cloned, problems []string) {
+func siblings(ctx context.Context, run runner, root, repo, repoDir string, mods []string) (cloned, problems []string) {
 	var queue []string
 	for _, m := range mods {
 		queue = append(queue, filepath.Join(repoDir, m))
 	}
 	seenDir := map[string]bool{}
-	have := map[string]bool{filepath.Base(repoDir): true}
+	have := map[string]bool{repo: true}
 	for len(queue) > 0 {
 		dir := queue[0]
 		queue = queue[1:]
@@ -146,19 +149,20 @@ func siblings(ctx context.Context, run runner, org, orgDir, repoDir string, mods
 		seenDir[dir] = true
 		for _, target := range localReplaces(filepath.Join(dir, "go.mod")) {
 			abs := filepath.Clean(filepath.Join(dir, target))
-			rel, err := filepath.Rel(orgDir, abs)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				problems = append(problems, fmt.Sprintf("replace %s leaves the organisation", target))
+			rel, err := filepath.Rel(root, abs)
+			parts := strings.Split(filepath.ToSlash(rel), "/")
+			if err != nil || parts[0] == ".." || len(parts) < 2 {
+				problems = append(problems, fmt.Sprintf("replace %s points outside any org/repo", target))
 				continue
 			}
-			name := strings.Split(filepath.ToSlash(rel), "/")[0]
+			name := parts[0] + "/" + parts[1]
 			if !have[name] {
 				have[name] = true
-				if err := clone(ctx, run, org+"/"+name, filepath.Join(orgDir, name)); err != nil {
+				if err := clone(ctx, run, name, filepath.Join(root, parts[0], parts[1])); err != nil {
 					problems = append(problems, "sibling "+err.Error())
 					continue
 				}
-				cloned = append(cloned, org+"/"+name)
+				cloned = append(cloned, name)
 			}
 			if _, err := os.Stat(filepath.Join(abs, "go.mod")); err == nil {
 				queue = append(queue, abs)

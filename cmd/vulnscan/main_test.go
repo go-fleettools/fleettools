@@ -92,7 +92,7 @@ func TestTheScratchPathIsDroppedFromReasons(t *testing.T) {
 			[]byte("{DIR}/cmd/x/main.go:40:15: undefined: webview.New\n"), errors.New("exit status 1")}},
 	}
 	_, rep, _ := sweep(t, f, "acme/app\n")
-	if got := rep.Repos[0].Err; !strings.Contains(got, ": app/cmd/x/main.go:40:15: undefined: webview.New") || strings.Contains(got, "/work/") {
+	if got := rep.Repos[0].Err; !strings.Contains(got, ": acme/app/cmd/x/main.go:40:15: undefined: webview.New") || strings.Contains(got, "/work/") {
 		t.Errorf("reason = %q", got)
 	}
 }
@@ -311,12 +311,14 @@ func TestEveryModuleIsScannedButNotFixtures(t *testing.T) {
 // the repository is UNREAD -- for a reason that is the sweep's, not its own.
 func TestASiblingNamedByReplaceIsCloned(t *testing.T) {
 	f := &fake{repos: map[string]map[string]string{
-		"acme/app":  {"go.mod": gomod + "\nreplace example.com/lib => ../lib\n", "sub/go.mod": gomod + "\nreplace example.com/x => ../../lib/x\n"},
-		"acme/lib":  {"go.mod": gomod + "\nreplace example.com/deep => ../deep\n", "x/go.mod": gomod},
-		"acme/deep": {"go.mod": gomod},
-		"acme/out":  {"go.mod": gomod + "\nreplace example.com/o => ../../other/thing\n"},
+		"acme/app":    {"go.mod": gomod + "\nreplace example.com/lib => ../lib\n", "sub/go.mod": gomod + "\nreplace example.com/x => ../../lib/x\n"},
+		"acme/lib":    {"go.mod": gomod + "\nreplace example.com/deep => ../deep\n", "x/go.mod": gomod},
+		"acme/deep":   {"go.mod": gomod},
+		"acme/cross":  {"a/b/go.mod": gomod + "\nreplace example.com/o => ../../../../other/thing\n"},
+		"other/thing": {"go.mod": gomod},
+		"acme/out":    {"go.mod": gomod + "\nreplace example.com/o => ../../../nowhere\nreplace example.com/p => ../..\n"},
 	}}
-	_, rep, _ := sweep(t, f, "acme/app\nacme/out\n")
+	_, rep, _ := sweep(t, f, "acme/app\nacme/cross\nacme/out\n")
 	got := byRepo(rep)
 	if s := strings.Join(got["acme/app"].Siblings, " "); s != "acme/deep acme/lib" {
 		t.Errorf("siblings cloned: %q, want lib and, through it, deep", s)
@@ -330,8 +332,13 @@ func TestASiblingNamedByReplaceIsCloned(t *testing.T) {
 	if n != 1 {
 		t.Errorf("acme/lib cloned %d times for one repository, want 1", n)
 	}
-	if notes := strings.Join(got["acme/out"].Notes, " "); !strings.Contains(notes, "leaves the organisation") {
-		t.Errorf("a replace outside the organisation was not reported: %q", notes)
+	// ../../other-org/X is the same layout one level up: cloud-boot/tamago-uefi
+	// replaces go-filesystems/interface that way.
+	if s := strings.Join(got["acme/cross"].Siblings, " "); s != "other/thing" {
+		t.Errorf("cross-organisation sibling: %q, want other/thing", s)
+	}
+	if notes := strings.Join(got["acme/out"].Notes, " "); strings.Count(notes, "points outside any org/repo") != 2 {
+		t.Errorf("replaces that name no org/repo were not both reported: %q", notes)
 	}
 }
 
