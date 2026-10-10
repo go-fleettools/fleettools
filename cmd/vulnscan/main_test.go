@@ -79,7 +79,22 @@ func (f *fake) run(ctx context.Context, dir string, env []string, name string, a
 	if !ok {
 		return fixture("imported.json"), nil, nil
 	}
-	return a.stdout, a.stderr, a.err
+	// {DIR} stands for the module directory, as go prints it on macOS.
+	return a.stdout, []byte(strings.ReplaceAll(string(a.stderr), "{DIR}", "/private"+dir)), a.err
+}
+
+// TestTheScratchPathIsDroppedFromReasons: the first real UNREAD reason was
+// four lines of which three quarters was the same temporary path.
+func TestTheScratchPathIsDroppedFromReasons(t *testing.T) {
+	f := &fake{
+		repos: map[string]map[string]string{"acme/app": {"go.mod": gomod}},
+		scans: map[string]answer{"acme/app": {fixture("loadfail.json"),
+			[]byte("{DIR}/cmd/x/main.go:40:15: undefined: webview.New\n"), errors.New("exit status 1")}},
+	}
+	_, rep, _ := sweep(t, f, "acme/app\n")
+	if got := rep.Repos[0].Err; !strings.Contains(got, ": app/cmd/x/main.go:40:15: undefined: webview.New") || strings.Contains(got, "/work/") {
+		t.Errorf("reason = %q", got)
+	}
 }
 
 const gomod = "module example.com/m\n\ngo 1.27.1\n"

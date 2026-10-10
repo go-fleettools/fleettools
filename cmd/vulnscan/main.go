@@ -390,7 +390,12 @@ func scanRepo(ctx context.Context, exe runner, cfg config, repo, jobDir string) 
 			cctx, cancel := context.WithTimeout(ctx, cfg.timeout)
 			out, errOut, err := exe(cctx, filepath.Join(repoDir, m), env, cfg.govulncheck, "-format", "json", "./...")
 			cancel()
-			res.Modules = append(res.Modules, moduleResult{Dir: m, GOOS: goos, scan: judge(out, errOut, err, wantGo)})
+			s := judge(out, errOut, err, wantGo)
+			// The scratch path is the same for every file and says nothing; on
+			// macOS go prints it with /private in front. It ate most of the
+			// first real reason this printed.
+			s.Err = strings.NewReplacer("/private"+orgDir+"/", "", orgDir+"/", "").Replace(s.Err)
+			res.Modules = append(res.Modules, moduleResult{Dir: m, GOOS: goos, scan: s})
 		}
 	}
 	return aggregate(res)
