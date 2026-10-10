@@ -14,6 +14,17 @@ func never(string) (comparison, error) {
 	panic("compare must not be called once the stamps already settle it")
 }
 
+// wantRef answers c, after checking the ref it was asked about: a module
+// version must reach GitHub as the tag, or a pseudo-version's commit.
+func wantRef(t *testing.T, ref string, c comparison) func(string) (comparison, error) {
+	return func(got string) (comparison, error) {
+		if got != ref {
+			t.Errorf("compared %q, want %q", got, ref)
+		}
+		return c, nil
+	}
+}
+
 // TestWarnIfStaleIsSilentOnlyWhenItHasEarnedIt walks every branch, and the
 // assertion that matters is the LAST one: silence is reserved for the one case
 // that needs no attention. A check that falls silent when it cannot tell is the
@@ -60,6 +71,33 @@ func TestWarnIfStaleIsSilentOnlyWhenItHasEarnedIt(t *testing.T) {
 			v:       Vintage{Revision: headSha},
 			compare: func(string) (comparison, error) { return comparison{Status: "identical"}, nil },
 			want:    "",
+		},
+		{
+			name:    "go install @tag, at the head",
+			v:       Vintage{Module: "v0.4.0"},
+			compare: wantRef(t, "v0.4.0", comparison{Status: "identical"}),
+			want:    "",
+		},
+		{
+			name:    "go install @tag, behind",
+			v:       Vintage{Module: "v0.4.0"},
+			compare: wantRef(t, "v0.4.0", comparison{Status: "ahead", AheadBy: 2}),
+			want:    "STALE -- v0.4.0 is 2 commit(s) behind go-fleettools/fleettools. Those commits may change what this pass reports. Rebuild: GOBIN=~/.local/bin go install github.com/go-fleettools/fleettools/cmd/...@latest",
+		},
+		{
+			name:    "go install @commit: a pseudo-version is compared by its commit",
+			v:       Vintage{Module: "v0.4.1-0.20261010192009-976e774190cc"},
+			compare: wantRef(t, "976e774190cc", comparison{Status: "identical"}),
+			want:    "",
+		},
+		{
+			// The stamps win when both are there: a checkout build from a
+			// modified tree may carry a version too, and is still not
+			// reproducible.
+			name:    "a stamp beats a module version",
+			v:       Vintage{Revision: headSha, Modified: true, Module: "v0.4.0+dirty"},
+			compare: never,
+			want:    "MODIFIED tree",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -173,3 +211,19 @@ func TestEveryCommandAsksWhetherItIsStale(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// TestModuleVersionKeepsOnlyARealVersion: what `go version -m` prints as the
+// mod line of a `go install …@v0.4.0` binary is kept; a checkout build's
+// "(devel)" is not a version and must leave the "cannot tell" branch in charge.
+func TestModuleVersionKeepsOnlyARealVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"v0.4.0":                               "v0.4.0",
+		"v0.4.1-0.20261010192009-976e774190cc": "v0.4.1-0.20261010192009-976e774190cc",
+		"(devel)":                              "",
+		"":                                     "",
+	} {
+		if got := moduleVersion(in); got != want {
+			t.Errorf("moduleVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
