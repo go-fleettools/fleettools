@@ -1,0 +1,7 @@
+{"config":{"protocol_version":"v1.0.0","scanner_name":"govulncheck","scanner_version":"v1.8.0","db":"https://vuln.go.dev","db_last_modified":"2026-10-08T22:31:09Z","go_version":"go1.27.1","scan_level":"symbol","scan_mode":"source"}}
+{"SBOM":{"go_version":"go1.27.1","modules":[{"path":"example.com/called"},{"path":"golang.org/x/net","version":"v0.59.0"},{"path":"golang.org/x/text","version":"v0.42.0"},{"path":"stdlib","version":"v1.27.1"}],"roots":["example.com/called"]}}
+{"finding":{"osv":"GO-2026-6599","fixed_version":"v1.27.2","trace":[{"module":"stdlib","version":"v1.27.1"}]}}
+{"finding":{"osv":"GO-2026-6604","fixed_version":"v1.27.2","trace":[{"module":"stdlib","version":"v1.27.1"}]}}
+{"finding":{"osv":"GO-2026-6610","fixed_version":"v0.60.0","trace":[{"module":"golang.org/x/net","version":"v0.59.0"}]}}
+{"finding":{"osv":"GO-2026-6610","fixed_version":"v0.60.0","trace":[{"module":"golang.org/x/net","version":"v0.59.0","package":"golang.org/x/net/http2"}]}}
+{"finding":{"osv":"GO-2026-6604","fixed_version":"v1.27.2","trace":[{"module":"stdlib","version":"v1.27.1","package":"os"}]}}
