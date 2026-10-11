@@ -11,6 +11,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -32,8 +34,44 @@ type repo struct {
 type red struct{ repo, wf, when string }
 
 func main() {
+	// ⛔ Arguments first, before the staleness check and long before the
+	// sweep. This main read no arguments at all, so `redscan -h` -- a request
+	// for help -- was a sweep of every organisation: hundreds of REST calls
+	// against the hourly budget Renovate shares. Run on 2026-10-11 to read the
+	// flags, it had to be killed.
+	if code, proceed := parseArgs(os.Args[1:], os.Stderr); !proceed {
+		os.Exit(code)
+	}
 	fleet.WarnIfStale(os.Stderr)
 	os.Exit(run(os.Stdout, os.Stderr))
+}
+
+// parseArgs decides whether to sweep at all. It sweeps only when given nothing:
+// -h prints the usage and exits 0, and anything else -- a typo, an organisation
+// name this tool cannot scope by -- is refused with status 2 rather than read
+// as permission to sweep the whole fleet.
+func parseArgs(args []string, stderr io.Writer) (code int, proceed bool) {
+	fs := flag.NewFlagSet("redscan", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: redscan")
+		fmt.Fprintln(stderr)
+		fmt.Fprintln(stderr, "Reports every workflow whose latest run on its repository's default")
+		fmt.Fprintln(stderr, "branch failed, across every organisation the token can see. It takes")
+		fmt.Fprintln(stderr, "no arguments, and costs one REST call per organisation plus one per")
+		fmt.Fprintln(stderr, "repository, against the hourly budget Renovate shares.")
+	}
+	switch err := fs.Parse(args); {
+	case errors.Is(err, flag.ErrHelp):
+		return 0, false
+	case err != nil:
+		return 2, false
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "redscan: takes no arguments, got %q; refusing rather than sweeping the fleet\n", fs.Args())
+		return 2, false
+	}
+	return 0, true
 }
 
 // run is the whole program, so that a test can drive it and read what it says.
