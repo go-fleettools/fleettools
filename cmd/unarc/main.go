@@ -38,6 +38,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/ulikunitz/xz"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 // maxEntrySize bounds one entry, because a declared size is a number the
@@ -45,7 +47,10 @@ import (
 // still refuses a decompression bomb outright.
 const maxEntrySize = 10 << 30
 
-func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
 
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("unarc", flag.ContinueOnError)
