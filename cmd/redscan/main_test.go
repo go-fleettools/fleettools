@@ -21,8 +21,15 @@ func withFakeGH(t *testing.T, script string) {
 
 // oneOrgTwoRepos answers the org list and the repo list, and leaves the runs
 // endpoint to the caller's own case.
+//
+// ⛔ It also answers rate_limit, because run() now asks for the hourly budget
+// before spending it and REFUSES to start when it cannot read one -- an
+// unreadable budget is not a free pass. Every test here went red when the guard
+// was added, which is the guard working: the stub was not answering a question
+// the tool had started asking.
 const oneOrgTwoRepos = `
 case "$*" in
+  *rate_limit*) echo 5000 ;;
   *user/orgs*) echo "acme" ;;
   *orgs/acme/repos*)
     echo '[{"full_name":"acme/green","default_branch":"main","archived":false,"fork":false},
@@ -88,6 +95,7 @@ func TestAnOrganisationThatCouldNotBeListedIsNotAnEmptyOne(t *testing.T) {
 	// population.
 	withFakeGH(t, `
 case "$*" in
+  *rate_limit*) echo 5000 ;;
   *user/orgs*) printf 'acme\nbeta\n' ;;
   *orgs/acme/repos*)
     echo '[{"full_name":"acme/green","default_branch":"main","archived":false,"fork":false}]' ;;
@@ -111,7 +119,13 @@ esac`)
 }
 
 func TestWithoutTheOrganisationsThereIsNothingToSweep(t *testing.T) {
-	withFakeGH(t, `echo "gh: not logged in" >&2; exit 1`)
+	// ⛔ The budget is read FIRST, so a stub that fails everything now fails
+	// there and this test would be measuring the wrong refusal. It answers the
+	// budget and fails the rest, which is what it was always about.
+	withFakeGH(t, `case "$*" in
+  *rate_limit*) echo 5000 ;;
+  *) echo "gh: not logged in" >&2; exit 1 ;;
+esac`)
 	var out, errOut strings.Builder
 	if code := run(&out, &errOut); code == 0 {
 		t.Error("a pass that could not list the organisations exited 0")
@@ -145,6 +159,7 @@ func TestALongListOfFailuresIsTruncatedRatherThanPrintedWhole(t *testing.T) {
 	}
 	withFakeGH(t, `
 case "$*" in
+  *rate_limit*) echo 5000 ;;
   *user/orgs*) echo "acme" ;;
   *orgs/acme/repos*) echo '[`+strings.Join(repos, ",")+`]' ;;
   *actions/runs*) echo "API rate limit exceeded for user ID 1." >&2; exit 1 ;;
