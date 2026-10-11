@@ -57,9 +57,17 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
-func main() { os.Exit(run(os.Args[1:], os.Stdout)) }
+// The warning goes to stderr and the verdict to stdout, which matters here:
+// what this writes on stdout is read by a CI annotation parser, and a gate that
+// mixes its own housekeeping into that stream is a gate somebody filters.
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	os.Exit(run(os.Args[1:], os.Stdout))
+}
 
 // govulncheck writes a stream of JSON objects; only these fields matter here.
 type message struct {
