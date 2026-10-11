@@ -87,4 +87,9 @@ jobs:
           # ⛔ The stream is an ARGUMENT, not stdin. Written with `<` first, and
           # actionlint passed it -- a workflow that parses is not a workflow
           # that runs. Caught by running the lane by hand before pushing it.
+          # ⛔ Its staleness note says "could not tell" here, and that is left
+          # alone: the check asks gh whether the binary matches the source, and
+          # in CI the binary IS this checkout, so the question has no content.
+          # Handing it GH_TOKEN would spend a call from the shared hourly budget
+          # per run to learn nothing.
           /tmp/vulngate -go "$(go env GOVERSION)" /tmp/vuln.json
