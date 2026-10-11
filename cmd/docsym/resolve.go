@@ -46,16 +46,33 @@ func Load(dir string, goos []string) (*Index, error) {
 		}
 	}
 
+	// ⛔ AN AUDIT MUST NOT WRITE INTO WHAT IT AUDITS. Loading under four
+	// platforms needs go.sum lines the module has never needed on one, and
+	// with -mod=mod the go command adds them to the module's own go.sum. The
+	// first README fixes this tool found went out as "README only" pull
+	// requests carrying six go.sum lines nobody had reviewed. -modfile points
+	// the go command at a COPY of go.mod -- and the go.sum beside it -- so the
+	// checkout is read and never written.
+	modfileDir, err := os.MkdirTemp("", "docsym-modfile-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(modfileDir)
+	if err := os.WriteFile(filepath.Join(modfileDir, "go.mod"), gomod, 0o644); err != nil {
+		return nil, err
+	}
+	if sum, err := os.ReadFile(filepath.Join(dir, "go.sum")); err == nil {
+		if err := os.WriteFile(filepath.Join(modfileDir, "go.sum"), sum, 0o644); err != nil {
+			return nil, err
+		}
+	}
+
 	ix := &Index{byName: map[string][]*types.Package{}, broken: map[string]string{}, version: map[string]string{}, members: map[string]bool{}}
 	for _, g := range goos {
-		arch := "amd64"
-		if g == "js" {
-			arch = "wasm"
-		}
 		cfg := &packages.Config{
 			Mode: packages.NeedName | packages.NeedTypes | packages.NeedModule,
 			Dir:  dir,
-			Env:  append(os.Environ(), "GOOS="+g, "GOARCH="+arch, "CGO_ENABLED=0", "GOWORK=off", "GOFLAGS=-mod=mod"),
+			Env:  loadEnv(g, filepath.Join(modfileDir, "go.mod")),
 		}
 		pkgs, err := packages.Load(cfg, patterns...)
 		if err != nil {
@@ -82,6 +99,17 @@ func Load(dir string, goos []string) (*Index, error) {
 		}
 	}
 	return ix, nil
+}
+
+// loadEnv is the environment one platform's load runs under. The module file
+// is the scratch copy, never the checkout's own.
+func loadEnv(goos, modfile string) []string {
+	arch := "amd64"
+	if goos == "js" {
+		arch = "wasm"
+	}
+	return append(os.Environ(), "GOOS="+goos, "GOARCH="+arch, "CGO_ENABLED=0", "GOWORK=off",
+		"GOFLAGS=-mod=mod -modfile="+modfile)
 }
 
 func orgPrefix(module string) string {

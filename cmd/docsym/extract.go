@@ -33,6 +33,27 @@ var bareRE = regexp.MustCompile(`^\*?([A-Z][A-Za-z0-9]*)(?:\.([A-Z][A-Za-z0-9]*)
 
 var spanRE = regexp.MustCompile("`([^`\n]+)`")
 
+// allowRE is the one way to tell docsym a name is meant: an HTML comment, so
+// nothing renders, naming the references and WHY.
+//
+//	<!-- docsym:allow mvvm.Queue mvvm.NewQueue -- an application's code: needs mvvm v0.14.0, window builds against older -->
+//
+// ⛔ The reason is mandatory, as bricolint's is: an allow with no reason is
+// ignored, and the reference keeps being reported until somebody writes down
+// why it is right.
+var allowRE = regexp.MustCompile(`<!--\s*docsym:allow\s+(.*?)\s+--\s+(\S.*?)\s*-->`)
+
+// Allowed returns the references a README exempts, each with its reason.
+func Allowed(readme string) map[string]string {
+	out := map[string]string{}
+	for _, m := range allowRE.FindAllStringSubmatch(readme, -1) {
+		for _, name := range strings.Fields(m[1]) {
+			out[name] = m[2]
+		}
+	}
+	return out
+}
+
 // Extract returns every reference in a README, with its line number.
 //
 // It reads inline code spans everywhere, and whole lines inside ```go fences

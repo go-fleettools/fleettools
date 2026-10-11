@@ -161,7 +161,7 @@ func TestRun(t *testing.T) {
 	if rc := run(options{goos: []string{"linux"}, dirs: []string{dir}}, &out, &errb, load(t)); rc != 0 {
 		t.Fatalf("rc %d: %s", rc, errb.String())
 	}
-	if !strings.Contains(out.String(), "1 references found, 1 MISSING, 1 bare names unconfirmed") ||
+	if !strings.Contains(out.String(), "1 references found, 1 MISSING, 0 allowed by a docsym:allow with its reason, 1 bare names unconfirmed") ||
 		strings.Contains(out.String(), "NSEvent") {
 		t.Fatal(out.String())
 	}
@@ -171,6 +171,32 @@ func TestRun(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "`NSEvent`: unconfirmed") {
 		t.Fatal("-bare lists the unconfirmed names:", out.String())
+	}
+}
+
+func TestAnAllowNeedsAReason(t *testing.T) {
+	got := Allowed(strings.Join([]string{
+		"<!-- docsym:allow mvvm.Queue mvvm.NewQueue -- application code: needs mvvm v0.14.0 -->",
+		"<!-- docsym:allow tray.Gone -->", // no reason: ignored
+		"<!-- docsym:allow tray.Other --  -->",
+	}, "\n"))
+	if len(got) != 2 || got["mvvm.Queue"] == "" || got["mvvm.NewQueue"] == "" {
+		t.Fatalf("%v", got)
+	}
+	if _, ok := got["tray.Gone"]; ok {
+		t.Fatal("an allow without a reason must be ignored")
+	}
+}
+
+func TestAnAllowedMissIsCountedNotReported(t *testing.T) {
+	load := func(string, []string) (*Index, error) { return index(t), nil }
+	dir := module(t, "`tray.Gone` `tray.Lost`\n<!-- docsym:allow tray.Gone -- documented on purpose -->\n")
+	var out, errb bytes.Buffer
+	if rc := run(options{goos: []string{"linux"}, fail: true, dirs: []string{dir}}, &out, &errb, load); rc != 1 {
+		t.Fatalf("tray.Lost is still missing: rc %d", rc)
+	}
+	if strings.Contains(out.String(), "tray.Gone") || !strings.Contains(out.String(), "1 MISSING, 1 allowed") {
+		t.Fatal(out.String())
 	}
 }
 
@@ -249,6 +275,37 @@ func TestLoadTypeChecksARealModule(t *testing.T) {
 	}
 	if _, err := Load(t.TempDir(), []string{"linux"}); err == nil {
 		t.Fatal("a directory with no go.mod must be an error, not an empty index")
+	}
+}
+
+// The audited checkout is read, never written: its go.mod and go.sum are the
+// same bytes after a load, and the go command is pointed at a copy.
+func TestLoadNeverWritesTheModule(t *testing.T) {
+	dir := t.TempDir()
+	mod := "module example.com/m\n\ngo 1.22\n"
+	sum := "example.com/never v0.0.0 h1:AAAA=\n"
+	for name, src := range map[string]string{"go.mod": mod, "go.sum": sum, "m.go": "package m\n\nfunc F() {}\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Load(dir, []string{"linux", "js"}); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"go.mod": mod, "go.sum": sum} {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("%s was written: %q (%v)", name, got, err)
+		}
+	}
+	var flags string
+	for _, kv := range loadEnv("linux", "/elsewhere/go.mod") {
+		if strings.HasPrefix(kv, "GOFLAGS=") {
+			flags = kv
+		}
+	}
+	if flags != "GOFLAGS=-mod=mod -modfile=/elsewhere/go.mod" {
+		t.Fatalf("the go command must be pointed at the copy: %q", flags)
 	}
 }
 

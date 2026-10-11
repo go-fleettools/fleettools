@@ -84,7 +84,7 @@ func parseArgs(args []string, stderr io.Writer) (options, int, bool) {
 }
 
 func run(o options, stdout, stderr io.Writer, load func(string, []string) (*Index, error)) int {
-	var missing, found, notOurs, unreadable, unconfirmed, modules, failed int
+	var missing, found, notOurs, unreadable, unconfirmed, exempt, modules, failed int
 	for _, dir := range o.dirs {
 		readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
 		if err != nil {
@@ -93,6 +93,7 @@ func run(o options, stdout, stderr io.Writer, load func(string, []string) (*Inde
 			continue
 		}
 		refs := Extract(string(readme))
+		allowed := Allowed(string(readme))
 		ix, err := load(dir, o.goos)
 		if err != nil {
 			fmt.Fprintf(stderr, "docsym: %s: %v\n", dir, err)
@@ -116,7 +117,6 @@ func run(o options, stdout, stderr io.Writer, load func(string, []string) (*Inde
 						filepath.Join(dir, "README.md"), r.Line, r.Text)
 				}
 			case Missing:
-				missing++
 				name := r.Name
 				if r.Pkg != "" {
 					name = r.Pkg + "." + name
@@ -124,13 +124,18 @@ func run(o options, stdout, stderr io.Writer, load func(string, []string) (*Inde
 				if r.Member != "" {
 					name += "." + r.Member
 				}
+				if _, ok := allowed[name]; ok {
+					exempt++
+					continue
+				}
+				missing++
 				fmt.Fprintf(stdout, "%s:%d  `%s`: %s is not in %s (%s)\n",
 					filepath.Join(dir, "README.md"), r.Line, r.Text, name, where, strings.Join(o.goos, ", "))
 			}
 		}
 	}
-	fmt.Fprintf(stdout, "\n%d module(s) read, %d unreadable: %d references found, %d MISSING, %d bare names unconfirmed (-bare lists them), %d not ours (skipped), %d in a package that did not type-check (not judged)\n",
-		modules, failed, found, missing, unconfirmed, notOurs, unreadable)
+	fmt.Fprintf(stdout, "\n%d module(s) read, %d unreadable: %d references found, %d MISSING, %d allowed by a docsym:allow with its reason, %d bare names unconfirmed (-bare lists them), %d not ours (skipped), %d in a package that did not type-check (not judged)\n",
+		modules, failed, found, missing, exempt, unconfirmed, notOurs, unreadable)
 	switch {
 	case failed > 0 || modules == 0:
 		return 2
