@@ -66,6 +66,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("i18ncheck", flag.ContinueOnError)
 	fl.SetOutput(stderr)
 	base := fl.String("base", "en", "the language the others were translated from")
+	comments := fl.Bool("comments", false, "let comments differ inside blocks whose language has them (hcl, sh, yaml, toml, ini, go...): a translated comment in a configuration example; output blocks stay byte-exact")
 	if err := fl.Parse(args); err != nil {
 		return 2
 	}
@@ -79,7 +80,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "i18ncheck:", err)
 		return 2
 	}
-	rep, err := check(root, *base, langs)
+	rep, err := check(root, *base, langs, *comments)
 	if err != nil {
 		fmt.Fprintln(stderr, "i18ncheck:", err)
 		return 2
@@ -147,7 +148,7 @@ func pagesOf(dir string) ([]string, error) {
 	return out, err
 }
 
-func check(root, base string, langs []string) (report, error) {
+func check(root, base string, langs []string, comments bool) (report, error) {
 	var rep report
 	basePages, err := pagesOf(filepath.Join(root, base))
 	if err != nil {
@@ -185,7 +186,7 @@ func check(root, base string, langs []string) (report, error) {
 			if err != nil {
 				return rep, err
 			}
-			for _, d := range compare(src, tr) {
+			for _, d := range compare(src, tr, comments) {
 				rep.problems = append(rep.problems, fmt.Sprintf("%s/%s: %s", lang, p, d))
 			}
 		}
@@ -197,6 +198,7 @@ func check(root, base string, langs []string) (report, error) {
 type page struct {
 	weight   string
 	blocks   []string
+	langs    []string // each block's fence info, e.g. "hcl"; "" for output
 	headings []heading
 	relrefs  []string
 }
@@ -208,7 +210,7 @@ type heading struct {
 }
 
 var (
-	fenceRE   = regexp.MustCompile("^[ \t]*(```|~~~)")
+	fenceRE   = regexp.MustCompile("^[ \t]*(```|~~~)[ \t]*([A-Za-z0-9_+-]*)")
 	headingRE = regexp.MustCompile(`^(#{1,6})[ \t]+(.*?)[ \t]*$`)
 	explicit  = regexp.MustCompile(`[ \t]*\{#([^}\s]+)\}$`)
 	relrefRE  = regexp.MustCompile(`relref "([^"]+)"`)
@@ -232,6 +234,7 @@ func parse(b []byte) page {
 	n := 0
 	inFront, inFence := false, false
 	var fence, block strings.Builder
+	var lang string
 	seen := map[string]int{}
 	for sc.Scan() {
 		line := sc.Text()
@@ -253,11 +256,13 @@ func parse(b []byte) page {
 				inFence = true
 				fence.Reset()
 				fence.WriteString(m[1])
+				lang = m[2]
 				block.Reset()
 			} else if strings.TrimSpace(line)[:3] == fence.String() {
 				inFence = false
 				block.WriteString(line)
 				p.blocks = append(p.blocks, block.String())
+				p.langs = append(p.langs, lang)
 				continue
 			}
 		}
@@ -314,7 +319,7 @@ func anchor(text string) string {
 }
 
 // compare lists what tr changed of what it must keep from src.
-func compare(src, tr page) []string {
+func compare(src, tr page, comments bool) []string {
 	var d []string
 	if src.weight != tr.weight {
 		d = append(d, fmt.Sprintf("weight %q, the source says %q", tr.weight, src.weight))
@@ -323,7 +328,11 @@ func compare(src, tr page) []string {
 		d = append(d, fmt.Sprintf("%d code blocks, the source has %d", len(tr.blocks), len(src.blocks)))
 	} else {
 		for i := range src.blocks {
-			if src.blocks[i] != tr.blocks[i] {
+			a, b := src.blocks[i], tr.blocks[i]
+			if comments {
+				a, b = stripComments(src.langs[i], a), stripComments(src.langs[i], b)
+			}
+			if a != b {
 				d = append(d, fmt.Sprintf("code block %d differs from the source's: %s", i+1, firstDifference(src.blocks[i], tr.blocks[i])))
 			}
 		}
@@ -362,4 +371,62 @@ func firstDifference(a, b string) string {
 		}
 	}
 	return fmt.Sprintf("%d lines instead of %d", len(lb), len(la))
+}
+
+// commentMarkers are what starts a comment in a block of each language that
+// has comments. A block with no language, or one not here -- the output of a
+// program -- has none: it is compared byte for byte whatever -comments says.
+var commentMarkers = map[string][]string{
+	"hcl": {"#", "//"}, "terraform": {"#", "//"},
+	"sh": {"#"}, "bash": {"#"}, "shell": {"#"}, "zsh": {"#"},
+	"yaml": {"#"}, "yml": {"#"}, "toml": {"#"}, "ini": {"#", ";"}, "conf": {"#"},
+	"go": {"//"}, "nginx": {"#"}, "sshconfig": {"#"},
+}
+
+// stripComments drops the comments of a block in lang -- a marker outside a
+// quoted string, to the end of its line -- and the spaces before them, so a
+// configuration example whose comments were translated compares equal to
+// its source and one whose VALUES changed does not. "...#login.example.org"
+// inside quotes is a value, not a comment.
+func stripComments(lang, block string) string {
+	markers := commentMarkers[strings.ToLower(lang)]
+	if len(markers) == 0 {
+		return block
+	}
+	lines := strings.Split(block, "\n")
+	for i, line := range lines {
+		if i == 0 || i == len(lines)-1 && fenceRE.MatchString(line) {
+			continue // the fence lines themselves
+		}
+		lines[i] = strings.TrimRight(cutComment(line, markers), " \t")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func cutComment(line string, markers []string) string {
+	var quote rune
+	escaped := false
+	for i, r := range line {
+		switch {
+		case escaped:
+			escaped = false
+		case quote != 0:
+			if r == '\\' {
+				escaped = true
+			} else if r == quote {
+				quote = 0
+			}
+		case r == '"' || r == '\'':
+			quote = r
+		default:
+			for _, m := range markers {
+				// A marker starts a comment at the line's start or after a
+				// space: "http://x" and "a#b" are not comments.
+				if strings.HasPrefix(line[i:], m) && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+					return line[:i]
+				}
+			}
+		}
+	}
+	return line
 }

@@ -116,3 +116,35 @@ func TestAnchor(t *testing.T) {
 		t.Errorf("a # line in a block was read as a heading")
 	}
 }
+
+// -comments lets a configuration example's comments be translated, and
+// nothing else: a changed value, a changed quoted string that holds a #, or
+// any change in a block with no language (a transcript) is still reported.
+func TestCommentsMayBeTranslatedWhenAsked(t *testing.T) {
+	src := "---\nweight: 1\n---\n\n```hcl\n# the web listener\nurl = \"https://fs.example.org:8443\"   # this web listener\ngroup = \"urn:x#login.example.org\"\n```\n\n```\n$ fileshare check\nthis configuration can be served\n```\n"
+	tr := func(old, new string) string { return strings.Replace(src, old, new, 1) }
+	for name, c := range map[string]struct {
+		fr   string
+		want int // exit status with -comments
+	}{
+		"comments translated":          {tr("# this web listener", "# ce port d'écoute web"), 0},
+		"a whole-line comment":         {tr("# the web listener", "# le port web"), 0},
+		"a value changed":              {tr(":8443", ":9443"), 1},
+		"a # inside quotes changed":    {tr("#login.example.org", "#autre.example.org"), 1},
+		"a transcript line translated": {tr("this configuration can be served", "cette configuration peut être servie"), 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := tree(t, map[string]map[string]string{"en": {"a.md": src}, "fr": {"a.md": c.fr}})
+			var out, errb bytes.Buffer
+			if code := run([]string{"-comments", root}, &out, &errb); code != c.want {
+				t.Errorf("-comments: exit %d, want %d:\n%s%s", code, c.want, out.String(), errb.String())
+			}
+			// Without the flag every difference counts.
+			if c.fr != src {
+				if code := run([]string{root}, &out, &errb); code != 1 {
+					t.Errorf("without -comments: exit %d, want 1", code)
+				}
+			}
+		})
+	}
+}
