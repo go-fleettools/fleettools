@@ -74,6 +74,17 @@ func parseArgs(args []string, stderr io.Writer) (code int, proceed bool) {
 	return 0, true
 }
 
+// budgetFloor is what this pass needs to mean anything, plus what it leaves
+// behind; budgetReserve is what it leaves. They are variables rather than
+// constants so a test can drive the stop: with the real pair, a sweep over
+// eight repositories can never reach the reserve, and the reporting path would
+// have no witness at all. ⛔ Not flags -- this command takes no arguments on
+// purpose, and an unread reporting path is worse than an untunable one.
+var (
+	budgetFloor   = fleet.DefaultReserve + 2000
+	budgetReserve = fleet.DefaultReserve
+)
+
 // run is the whole program, so that a test can drive it and read what it says.
 // It returns the exit status: non-zero when the sweep could not read the whole
 // fleet, which is not the same as finding nothing wrong with it.
@@ -87,7 +98,7 @@ func run(stdout, stderr io.Writer) int {
 	//
 	// The floor is what this pass needs to mean anything, plus what it leaves
 	// behind. No flag, because this command deliberately takes no arguments.
-	if err := fleet.StartBudget(fleet.DefaultReserve+2000, fleet.DefaultReserve); err != nil {
+	if err := fleet.StartBudget(budgetFloor, budgetReserve); err != nil {
 		fmt.Fprintln(stderr, "redscan:", err)
 		fmt.Fprintln(stderr, "        not starting: a half-swept fleet reads as a clean one,")
 		fmt.Fprintln(stderr, "        and the rest of the budget is somebody else's.")

@@ -426,3 +426,74 @@ func TestTheAbandonedPagesWorkflowIsSuperseded(t *testing.T) {
 		t.Errorf("the 6-run witness did not reach the threshold %d", supersededAfter)
 	}
 }
+
+// TestStoppingAtTheReserveIsNotTheSameAsFailingToRead.
+//
+// ⛔ Both arrive as an error from the same call, and filing a deliberate stop
+// under "could not be read" reads as a fault in the fleet rather than a
+// decision about the budget -- and calls for the wrong action: an unread
+// repository is asked again, a budget stop is waited out.
+//
+// The budget is reported just above the reserve, so the org and repo lists get
+// through and the per-repository calls run into the floor.
+func TestStoppingAtTheReserveIsNotTheSameAsFailingToRead(t *testing.T) {
+	var repos []string
+	for i := 0; i < 8; i++ {
+		repos = append(repos, `{"full_name":"acme/r`+string(rune('0'+i))+
+			`","default_branch":"main","archived":false,"fork":false}`)
+	}
+	// ⛔ The real pair cannot reach the reserve over eight repositories: the
+	// floor is the reserve plus two thousand, so a sweep that passes the floor
+	// always has two thousand calls in hand. The pair is driven here instead,
+	// which is why it is a variable.
+	oldFloor, oldReserve := budgetFloor, budgetReserve
+	budgetFloor, budgetReserve = 10, 7
+	t.Cleanup(func() { budgetFloor, budgetReserve = oldFloor, oldReserve })
+
+	// Ten, with seven reserved: three calls get through -- the org list, the
+	// repo list, and one repository -- and the rest run into the floor.
+	withFakeGH(t, `
+case "$*" in
+  *rate_limit*) echo 10 ;;
+  *user/orgs*) echo "acme" ;;
+  *orgs/acme/repos*) echo '[`+strings.Join(repos, ",")+`]' ;;
+  *actions/runs*) echo '[{"w":1,"c":"success","n":"CI","d":"2026-09-05T10:00:00Z"}]' ;;
+esac`)
+	var out, errOut strings.Builder
+	code := run(&out, &errOut)
+	got := out.String()
+
+	if code == 0 {
+		t.Errorf("a pass that stopped early exited 0:\n%s", got)
+	}
+	if !strings.Contains(got, "STOPPED at the budget reserve") {
+		t.Errorf("the stop is not reported as a stop:\n%s", got)
+	}
+	// ⛔ And NOT as unread repositories, which is the whole distinction.
+	if strings.Contains(got, "could not be read") {
+		t.Errorf("the stop was filed as unread repositories:\n%s", got)
+	}
+	if !strings.Contains(got, "unknown, not green") {
+		t.Errorf("the pass does not say what it does not know:\n%s", got)
+	}
+}
+
+// TestASweepRefusesToBeginBelowTheFloor: a half-swept fleet reads as a clean
+// one, and the rest of the budget belongs to the fleet's Renovate runners.
+func TestASweepRefusesToBeginBelowTheFloor(t *testing.T) {
+	withFakeGH(t, `case "$*" in
+  *rate_limit*) echo 900 ;;
+  *) echo "the sweep should never have got here" >&2; exit 1 ;;
+esac`)
+	var out, errOut strings.Builder
+	if code := run(&out, &errOut); code == 0 {
+		t.Error("a sweep began below the floor")
+	}
+	e := errOut.String()
+	if !strings.Contains(e, "below the floor") || !strings.Contains(e, "900") {
+		t.Errorf("stderr does not say why: %q", e)
+	}
+	if strings.Contains(out.String(), "orgs:") {
+		t.Errorf("it listed organisations anyway:\n%s", out.String())
+	}
+}
