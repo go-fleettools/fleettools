@@ -8,6 +8,15 @@
 //	$ false | head -3 ; echo $?
 //	0
 //
+// That is not a quirk of one shell. POSIX says it, in XCU 2.9.2 Pipelines: the
+// status of a pipeline "shall be the exit status of the last command that is
+// executed in the list". The same section notes that an implementation MAY
+// provide a way to derive the status "from the exit statuses of all of the
+// commands in the pipeline, not just the last" -- which is what bash's
+// PIPESTATUS and `set -o pipefail` are, and the word is *may*. So `pipefail` is
+// an extension to lean on only where the shell is known, and this works
+// wherever the binary runs.
+//
 // That has cost real answers here. Three times in one day a version tag was
 // pushed onto a commit that did not contain the merge, because the chain was
 // `ghmerge 21 | tail -2 && git tag …`: the refusal printed, the status vanished,

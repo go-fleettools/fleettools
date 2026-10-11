@@ -108,6 +108,13 @@ func GH(args ...string) ([]byte, error) {
 			return nil, err
 		}
 	}
+	// ⛔ The budget is accounted for BEFORE the call and only once, not per
+	// attempt: a retry of a throttled call is the same unit of work asking
+	// again, and charging it twice would stop a sweep early on its own
+	// patience. See budget.go for why this is here at all.
+	if err := spend(); err != nil {
+		return nil, err
+	}
 	for attempt := 0; ; attempt++ {
 		out, msg, err := run(args)
 		if err == nil {

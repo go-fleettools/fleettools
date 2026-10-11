@@ -78,6 +78,21 @@ func parseArgs(args []string, stderr io.Writer) (code int, proceed bool) {
 // It returns the exit status: non-zero when the sweep could not read the whole
 // fleet, which is not the same as finding nothing wrong with it.
 func run(stdout, stderr io.Writer) int {
+	// ⛔ ASK FOR THE BUDGET BEFORE SPENDING IT. This sweep costs one call per
+	// organisation plus one per repository -- measured at about 2000 -- against
+	// an hourly budget that is PER USER and shared with the fleet's Renovate
+	// runners. Four times a sweep has emptied it and made those runs fail, and
+	// the fourth happened with the note about the first three already written:
+	// a note read afterwards is not a control.
+	//
+	// The floor is what this pass needs to mean anything, plus what it leaves
+	// behind. No flag, because this command deliberately takes no arguments.
+	if err := fleet.StartBudget(fleet.DefaultReserve+2000, fleet.DefaultReserve); err != nil {
+		fmt.Fprintln(stderr, "redscan:", err)
+		fmt.Fprintln(stderr, "        not starting: a half-swept fleet reads as a clean one,")
+		fmt.Fprintln(stderr, "        and the rest of the budget is somebody else's.")
+		return 1
+	}
 	out, err := fleet.GH("api", "user/orgs", "--paginate", "--jq", ".[].login")
 	if err != nil {
 		fmt.Fprintln(stderr, "orgs:", err)
@@ -134,6 +149,11 @@ func run(stdout, stderr io.Writer) int {
 
 	var reds []red
 	var unread, gone, stale []string
+	// ⛔ A DELIBERATE STOP IS NOT AN UNREAD REPOSITORY. Both arrive as an error
+	// from the same call, and putting the budget stop into `unread` would file
+	// "I chose to stop" under "I could not read it" -- which reads as a fault
+	// in the fleet rather than a decision about the budget.
+	budgetStopped := false
 	retried := 0
 	checked, rechecked := 0, 0
 	for _, r := range repos {
@@ -160,6 +180,15 @@ func run(stdout, stderr io.Writer) int {
 				// 18 calls against 1983. A second failure is reported as
 				// before: the point is to shrink the blind spot, not to hide
 				// it, and the INCOMPLETE banner still names whatever is left.
+				// ⛔ A budget stop is not retried. The retry exists for a
+				// transport blip, and asking again after a deliberate stop
+				// spends the reserve the stop was protecting.
+				if errors.Is(err, fleet.ErrBudgetReserve) {
+					mu.Lock()
+					budgetStopped = true
+					mu.Unlock()
+					return
+				}
 				time.Sleep(retryPause)
 				mu.Lock()
 				retried++
@@ -168,7 +197,11 @@ func run(stdout, stderr io.Writer) int {
 			}
 			if err != nil {
 				mu.Lock()
-				unread = append(unread, r.FullName+": "+firstLine(err.Error()))
+				if errors.Is(err, fleet.ErrBudgetReserve) {
+					budgetStopped = true
+				} else {
+					unread = append(unread, r.FullName+": "+firstLine(err.Error()))
+				}
 				mu.Unlock()
 				return
 			}
@@ -318,6 +351,17 @@ func run(stdout, stderr io.Writer) int {
 	// the primary rate limit, silently, because the error was dropped and only
 	// the successes were counted. Re-run with a full budget the same afternoon:
 	// 1934 of 1934, and TWO red branches that the reassuring zero had hidden.
+	// ⛔ And a pass that STOPPED ON PURPOSE is not a pass that read everything.
+	// It is reported in its own words, before the unread list, because the two
+	// call for different actions: an unread repository is asked again, a budget
+	// stop is waited out.
+	if budgetStopped {
+		left, _ := fleet.BudgetLeft()
+		fmt.Fprintf(stdout, "\nSTOPPED at the budget reserve: %d call(s) left, kept for everything else.\n", left)
+		fmt.Fprintf(stdout, "  %d of %d repositories were read. The rest is unknown, not green.\n", checked, len(repos))
+		fmt.Fprintln(stdout, "  The hourly budget is PER USER and the fleet's Renovate runners draw on it.")
+		return 1
+	}
 	if len(unreadOrgs) == 0 && len(unread) == 0 {
 		return 0
 	}
