@@ -58,3 +58,33 @@ jobs:
         run: go vet ./...
       - name: test
         run: go test -race -timeout 15m ./...
+
+      # ⛔ THE GATE JUDGES ITS OWN REPOSITORY. cmd/vulngate exists to decide
+      # what a govulncheck stream means, and no workflow anywhere named it --
+      # including this one. A capability nothing invokes is documented, not
+      # deployed.
+      #
+      # ⛔ NO `set -o pipefail` HERE, deliberately. govulncheck exits non-zero
+      # over findings it has decided this module does not call, and exits ZERO
+      # over some it has -- which is the whole reason vulngate exists. pipefail
+      # would hand the lane back to the status that cannot answer the question.
+      # An unread scan is caught instead by vulngate, which believes a run only
+      # when it carried a config AND an SBOM.
+      #
+      # ⛔ -go holds the scan to the toolchain it actually ran under. The
+      # standard library is judged by one version, and a lane that silently
+      # resolved another answered a different question -- which is why the
+      # value comes from `go env GOVERSION` and not from a literal.
+      - name: govulncheck, judged by vulngate
+        run: |
+          set -eu
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" -format json ./... > /tmp/vuln.json || true
+          test -s /tmp/vuln.json || { echo "::error::govulncheck wrote nothing at all"; exit 1; }
+          # BUILT, not `go run`: a built binary carries the VCS stamp its own
+          # staleness check reads, so the gate can say whether it is current.
+          go build -o /tmp/vulngate ./cmd/vulngate
+          # ⛔ The stream is an ARGUMENT, not stdin. Written with `<` first, and
+          # actionlint passed it -- a workflow that parses is not a workflow
+          # that runs. Caught by running the lane by hand before pushing it.
+          /tmp/vulngate -go "$(go env GOVERSION)" /tmp/vuln.json
