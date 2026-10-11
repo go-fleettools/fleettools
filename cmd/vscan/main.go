@@ -83,6 +83,7 @@ type reading struct {
 	breaks    int    // "## incompatible changes" sections
 	grew      int    // "## compatible changes" sections
 	err       string
+	via       string // "apidiff" when gorelease could not load the module graph (apidiff.go)
 }
 
 type verdict struct {
@@ -96,6 +97,9 @@ type verdict struct {
 	sha      string // the commit the verdict was measured on
 	branch   string // the default branch that commit was the head of
 	unread   []string
+	via      string // "apidiff": derived without gorelease, see apidiff.go
+	graphErr string // what gorelease said when it could not load the graph
+	viaCount int    // platforms read by apidiff rather than gorelease
 }
 
 // safe reports whether this module can be tagged without anybody looking at it:
@@ -104,7 +108,9 @@ type verdict struct {
 func (v verdict) safe() bool {
 	// ⛔ A frozen base is never safe however small the number looks: the tag
 	// names a tree from before a rewrite, so a person has to see it.
-	return len(v.unread) == 0 && !v.disagree && !v.frozen && v.breaks == 0 && isPatchOf(v.base, v.next)
+	// Nor is one apidiff derived in gorelease's place: it skips checks
+	// gorelease makes, so a person asks for it by category.
+	return len(v.unread) == 0 && !v.disagree && !v.frozen && v.via == "" && v.breaks == 0 && isPatchOf(v.base, v.next)
 }
 
 // isPatchOf reports whether next differs from base only in its patch field.
@@ -259,7 +265,7 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 				mu.Unlock()
 				return
 			}
-			v := read(repo, tree, base, platforms)
+			v := read(repo, dir, tree, base, platforms)
 			v.frozen = frozen
 			v.branch = strings.TrimPrefix(ref, "origin/")
 			if h, ok := git(dir, "rev-parse", ref); ok {
@@ -316,8 +322,13 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 			// section, the exported API did not move and the bump comes from
 			// its requirementsChanged() rule: a dependency up a minor, a new
 			// requirement, or a raised go directive.
-			if len(why) == 0 {
+			if len(why) == 0 && !isPatchOf(v.base, v.next) {
 				why = append(why, "no API change reported -- requirements moved (dependency minor, or the go directive)")
+			} else if len(why) == 0 {
+				why = append(why, "no API change and no requirement moved")
+			}
+			if v.via == "apidiff" {
+				why = append(why, fmt.Sprintf("DERIVED WITH apidiff on %d platform(s): gorelease could not load the module graph (%s)", v.viaCount, v.graphErr))
 			}
 			fmt.Fprintf(stdout, "  %-46s %s -> %s   %s\n", v.repo, v.base, v.next, strings.Join(why, "; "))
 		}
@@ -362,7 +373,7 @@ func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs i
 }
 
 // read asks gorelease once per platform and folds the answers into one verdict.
-func read(repo, dir, base string, platforms []string) verdict {
+func read(repo, gitDir, dir, base string, platforms []string) verdict {
 	v := verdict{repo: repo, base: base}
 	seen := map[string]bool{}
 	for _, goos := range platforms {
@@ -385,6 +396,15 @@ func read(repo, dir, base string, platforms []string) verdict {
 			r = askGorelease(dir, want, goos)
 			if r.err == "" {
 				v.base = want
+			}
+		}
+		if r.err != "" && graphUnreadable(r.err) {
+			if a := askAPIDiff(gitDir, dir, v.base, goos); a.err == "" {
+				v.via, v.graphErr = "apidiff", r.err
+				v.viaCount++
+				r = a
+			} else {
+				r.err += "; and apidiff could not stand in: " + a.err
 			}
 		}
 		if r.err != "" {

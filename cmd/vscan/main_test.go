@@ -53,7 +53,7 @@ func TestOnePlatformDisagreeingIsNotOverruled(t *testing.T) {
 		}
 		return reading{goos: goos, suggested: "v0.2.0", breaks: 1}
 	}
-	v := read("go-xrkit/depth3d", "/nowhere", "v0.1.0", []string{"darwin", "linux", "windows"})
+	v := read("go-xrkit/depth3d", "/nowhere", "/nowhere", "v0.1.0", []string{"darwin", "linux", "windows"})
 	if v.next != "v0.2.0" {
 		t.Errorf("next = %q, want the HIGHEST suggestion v0.2.0", v.next)
 	}
@@ -79,7 +79,7 @@ func TestAnUnreadPlatformMakesTheModuleUnread(t *testing.T) {
 		}
 		return reading{goos: goos, suggested: "v0.1.1"}
 	}
-	v := read("o/r", "/nowhere", "v0.1.0", []string{"linux", "darwin", "windows"})
+	v := read("o/r", "/nowhere", "/nowhere", "v0.1.0", []string{"linux", "darwin", "windows"})
 	if len(v.unread) != 1 {
 		t.Fatalf("unread = %v, want one entry", v.unread)
 	}
@@ -220,7 +220,7 @@ func TestGrewIsFoldedPerPlatform(t *testing.T) {
 		}
 		return reading{goos: goos, suggested: "v0.1.1"}
 	}
-	v := read("o/r", "/nowhere", "v0.1.0", []string{"linux", "darwin"})
+	v := read("o/r", "/nowhere", "/nowhere", "v0.1.0", []string{"linux", "darwin"})
 	if v.grew != 1 {
 		t.Errorf("grew = %d, want 1", v.grew)
 	}
@@ -267,7 +267,7 @@ func TestTheNamedBaseIsRetriedOnce(t *testing.T) {
 		}
 		return reading{goos: goos, suggested: "v0.2.1"}
 	}
-	v := read("o/r", "/nowhere", "v0.1.1", []string{"linux"})
+	v := read("o/r", "/nowhere", "/nowhere", "v0.1.1", []string{"linux"})
 	if len(v.unread) != 0 {
 		t.Fatalf("the retry should have succeeded: %v", v.unread)
 	}
@@ -292,7 +292,7 @@ func TestARetryThatAlsoFailsIsStillUnread(t *testing.T) {
 		n++
 		return reading{goos: goos, err: "nope", wantBase: "v9.9.9"}
 	}
-	v := read("o/r", "/nowhere", "v0.1.1", []string{"linux"})
+	v := read("o/r", "/nowhere", "/nowhere", "v0.1.1", []string{"linux"})
 	if len(v.unread) != 1 {
 		t.Fatalf("unread = %v", v.unread)
 	}
