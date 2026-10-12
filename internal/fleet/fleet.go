@@ -144,11 +144,15 @@ func Orgs() ([]string, error) {
 }
 
 // Repo is the subset of a repository every sweep here needs.
+//
+// HasPages comes with the listing, which is why pagescheck can find every
+// published site in an organisation without a call per repository.
 type Repo struct {
 	FullName      string `json:"full_name"`
 	DefaultBranch string `json:"default_branch"`
 	Archived      bool   `json:"archived"`
 	Fork          bool   `json:"fork"`
+	HasPages      bool   `json:"has_pages"`
 }
 
 // Repos lists an organisation's repositories, skipping archived ones and
