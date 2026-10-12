@@ -1,0 +1,93 @@
+# A reusable check: does this brand repository carry what its README promises?
+#
+# Called BY the organisation's own brand repository. Nine lines in the caller:
+#
+#   name: brand
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#   jobs:
+#     complete:
+#       uses: go-fleettools/fleettools/.github/workflows/brand-complete.yml@main
+#
+# ⛔ NOT `on: [push, pull_request]`. Both fire for a branch with a pull request
+# open, so every push runs this twice — the same trap docs-current.yml
+# documents, and the same fix.
+#
+# ⛔ WHY A BRAND REPOSITORY NEEDS CI AT ALL. It is assets and a README: nothing
+# compiles and there are no tests, so it had no checks — and `ghmerge` refuses
+# a pull request no check has run against, which is right. "Nothing failing"
+# is not "everything passing". Without this, the only way to merge one is to
+# go around the tool that exists to stop unreviewed changes.
+#
+# And there is something real to check. A half-generated asset set ships
+# silently, because the missing file is one nobody opens until the day they
+# need a 48 px icon.
+name: brand-complete
+
+on:
+  workflow_call:
+    inputs:
+      org:
+        description: the organisation the assets are for; defaults to the caller's owner
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  complete:
+    name: the brand repository carries what it promises
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the checker
+        uses: actions/checkout@v7
+        with:
+          repository: go-fleettools/fleettools
+          ref: main
+          path: scanner
+
+      # ⛔ THE BRANCH UNDER REVIEW. The assets are read off the checkout, so a
+      # pull request adding them has to be the thing that is read — not the
+      # default branch, which is what an API read would serve.
+      - name: check out the branch under review
+        uses: actions/checkout@v7
+        with:
+          path: brand
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: scanner/go.mod
+      # ⛔ SAY WHICH TOOLCHAIN RAN, so that a figure measured under this check
+      # is attributable. docs-current.yml explains what that cost once.
+      - run: go version
+
+      - name: check the assets
+        env:
+          # The repository is checked out alone, so the parent directory is
+          # not the organisation and -org has to say it.
+          ORG: ${{ inputs.org || github.repository_owner }}
+        working-directory: scanner
+        run: |
+          set -o pipefail
+          go run ./cmd/brandcheck -org "$ORG" "$GITHUB_WORKSPACE/brand" | tee report.txt
+          {
+            echo '## brand-complete'
+            echo
+            echo '```'
+            cat report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: what a failure means
+        if: failure()
+        run: |
+          echo "::notice::Either a file the README promises is not here — run" \
+               "logos/brandgen again for this organisation — or the mark has left the" \
+               "family grammar: a 256-unit plate, a rounded corner, a two-stop gradient" \
+               "and a glyph drawn in lines rather than filled."
+          echo "::notice::The stroke WIDTH is deliberately not checked. Across the 312" \
+               "organisation marks there is no fleet-wide one, so the rule is the" \
+               "family's value and a check against a constant would fail most of them."
