@@ -1,0 +1,505 @@
+// relverify checks that a tagged release is what its tag says it is: every
+// published file listed in SHA256SUMS and matching it, every file attested by
+// the repository's own workflow, every Go binary built from the tag's commit
+// with an unmodified tree, and the binary for this machine answering --version
+// with the tag.
+//
+//	relverify go-authn/authnd v0.10.2
+//	relverify -wait 40m go-authn/bridge v0.23.0   # the release is still building
+//
+// It waits for the tag's workflow runs to finish first, and stops at once when
+// there is nothing to wait for. It exists because the check was a zsh function
+// with awk in it, and on 2026-10-11 that function waited on a release.yml that
+// go-fileshare/fileshare does not have: a 404 every 45 seconds, forever, with
+// nothing printed. A tag nothing builds is an answer, and this says it.
+//
+// The files go to the user cache directory (relverify/<owner>/<repo>/<tag>),
+// never inside a git work tree: a release is binaries, and a binary inside a
+// checkout is one `git add -A` from being committed.
+//
+// Exit status: 0 every check passed; 1 a check failed; 2 the release could not
+// be checked at all (no release, no runs, gh failing).
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"debug/buildinfo"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
+)
+
+// gh is the seam a test replaces.
+var gh = fleet.GH
+
+// errUnverifiable is a release that could not be checked, as opposed to one
+// that failed a check: exit status 2 rather than 1.
+var errUnverifiable = errors.New("cannot verify")
+
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	wait := flag.Duration("wait", 30*time.Minute, "how long to wait for the tag's workflow runs to finish")
+	dir := flag.String("dir", "", "where to download the release (default: the user cache directory)")
+	norun := flag.Bool("norun", false, "do not run this machine's binary with --version")
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: relverify [-wait 30m] [-dir D] [-norun] owner/repo tag")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if flag.NArg() != 2 || strings.Count(flag.Arg(0), "/") != 1 {
+		flag.Usage()
+		os.Exit(2)
+	}
+	repo, tag := flag.Arg(0), flag.Arg(1)
+	ok, err := verify(os.Stdout, repo, tag, *dir, *wait, !*norun)
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "relverify: %s %s: %v\n", repo, tag, err)
+		if errors.Is(err, errUnverifiable) {
+			os.Exit(2)
+		}
+		os.Exit(1)
+	case !ok:
+		os.Exit(1)
+	}
+}
+
+func verify(w io.Writer, repo, tag, dir string, wait time.Duration, runHost bool) (bool, error) {
+	commit, err := tagCommit(repo, tag)
+	if err != nil {
+		return false, err
+	}
+	fmt.Fprintf(w, "%s %s -> %s\n", repo, tag, commit)
+
+	runs, err := waitForRuns(w, repo, tag, commit, wait)
+	if err != nil {
+		return false, err
+	}
+	ok := true
+	for _, r := range runs {
+		fmt.Fprintf(w, "  run  %-24s %s\n", r.Name, r.Conclusion)
+		if r.Conclusion != "success" && r.Conclusion != "skipped" {
+			ok = false
+		}
+	}
+
+	if dir == "" {
+		cache, err := os.UserCacheDir()
+		if err != nil {
+			return false, fmt.Errorf("%w: no cache directory: %v", errUnverifiable, err)
+		}
+		dir = filepath.Join(cache, "relverify", repo, tag)
+	}
+	if tree := insideWorkTree(dir); tree != "" {
+		return false, fmt.Errorf("%w: %s is inside the git work tree %s, where a downloaded binary could be committed", errUnverifiable, dir, tree)
+	}
+	if !released(repo, tag) {
+		names := make([]string, 0, len(runs))
+		for _, r := range runs {
+			names = append(names, r.Name)
+		}
+		return false, fmt.Errorf("%w: no GitHub release for %s; the tag's runs (%s) published none", errUnverifiable, tag, strings.Join(names, ", "))
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false, err
+	}
+	if _, err := gh("release", "download", tag, "-R", repo, "-D", dir); err != nil {
+		if strings.Contains(err.Error(), "no assets") {
+			return false, fmt.Errorf("%w: the release for %s publishes no files: release notes only", errUnverifiable, tag)
+		}
+		return false, fmt.Errorf("%w: download: %v", errUnverifiable, err)
+	}
+	fmt.Fprintf(w, "  in   %s\n", dir)
+
+	files, err := checkFiles(w, repo, tag, commit, dir)
+	if err != nil {
+		return false, err
+	}
+	for _, f := range files {
+		if !f.ok() {
+			ok = false
+		}
+	}
+	if runHost {
+		if !runHostBinary(w, dir, tag, files) {
+			ok = false
+		}
+	}
+	verdict := "verified"
+	if !ok {
+		verdict = "FAILED"
+	}
+	fmt.Fprintf(w, "%s %s: %d file(s), %s\n", repo, tag, len(files), verdict)
+	return ok, nil
+}
+
+// tagCommit is the commit a tag names, through an annotated tag if it is one.
+func tagCommit(repo, tag string) (string, error) {
+	var ref struct {
+		Object struct{ Type, SHA string }
+	}
+	if err := ghJSON(&ref, "api", "repos/"+repo+"/git/ref/tags/"+tag); err != nil {
+		return "", fmt.Errorf("%w: no tag %s: %v", errUnverifiable, tag, err)
+	}
+	for range 4 {
+		if ref.Object.Type != "tag" {
+			break
+		}
+		if err := ghJSON(&ref, "api", "repos/"+repo+"/git/tags/"+ref.Object.SHA); err != nil {
+			return "", fmt.Errorf("%w: annotated tag %s: %v", errUnverifiable, tag, err)
+		}
+	}
+	if ref.Object.Type != "commit" {
+		return "", fmt.Errorf("%w: %s names a %s, not a commit", errUnverifiable, tag, ref.Object.Type)
+	}
+	return ref.Object.SHA, nil
+}
+
+type run struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	HeadBranch string `json:"head_branch"`
+	HeadSHA    string `json:"head_sha"`
+}
+
+// sleep and now are seams a test replaces.
+var (
+	sleep = time.Sleep
+	now   = time.Now
+)
+
+// appear is how long a tag may go without any run before that is the answer:
+// a push starts its workflows within seconds.
+const appear = 3 * time.Minute
+
+// waitForRuns waits until every workflow run for the tag has finished, and
+// says so when there are none.
+func waitForRuns(w io.Writer, repo, tag, commit string, wait time.Duration) ([]run, error) {
+	start := now()
+	said := false
+	for {
+		var page struct {
+			Runs []run `json:"workflow_runs"`
+		}
+		if err := ghJSON(&page, "api", "repos/"+repo+"/actions/runs?branch="+tag+"&per_page=100"); err != nil {
+			return nil, fmt.Errorf("%w: the tag's runs: %v", errUnverifiable, err)
+		}
+		runs := tagRuns(page.Runs, tag, commit)
+		pending := 0
+		for _, r := range runs {
+			if r.Status != "completed" {
+				pending++
+			}
+		}
+		waited := now().Sub(start)
+		// No run but a release already there: published some other way. Its
+		// files are checked all the same -- an attestation only the
+		// repository's workflow can make is what will say how it was built.
+		if len(runs) == 0 && released(repo, tag) {
+			fmt.Fprintf(w, "  no workflow run for %s; checking the release as published\n", tag)
+			return nil, nil
+		}
+		switch {
+		case len(runs) == 0 && waited >= appear:
+			return nil, fmt.Errorf("%w: no workflow ran for %s in %s: nothing builds this tag", errUnverifiable, tag, appear)
+		case len(runs) > 0 && pending == 0:
+			return runs, nil
+		case waited >= wait:
+			return nil, fmt.Errorf("%w: %d run(s) for %s still not finished after %s", errUnverifiable, pending, tag, wait)
+		}
+		if !said {
+			fmt.Fprintf(w, "  waiting for %s's workflow runs\n", tag)
+			said = true
+		}
+		sleep(30 * time.Second)
+	}
+}
+
+func released(repo, tag string) bool {
+	_, err := gh("release", "view", tag, "-R", repo, "--json", "tagName")
+	return err == nil
+}
+
+// tagRuns keeps the runs of this tag at this commit: a tag moved after a
+// failed release leaves the old commit's runs under the same name.
+func tagRuns(all []run, tag, commit string) []run {
+	var out []run
+	for _, r := range all {
+		if r.HeadBranch == tag && r.HeadSHA == commit {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func ghJSON(v any, args ...string) error {
+	b, err := gh(args...)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, v)
+}
+
+// insideWorkTree returns the work tree dir is in, or "".
+func insideWorkTree(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	for d := abs; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			return d
+		}
+		if filepath.Dir(d) == d {
+			return ""
+		}
+	}
+}
+
+// A file is one published asset and what was found about it.
+type file struct {
+	name     string
+	listed   bool   // named in SHA256SUMS
+	sum      string // "" when it matched, else what went wrong
+	attested string // "" when gh attestation verify accepted it
+	build    string // "" for a correct Go binary or a file that is not one
+	goBinary bool
+}
+
+func (f file) ok() bool { return f.listed && f.sum == "" && f.attested == "" && f.build == "" }
+
+// checkFiles holds every downloaded file to SHA256SUMS, its attestation and,
+// for a Go binary, its build information.
+func checkFiles(w io.Writer, repo, tag, commit, dir string) ([]file, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "SHA256SUMS"))
+	if err != nil {
+		return nil, fmt.Errorf("%w: the release has no SHA256SUMS", errUnverifiable)
+	}
+	sums, err := parseSums(raw)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var files []file
+	for _, e := range entries {
+		if e.Name() == "SHA256SUMS" || e.IsDir() {
+			continue
+		}
+		f := file{name: e.Name()}
+		path := filepath.Join(dir, e.Name())
+		want, listed := sums[e.Name()]
+		f.listed = listed
+		if listed {
+			if got, err := sha256File(path); err != nil {
+				f.sum = err.Error()
+			} else if got != want {
+				f.sum = "sha256 " + got + ", SHA256SUMS says " + want
+			}
+		}
+		if _, err := gh("attestation", "verify", path, "-R", repo); err != nil {
+			f.attested = firstLine(err.Error())
+		}
+		if bi, err := buildinfo.ReadFile(path); err == nil {
+			f.goBinary = true
+			f.build = checkBuild(bi.Main.Version, bi.Settings, tag, commit)
+		}
+		files = append(files, f)
+		report(w, f)
+	}
+	// A sum for a file that was not published is a release that lost a file.
+	for _, name := range sortedKeys(sums) {
+		if !slices.ContainsFunc(files, func(f file) bool { return f.name == name }) {
+			f := file{name: name, listed: true, sum: "listed in SHA256SUMS, not published"}
+			files = append(files, f)
+			report(w, f)
+		}
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("%w: the release publishes nothing but SHA256SUMS", errUnverifiable)
+	}
+	return files, nil
+}
+
+func report(w io.Writer, f file) {
+	if f.ok() {
+		what := "sum, attestation"
+		if f.goBinary {
+			what += ", build info"
+		}
+		fmt.Fprintf(w, "  ok   %-32s %s\n", f.name, what)
+		return
+	}
+	for _, p := range []string{
+		map[bool]string{false: "not listed in SHA256SUMS"}[f.listed],
+		f.sum, f.attested, f.build,
+	} {
+		if p != "" {
+			fmt.Fprintf(w, "  FAIL %-32s %s\n", f.name, p)
+		}
+	}
+}
+
+// parseSums reads sha256sum's format: 64 hex digits, a space, a space or a
+// star, a file name. A name with a path in it is refused: a release asset has
+// none, and one here would hash a file outside the download.
+func parseSums(b []byte) (map[string]string, error) {
+	sums := map[string]string{}
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for n := 1; sc.Scan(); n++ {
+		line := strings.TrimRight(sc.Text(), "\r")
+		if line == "" {
+			continue
+		}
+		if len(line) < 67 || line[64] != ' ' || (line[65] != ' ' && line[65] != '*') {
+			return nil, fmt.Errorf("SHA256SUMS line %d is not \"<sha256>  <name>\"", n)
+		}
+		sum, name := strings.ToLower(line[:64]), line[66:]
+		if _, err := hex.DecodeString(sum); err != nil {
+			return nil, fmt.Errorf("SHA256SUMS line %d: %q is not hex", n, sum)
+		}
+		if name != filepath.Base(name) || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+			return nil, fmt.Errorf("SHA256SUMS line %d names a path, %q", n, name)
+		}
+		if _, dup := sums[name]; dup {
+			return nil, fmt.Errorf("SHA256SUMS lists %q twice", name)
+		}
+		sums[name] = sum
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	if len(sums) == 0 {
+		return nil, errors.New("SHA256SUMS lists nothing")
+	}
+	return sums, nil
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// checkBuild says what is wrong with a Go binary's build information, or "".
+// It wants the module at the tag, the tag's commit, and a clean tree: a
+// binary whose tree was modified is not the tag's code, whatever it is called.
+func checkBuild(version string, settings []debug.BuildSetting, tag, commit string) string {
+	var problems []string
+	if version != tag {
+		problems = append(problems, fmt.Sprintf("module version %s", version))
+	}
+	got := map[string]string{}
+	for _, s := range settings {
+		got[s.Key] = s.Value
+	}
+	switch rev, ok := got["vcs.revision"]; {
+	case !ok:
+		problems = append(problems, "no vcs.revision")
+	case rev != commit:
+		problems = append(problems, "vcs.revision "+rev)
+	}
+	if m := got["vcs.modified"]; m != "false" {
+		problems = append(problems, "vcs.modified="+cmp(m, "(absent)"))
+	}
+	if len(problems) == 0 {
+		return ""
+	}
+	return "build info: " + strings.Join(problems, ", ")
+}
+
+func cmp(s, otherwise string) string {
+	if s == "" {
+		return otherwise
+	}
+	return s
+}
+
+// hostSuffix is the name ending of this machine's binary.
+func hostSuffix() string {
+	s := "-" + runtime.GOOS + "-" + runtime.GOARCH
+	if runtime.GOOS == "windows" {
+		s += ".exe"
+	}
+	return s
+}
+
+// runHostBinary runs this machine's binary with --version and wants the tag
+// in what it prints. It runs only a file every other check accepted.
+func runHostBinary(w io.Writer, dir, tag string, files []file) bool {
+	i := slices.IndexFunc(files, func(f file) bool { return strings.HasSuffix(f.name, hostSuffix()) })
+	if i < 0 {
+		fmt.Fprintf(w, "  --   no *%s binary to run\n", hostSuffix())
+		return true
+	}
+	f := files[i]
+	if !f.ok() || !f.goBinary {
+		fmt.Fprintf(w, "  --   %s not run: it failed a check above\n", f.name)
+		return f.ok()
+	}
+	path := filepath.Join(dir, f.name)
+	if err := os.Chmod(path, 0o755); err != nil {
+		fmt.Fprintf(w, "  FAIL %-32s %v\n", f.name, err)
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
+	line := firstLine(string(out))
+	if err != nil || !strings.Contains(line, tag) {
+		fmt.Fprintf(w, "  FAIL %-32s --version: %q %v\n", f.name, line, cmpErr(err))
+		return false
+	}
+	fmt.Fprintf(w, "  ok   %-32s --version: %s\n", f.name, line)
+	return true
+}
+
+func cmpErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return "(" + err.Error() + ")"
+}
+
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
+	return line
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
