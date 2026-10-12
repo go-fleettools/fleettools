@@ -67,6 +67,14 @@ func StartBudget(floor, reserve int) error {
 	if reserve <= 0 {
 		reserve = DefaultReserve
 	}
+	// ⛔ FORGET ANY EARLIER PROJECTION FIRST. StartBudget reads the budget
+	// through GH, which is charged against the projection -- so a spent one
+	// from a previous sweep refuses the very call that would replace it, and
+	// the refusal arrives wearing the words of the reserve rather than of the
+	// floor. Found by a witness that asked for "below the floor" and was handed
+	// "stopped at the reserve: 7 left, 7 reserved".
+	StopBudget()
+
 	b, err := GH("api", "rate_limit", "--jq", ".resources.core.remaining")
 	if err != nil {
 		return fmt.Errorf("fleet: reading the hourly budget: %w", err)
