@@ -27,6 +27,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 // sizes are the raster sizes every brand repository carries, and variants the
@@ -38,6 +40,10 @@ var (
 )
 
 func main() {
+	// Every command here says whether the binary is behind the head it was
+	// built from, and a repository-wide test enumerates cmd/ on disk to make
+	// sure none forgets. It caught this one.
+	fleet.WarnIfStale(os.Stderr)
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
