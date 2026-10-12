@@ -96,6 +96,14 @@ func TestJudge(t *testing.T) {
 			want: drift, says: "README.md",
 		},
 		{
+			// ⛔ The SECOND repair, measured on fifteen go-ruby landings: the
+			// setting was right and the page was still Jekyll's, because a
+			// setting publishes nothing — a deployment does.
+			name: "the setting is right and no deployment is served", full: "go-ruby-hocon/go-ruby-hocon.github.io",
+			buildType: "workflow", source: "main", deflt: "main", generator: "Jekyll v3.10.0",
+			want: drift, says: "re-run the deploy workflow",
+		},
+		{
 			name: "a Jekyll site somebody wrote", full: "someone/jekyll-site",
 			buildType: "legacy", source: "main", deflt: "main", generator: "Jekyll v3.10.0",
 			want: ok, says: "_config.yml",

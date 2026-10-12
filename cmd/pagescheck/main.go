@@ -300,6 +300,17 @@ func judge(full, buildType, sourceBranch, defaultBranch, generator string) (verd
 		built = "no generator meta"
 	}
 	switch {
+	// ⛔ TWO DIFFERENT REPAIRS, so they are two different sentences. Measured
+	// on fifteen go-ruby landings: setting build_type=workflow was enough for
+	// one of them and not for the rest, which went on serving Jekyll with the
+	// setting already right -- the artefact a workflow uploaded is published
+	// by a DEPLOYMENT, and the setting alone publishes nothing. A note saying
+	// "build_type=workflow; it must be workflow" sent a reader to look at the
+	// thing that was no longer wrong.
+	case jekyll && buildType == "workflow" && !hasJekyllConfig(full):
+		return drift, "serving GitHub's own Jekyll build of README.md although build_type is" +
+			" already \"workflow\": no deployment from a workflow is being served, so re-run the" +
+			" deploy workflow (and allow the CDN about ten minutes)"
 	case jekyll && !hasJekyllConfig(full):
 		return drift, "serving GitHub's own Jekyll build of README.md, not what this repository builds" +
 			" (build_type=" + buildType + "; it must be \"workflow\")"
