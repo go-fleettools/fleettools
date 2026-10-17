@@ -59,6 +59,29 @@ jobs:
       - name: test
         run: go test -race -timeout 15m ./...
 
+      # ⛔ THE WINDOWS HALF OF A PLATFORM SPLIT WAS COMPILED BY NOTHING.
+      # cmd/brief has signal_unix.go and signal_windows.go because WaitStatus
+      # is not portable -- and signal_unix.go's comment claimed "the tests this
+      # fleet runs include windows-latest", which is true of go-crdt and was
+      # never true here: every lane in this file is ubuntu. cmd/buildscan, run
+      # against this very repository on the day it was written, named the file.
+      #
+      # A whole runner is not needed to close it. `go vet` cross-compiles, so
+      # this costs seconds and no second job.
+      #
+      # ⛔ WRITTEN OUT RATHER THAN LOOPED, so that a reader which is not a
+      # shell can see which platforms these are. The first version was
+      # `for goos in windows darwin; do GOOS=$goos go vet ./...; done`, and
+      # buildscan reported the step as a configuration it could not resolve --
+      # correctly, since the value is a loop variable. A configuration hidden
+      # in a shell loop is invisible to every instrument that reads workflows,
+      # which is the same shape as the packages testscan cannot see behind a
+      # `go test $PKGS`.
+      - name: vet for windows
+        run: GOOS=windows go vet ./...
+      - name: vet for darwin
+        run: GOOS=darwin go vet ./...
+
       # ⛔ THE GATE JUDGES ITS OWN REPOSITORY. cmd/vulngate exists to decide
       # what a govulncheck stream means, and no workflow anywhere named it --
       # including this one. A capability nothing invokes is documented, not
