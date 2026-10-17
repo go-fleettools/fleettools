@@ -719,6 +719,59 @@ jobs:
 	}
 }
 
+// ⛔ A working-directory out of the checkout is REFUSED, not followed.
+//
+// `-vet` runs `go vet` with cmd.Dir set from a workflow's `working-directory`
+// and from a `cd` inside a step. A workflow is a file in a repository, and a
+// repository can be anybody's: `working-directory: ../../../etc` would point
+// the compiler outside the tree, and attributing that configuration to this
+// repository's code would be wrong even where it is harmless.
+func TestAWorkingDirectoryOutsideTheCheckoutIsRefused(t *testing.T) {
+	for _, bad := range []string{
+		"../../../etc",
+		"..",
+		"/etc",
+		"~/elsewhere",
+		"sub/../..",
+		"${{ github.workspace }}/x",
+	} {
+		if got := clean(bad); got != "" {
+			t.Errorf("clean(%q) = %q, want it refused", bad, got)
+		}
+	}
+	// The control: an ordinary subdirectory is kept, so the test above is
+	// about leaving the tree rather than about rejecting everything.
+	for in, want := range map[string]string{
+		"gitstore":     "gitstore",
+		"./pgstore":    "pgstore",
+		"a/b":          "a/b",
+		"sub/../other": "other",
+	} {
+		if got := clean(in); got != want {
+			t.Errorf("clean(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// And the whole way round: a step whose `cd` leaves the tree contributes its
+// configuration to the ROOT rather than to somewhere outside it.
+func TestACdOutOfTheTreeFallsBackToTheRoot(t *testing.T) {
+	const wf = `
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cd ../../../tmp && go build ./...
+`
+	cfgs, _ := configsOfWorkflow("ci.yml", []byte(wf))
+	if len(cfgs) != 1 {
+		t.Fatalf("configurations = %v, want one", cfgs)
+	}
+	if cfgs[0].dir != "." {
+		t.Errorf("the configuration landed in %q, want the root", cfgs[0].dir)
+	}
+}
+
 // A workflow the parser refuses is reported as unreadable. Reading it as empty
 // would make every configuration in it invisible, and then "compiled by no
 // lane" would be a statement about the parser.

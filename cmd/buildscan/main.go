@@ -74,10 +74,20 @@
 // # -vet
 //
 // `-vet` stops asking and compiles: for each configuration, `go vet ./...` in
-// every module of the tree, with GOOS, GOARCH and -tags set to it. That is the
-// check that would have caught the collab failure in the second it takes,
-// rather than in the eight minutes a lane takes. It is off by default because
-// a fleet-wide run of it is hundreds of cross-compilations.
+// the module that configuration's step runs in, with GOOS, GOARCH and -tags
+// set to it. That is the check that would have caught the collab failure in
+// the second it takes, rather than in the eight minutes a lane takes. It is
+// off by default because a fleet-wide run of it is hundreds of
+// cross-compilations.
+//
+// ⛔ It COMPILES the tree, which means it builds the dependencies that tree
+// names and may fetch them. The scan without it reads files and makes no API
+// calls at all; `-vet` does not have that property, and pointing it at a
+// checkout somebody else controls is the same decision as building that
+// checkout. GOOS, GOARCH and the tags reach `go` as arguments and environment
+// values, never through a shell, and a `working-directory` that leaves the
+// checkout -- absolute, or climbing out with `..` -- is refused rather than
+// followed.
 package main
 
 import (
