@@ -195,16 +195,16 @@ func TestCheckFilesHoldsEveryFileToEveryCheck(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("good.tar.gz", "good")
-	write("tampered.tar.gz", "tampered")
-	write("unlisted.tar.gz", "unlisted")
-	write("unattested.tar.gz", "unattested")
-	write("SHA256SUMS", sumOf([]byte("good"))+"  good.tar.gz\n"+
-		sumOf([]byte("original"))+"  tampered.tar.gz\n"+
-		sumOf([]byte("unattested"))+"  unattested.tar.gz\n"+
-		sumOf([]byte("lost"))+"  lost.tar.gz\n")
+	write("good.deb", "good")
+	write("tampered.deb", "tampered")
+	write("unlisted.deb", "unlisted")
+	write("unattested.deb", "unattested")
+	write("SHA256SUMS", sumOf([]byte("good"))+"  good.deb\n"+
+		sumOf([]byte("original"))+"  tampered.deb\n"+
+		sumOf([]byte("unattested"))+"  unattested.deb\n"+
+		sumOf([]byte("lost"))+"  lost.deb\n")
 	fakeGH(t, func(args []string) ([]byte, error) {
-		if args[0] == "attestation" && strings.HasSuffix(args[2], "unattested.tar.gz") {
+		if args[0] == "attestation" && strings.HasSuffix(args[2], "unattested.deb") {
 			return nil, errors.New("Error: verifying with issuer \"sigstore.dev\"\nmore")
 		}
 		return nil, nil
@@ -218,7 +218,7 @@ func TestCheckFilesHoldsEveryFileToEveryCheck(t *testing.T) {
 	for _, f := range files {
 		verdict[f.name] = f.ok()
 	}
-	want := map[string]bool{"good.tar.gz": true, "tampered.tar.gz": false, "unlisted.tar.gz": false, "unattested.tar.gz": false, "lost.tar.gz": false}
+	want := map[string]bool{"good.deb": true, "tampered.deb": false, "unlisted.deb": false, "unattested.deb": false, "lost.deb": false}
 	for name, ok := range want {
 		if v, seen := verdict[name]; !seen || v != ok {
 			t.Errorf("%s: ok=%v seen=%v, want ok=%v", name, v, seen, ok)
