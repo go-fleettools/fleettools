@@ -34,6 +34,14 @@ type Vintage struct {
 	// ending in a commit) is enough to compare with the default branch.
 	// Empty for a checkout build, which says "(devel)" or carries stamps.
 	Module string
+
+	// Command is the import path the running binary was built from, e.g.
+	// github.com/go-fleettools/fleettools/cmd/vulngate. It is what makes the
+	// staleness question answerable PER COMMAND rather than per module: see
+	// reachesCommand. debug.BuildInfo.Path is the reliable source for it --
+	// os.Args[0] is whatever the caller typed, including a copied binary under
+	// another name, which the git hooks here actually are.
+	Command string
 }
 
 // BuildVintage reads the stamps out of the running binary.
@@ -44,6 +52,7 @@ func BuildVintage() Vintage {
 	}
 	v := vintageFrom(info.Settings)
 	v.Module = moduleVersion(info.Main.Version)
+	v.Command = info.Path
 	return v
 }
 
@@ -89,6 +98,91 @@ type comparison struct {
 	Status   string `json:"status"` // identical, ahead, behind, diverged
 	AheadBy  int    `json:"ahead_by"`
 	BehindBy int    `json:"behind_by"`
+
+	// Files is what changed, which decides whether those commits could reach
+	// THIS command. See reachesCommand.
+	Files []struct {
+		Filename string `json:"filename"`
+	} `json:"files"`
+}
+
+// filenames is the changed paths, and whether the list is complete.
+//
+// ⛔ GitHub's compare endpoint returns at most 300 files and does not announce
+// that it truncated. A short list would make "everything changed belongs to
+// another command" true of the first 300 and false of the diff -- the one way
+// this check could go quiet about something that matters. At the cap it is
+// treated as unknown, and the warning stands.
+func (c comparison) filenames() (names []string, complete bool) {
+	const pageCap = 300
+	for _, f := range c.Files {
+		names = append(names, f.Filename)
+	}
+	return names, len(names) < pageCap
+}
+
+// inert are paths that cannot end up inside any binary this module builds.
+//
+// ⛔ That claim is only true while nothing embeds them, so a test asserts it
+// over the real tree: TestNothingEmbedsWhatIsCalledInert fails if a `go:embed`
+// names a markdown file or anything under .github. Without it this list would
+// be a guess that rots the first time somebody embeds a README.
+func inert(path string) bool {
+	switch {
+	case strings.HasSuffix(path, ".md"):
+		return true
+	case strings.HasPrefix(path, ".github/"):
+		return true
+	case path == "LICENSE", path == ".gitignore", path == "renovate.json":
+		return true
+	}
+	return false
+}
+
+// reachesCommand reports whether any changed path could change what the binary
+// built from self does. self is a command's import path, as
+// debug.BuildInfo.Path gives it.
+//
+// ⛔ THE RULE IS PROVABLE rather than a heuristic: `package main` cannot be
+// imported, so a change under cmd/Y can never reach a binary built from cmd/X.
+// Everything else -- internal/, a root package, go.mod, go.sum, a script a
+// lane runs -- keeps the warning, because it may genuinely reach this command.
+//
+// Reported by a peer session on 2026-10-18 with its measurement: vulngate
+// pinned at v0.18.1 printed "STALE -- 4 commit(s) behind … Those commits may
+// change what this pass reports" while the diff v0.18.1..v0.20.1 restricted to
+// cmd/vulngate and internal/fleet was EMPTY, those four commits touching only
+// README.md and three other commands; built with -buildvcs=false the two
+// binaries had the same sha256. Verified here before being acted on. The
+// weaker case is the better evidence: a ONE-LINE README fix -- the commonest
+// commit in this repository -- made every tool print it, all afternoon, until
+// it was being read past. Which is the failure this whole function exists to
+// refuse.
+// ⛔ An UNKNOWN command reaches everything. debug.BuildInfo.Path is empty in a
+// `go test` binary, and a build mode that leaves it empty must not be the one
+// that buys silence: not knowing which command is running is not evidence that
+// the commits miss it. TestAnUnknownCommandIsNotGivenTheQuietAnswer.
+func reachesCommand(files []string, self string) bool {
+	if self == "" {
+		return true
+	}
+	mine := ""
+	if i := strings.LastIndex(self, "/cmd/"); i >= 0 {
+		mine = self[i+len("/cmd/"):]
+	}
+	for _, f := range files {
+		if inert(f) {
+			continue
+		}
+		if strings.HasPrefix(f, "cmd/") {
+			rest := strings.TrimPrefix(f, "cmd/")
+			if i := strings.Index(rest, "/"); i > 0 && rest[:i] != mine {
+				continue // another command's directory: nothing imports it
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // compareWithHead asks how far the default branch has moved past rev.
@@ -165,6 +259,14 @@ func warnStale(w io.Writer, v Vintage, compare func(string) (comparison, error))
 	case "identical":
 		return
 	case "ahead":
+		// ⛔ Only warn when those commits could REACH this command. The
+		// sentence "may change what this pass reports" has to be true, and for
+		// a per-command install it was routinely false: see reachesCommand.
+		if files, complete := c.filenames(); complete && len(files) > 0 && !reachesCommand(files, v.Command) {
+			fmt.Fprintf(w, "note: %s moved %d commit(s) since %s, none of them touching anything this command is built from.\n",
+				Repository, c.AheadBy, name)
+			return
+		}
 		fmt.Fprintf(w, "note: STALE -- %s is %d commit(s) behind %s. Those commits may change what this pass reports. Rebuild: %s\n",
 			name, c.AheadBy, Repository, rebuild)
 	case "behind":
