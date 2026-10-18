@@ -131,6 +131,25 @@ func run(cmd *cobra.Command, dir string, apply bool, version string) error {
 	writes["hugo.yaml"] = hugoConfig(s, version)
 	writes[filepath.Join(".github", "workflows", "docs.yml")] = workflow(s, version)
 
+	// ⛔ THE README IS PART OF THE CHANGE. In this fleet a change a reader can
+	// see is not finished until the README says it, and 43 of the 46 sites
+	// that have one tell the reader to run `pip install -r requirements.txt`.
+	// A migration that left those standing would publish instructions for a
+	// site that no longer exists.
+	readmeNote := ""
+	switch current, err := os.ReadFile(filepath.Join(dir, "README.md")); {
+	case err != nil:
+		// One of the 38 with none: it gets one.
+		writes["README.md"] = newREADME(repoName(dir, s), strings.TrimSuffix(s.URL, "/")+"/")
+	default:
+		updated, changed := updateREADME(string(current), repoName(dir, s), strings.TrimSuffix(s.URL, "/")+"/")
+		if changed {
+			writes["README.md"] = updated
+		} else {
+			readmeNote = "README.md says nothing this recognises: read it yourself"
+		}
+	}
+
 	names := make([]string, 0, len(writes))
 	for name := range writes {
 		names = append(names, name)
@@ -140,6 +159,9 @@ func run(cmd *cobra.Command, dir string, apply bool, version string) error {
 		fmt.Fprintf(out, "  %s %-46s %d bytes\n", verb(apply), name, len(writes[name]))
 	}
 	fmt.Fprintf(out, "carried over: %v\n", total)
+	if readmeNote != "" {
+		fmt.Fprintf(out, "⚠ %s\n", readmeNote)
+	}
 
 	if apply {
 		for _, name := range names {

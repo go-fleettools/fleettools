@@ -411,3 +411,102 @@ func TestTheConfigDoesNotCarryADeprecatedSpelling(t *testing.T) {
 		t.Errorf("the config has no cascade target:\n%s", cfg)
 	}
 }
+
+// ⛔ 46 of the 84 sites have a README and 38 have NONE. Of the 46, 43 tell the
+// reader to run `pip install -r requirements.txt`: a migration that left those
+// standing would publish instructions for a site that no longer exists.
+func TestTheReadmeOfASiteThatHasOne(t *testing.T) {
+	current := `<p align="center"><img src="banner.png" alt="x"></p>
+
+# go-asmgen/docs
+
+Versioned documentation for [go-asmgen](https://github.com/go-asmgen), built
+with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/) and
+versioned with [mike](https://github.com/jimporter/mike). Published to the
+` + "`gh-pages`" + ` branch and served at <https://go-asmgen.github.io/docs/>.
+
+The organization landing page links here.
+
+## Local preview
+
+` + "```bash" + `
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+mkdocs serve
+` + "```" + `
+
+## Releasing a new docs version
+
+` + "```bash" + `
+mike deploy --push --update-aliases <version> latest
+` + "```" + `
+`
+	got, changed := updateREADME(current, "go-asmgen/docs", "https://go-asmgen.github.io/docs/")
+	if !changed {
+		t.Fatal("nothing was recognised in the fleet's own boilerplate")
+	}
+	for _, gone := range []string{"MkDocs Material", "pip install", "mkdocs serve", "mike deploy", "venv"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("%q survived:\n%s", gone, got)
+		}
+	}
+	for _, want := range []string{"hugo server", "git submodule update", "params.docs.version", "panicOnWarning", "Hextra fork"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q is missing:\n%s", want, got)
+		}
+	}
+	// ⛔ And what was NOT the migration's business is kept: the brand banner,
+	// the title, the served URL and the landing-page link.
+	for _, kept := range []string{`<img src="banner.png"`, "# go-asmgen/docs", "https://go-asmgen.github.io/docs/", "The organization landing page"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("%q was lost:\n%s", kept, got)
+		}
+	}
+}
+
+// A README this cannot place is left alone and reported, because appending to
+// it would leave two contradictory sets of instructions in the repository.
+func TestAReadmeThisCannotPlace(t *testing.T) {
+	current := "# a docs repo\n\nSomething nobody else wrote.\n"
+	got, changed := updateREADME(current, "x/docs", "https://x.github.io/docs/")
+	if changed || got != current {
+		t.Errorf("it was rewritten anyway:\n%s", got)
+	}
+}
+
+// The 38 with none get one, naming the right repository.
+func TestTheReadmeOfASiteWithNone(t *testing.T) {
+	got, changed := updateREADME("", "go-avkit/docs", "https://go-avkit.github.io/docs/")
+	if !changed {
+		t.Fatal("no README was written for a site with none")
+	}
+	for _, want := range []string{
+		"# go-avkit/docs",
+		"https://github.com/go-avkit",
+		"<https://go-avkit.github.io/docs/>",
+		"hugo server",
+		"MkDocs Material plus mike",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q is missing:\n%s", want, got)
+		}
+	}
+}
+
+// ⛔ repo_url names the ORGANISATION in 21 of these configs, not the
+// repository, so the name has to be completed from the directory — a README
+// naming the wrong repository is worse than one naming none.
+func TestWhichRepositoryTheReadmeIsFor(t *testing.T) {
+	for _, c := range []struct {
+		repoURL, dir, want string
+	}{
+		{"https://github.com/go-asmgen", "/x/go-asmgen/docs", "go-asmgen/docs"},
+		{"https://github.com/go-asmgen/docs", "/x/go-asmgen/docs", "go-asmgen/docs"},
+		{"", "/x/go-tex/docs", filepath.Join("go-tex", "docs")},
+	} {
+		got := repoName(c.dir, site{RepoURL: c.repoURL})
+		if got != c.want {
+			t.Errorf("repo_url %q, dir %q: got %q, want %q", c.repoURL, c.dir, got, c.want)
+		}
+	}
+}
