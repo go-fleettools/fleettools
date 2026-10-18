@@ -235,6 +235,29 @@ func MaterialiseAt(dir, ref string) (string, func(), bool) {
 // DefaultRef names the remote default branch of a checkout.
 func DefaultRef(dir string) (string, bool) { return defaultRemoteRef(dir) }
 
+// Branch is the branch a checkout is ON, and whether its tree is dirty.
+//
+// ⛔ A tool that reads the working tree is not reading the default branch, and
+// on this machine it usually is not: of seventeen checkouts read on
+// 2026-10-18, SIX were on another session's branch. Three findings were wrong
+// because of it -- two repositories whose nested module looked fine had been
+// tidied on the branch they happened to be sitting on. A fleet report that
+// does not say which branch it read is a report about seventeen different
+// things.
+//
+// Returns "" for a detached HEAD, which `git branch --show-current` also does:
+// a worktree made for a measurement has no branch, and saying so is better
+// than naming the commit as if it were one.
+func Branch(dir string) (name string, dirty bool) {
+	if s, ok := git(dir, "branch", "--show-current"); ok {
+		name = strings.TrimSpace(s)
+	}
+	if s, ok := git(dir, "status", "--porcelain"); ok {
+		dirty = strings.TrimSpace(s) != ""
+	}
+	return name, dirty
+}
+
 func git(dir string, args ...string) (string, bool) {
 	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
 	if err != nil {

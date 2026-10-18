@@ -144,6 +144,15 @@ type finding struct {
 	// decision behind it, which is the kind this tool exists to avoid.
 	noRemote bool
 	noGo     bool
+	// branch is what the working tree is on, "" when detached, and dirty says
+	// whether it has uncommitted changes. Printed for every repository that is
+	// NOT on its default branch, because that is when a finding may be about
+	// somebody else's work in progress rather than about the repository.
+	branch string
+	dirty  bool
+	// dir is where it was read, kept so the report can ask git what the
+	// default branch is without scanning again.
+	dir string
 }
 
 // ignoreTag is the constraint that means "never compile this".
@@ -280,6 +289,13 @@ func scan(dir, name string) (finding, error) {
 		return f, err
 	}
 	f.configs, f.open = cfgs, open
+	// ⛔ WHICH BRANCH was read. This tool reads the working tree, and on a
+	// machine with twenty sessions on it that tree is usually on somebody's
+	// branch: of seventeen checkouts read on 2026-10-18, six were, and three
+	// findings were wrong because of it. A report that does not say what it
+	// read is a report about as many different things as it has rows.
+	f.dir = dir
+	f.branch, f.dirty = checkout.Branch(dir)
 	f.noCI = wfFiles == 0
 	if f.noCI {
 		// Asked only when it changes the answer: one `git` per checkout with
@@ -576,6 +592,47 @@ type totals struct {
 	noCI, unreadable int
 	noRemote         int
 	vetFails         int
+	offDefault       int
+}
+
+// readFrom says what was read when that is not the repository's default
+// branch, and "" when it is.
+//
+// ⛔ The whole point of the sentence is that a finding may be about another
+// session's work in progress. Of seventeen checkouts read on 2026-10-18, six
+// were on somebody's branch and three findings were wrong because of it -- two
+// nested modules looked fine because the branch they sat on had already been
+// fixed. The fleet report said nothing, so nothing warned anybody.
+func readFrom(f finding) string {
+	def, ok := checkout.DefaultRef(f.dir)
+	if f.branch == "" {
+		s := "read from a DETACHED HEAD, not a branch"
+		if f.dirty {
+			s += ", with uncommitted changes"
+		}
+		return s
+	}
+	// defaultRemoteRef answers like "origin/main"; compare the last element.
+	if ok {
+		if i := strings.LastIndexByte(def, '/'); i >= 0 {
+			def = def[i+1:]
+		}
+		if f.branch == def && !f.dirty {
+			return ""
+		}
+	} else if !f.dirty {
+		// No remote to compare against: nothing to warn about beyond what the
+		// no-origin line already says.
+		return ""
+	}
+	s := "read from branch " + f.branch
+	if ok && f.branch != def {
+		s += ", not " + def + " — a finding here may be somebody's work in progress"
+	}
+	if f.dirty {
+		s += "; the tree has uncommitted changes"
+	}
+	return s
 }
 
 func report(found []finding, verbose, all, fail, vetted bool, w io.Writer) int {
@@ -596,6 +653,13 @@ func report(found []finding, verbose, all, fail, vetted bool, w io.Writer) int {
 			t.hits++
 		}
 		fmt.Fprintf(w, "\n%s\n", f.repo)
+		// Said only when it is not the default branch, so the common case
+		// stays quiet and the exception is impossible to miss. A detached HEAD
+		// prints as such: a worktree made for a measurement has no branch.
+		if note := readFrom(f); note != "" {
+			fmt.Fprintf(w, "  %s\n", note)
+			t.offDefault++
+		}
 		switch {
 		case f.noCI && f.noRemote:
 			t.noRemote++
@@ -670,6 +734,9 @@ func report(found []finding, verbose, all, fail, vetted bool, w io.Writer) int {
 	}
 	if t.noRemote > 0 {
 		fmt.Fprintf(w, "  %d with no workflows AND no origin, which are not counted above\n", t.noRemote)
+	}
+	if t.offDefault > 0 {
+		fmt.Fprintf(w, "  ⛔ %d were NOT read from the default branch: see the note under each\n", t.offDefault)
 	}
 	if t.hits > 0 && fail {
 		return 1
