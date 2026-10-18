@@ -1081,3 +1081,87 @@ jobs:
 		t.Errorf("a repository with nothing to report was printed:\n%s", got)
 	}
 }
+
+// ⛔ A report that does not say WHICH BRANCH it read is a report about as many
+// different things as it has rows.
+//
+// This tool reads the working tree, and on a machine with twenty sessions that
+// tree is usually on somebody's branch: of seventeen checkouts read on
+// 2026-10-18, SIX were, and three findings were wrong because of it -- two
+// nested modules looked fine because the branch they happened to sit on had
+// already been fixed. The report said nothing, so nothing warned anybody.
+//
+// The control is the silent case: a checkout on its default branch must print
+// NO note, or the warning becomes noise nobody reads.
+func TestTheReportSaysWhenItDidNotReadTheDefaultBranch(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.test\n\ngo 1.27\n")
+	write(t, dir, "a.go", "package a\n")
+	write(t, dir, ".github/workflows/ci.yml", `
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./...
+`)
+	run2 := func(args ...string) string {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Skipf("git %v: %v\n%s", args, err, out)
+		}
+		return ""
+	}
+	run2("init", "-q", "-b", "main")
+	run2("config", "user.email", "t@example.test")
+	run2("config", "user.name", "t")
+	run2("add", "-A")
+	run2("commit", "-q", "-m", "first")
+	run2("remote", "add", "origin", "https://example.test/o/r.git")
+	run2("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+	// The CONTROL first: on main and clean, nothing is said.
+	var out, errOut strings.Builder
+	if code := run([]string{"-dir", dir}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	if strings.Contains(out.String(), "read from") {
+		t.Errorf("a checkout on its default branch was flagged:\n%s", out.String())
+	}
+
+	// On somebody else's branch, it is said, and the branch is named.
+	run2("checkout", "-q", "-b", "somebody-elses-work")
+	out.Reset()
+	if code := run([]string{"-dir", dir}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	got := out.String()
+	for _, want := range []string{"read from branch somebody-elses-work", "not main", "work in progress"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the note does not contain %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "NOT read from the default branch") {
+		t.Errorf("the totals do not count it:\n%s", got)
+	}
+
+	// An uncommitted change is said too, since a finding may be about it.
+	write(t, dir, "b.go", "package a\n")
+	out.Reset()
+	if code := run([]string{"-dir", dir}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "uncommitted changes") {
+		t.Errorf("a dirty tree was not mentioned:\n%s", out.String())
+	}
+
+	// And a detached HEAD is named as such rather than as a branch, which is
+	// what a worktree made for a measurement looks like.
+	run2("checkout", "-q", "--detach")
+	out.Reset()
+	if code := run([]string{"-dir", dir}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "DETACHED HEAD") {
+		t.Errorf("a detached HEAD was not named:\n%s", out.String())
+	}
+}
