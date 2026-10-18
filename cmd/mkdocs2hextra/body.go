@@ -108,7 +108,10 @@ func convertBody(src string) (string, conversion) {
 		stats conversion
 		fence string
 	)
-	lines := strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n")
+	// ⛔ Every heading keeps the anchor MkDocs gave it, as an explicit id,
+	// because an anchor is a URL: see slug.go. Done before anything else, so
+	// that a heading inside a callout gets one too.
+	lines := anchors(strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n"))
 
 	for i := 0; i < len(lines); {
 		line := lines[i]

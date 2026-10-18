@@ -209,6 +209,13 @@ markup:
     parser:
       attribute:
         title: true
+        # ⛔ Block attributes, because every converted heading carries an
+        # explicit id — "## Heading {#the-mkdocs-slug}". The two slug rules
+        # disagree: Python-Markdown drops an em dash and collapses the gap it
+        # leaves into ONE hyphen, goldmark keeps one hyphen per space. An
+        # anchor is a URL somebody may have saved, so the old spelling is
+        # kept. Without this setting the braces are printed as text.
+        block: true
   highlight:
     noClasses: false
 

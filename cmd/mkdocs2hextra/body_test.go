@@ -110,9 +110,12 @@ func TestTheConstructsAMkdocsPageHolds(t *testing.T) {
 			"~~~\n!!! note\n```\nstill inside\n~~~\n",
 		},
 		{
-			"ordinary prose is untouched, byte for byte",
+			// Nothing but the heading's anchor changes: the anchor is
+			// deliberate (an id MkDocs served and somebody may have saved),
+			// and every other byte is the author's.
+			"ordinary prose is untouched but for the heading anchor",
 			"# Heading\n\nA paragraph with **bold**, `code` and a | table | cell |.\n",
-			"# Heading\n\nA paragraph with **bold**, `code` and a | table | cell |.\n",
+			"# Heading {#heading}\n\nA paragraph with **bold**, `code` and a | table | cell |.\n",
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -663,4 +666,79 @@ func keysOf(m map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ⛔ AN ANCHOR IS A URL, and the two slug rules disagree. Measured on
+// go-ruby-cgi/docs: "### The HTML-escaper rewrite — how Go overtakes the C
+// extension" is `the-html-escaper-rewrite-how-go-overtakes-the-c-extension`
+// under MkDocs and `the-html-escaper-rewrite--how-go-overtakes-the-c-extension`
+// under goldmark, because Python-Markdown drops the em dash and collapses the
+// gap it leaves into one hyphen. The page's own links were written against the
+// first, and so is every bookmark anybody has — so the old spelling is KEPT,
+// as an explicit id, rather than the links being rewritten to the new one.
+func TestTheAnchorMkdocsGaveEachHeading(t *testing.T) {
+	for _, c := range []struct{ heading, want string }{
+		{"### The HTML-escaper rewrite — how Go overtakes the C extension",
+			"the-html-escaper-rewrite-how-go-overtakes-the-c-extension"},
+		{"# A plain heading", "a-plain-heading"},
+		// Two characters dropped leave two spaces, and a RUN of spaces is one
+		// hyphen — which is what Python-Markdown does and what my first
+		// expectation here got wrong.
+		{"## Options, flags & friends", "options-flags-friends"},
+		{"## `escapeHTML` — the five-character escape", "escapehtml-the-five-character-escape"},
+		{"## **Bold** and _italic_", "bold-and-italic"},
+		{"## A [link](https://example.com) inside", "a-link-inside"},
+		{"## Déjà vu", "dj-vu"}, // non-ASCII is dropped, as Python-Markdown drops it
+		{"## 100% of statements", "100-of-statements"},
+	} {
+		if got := mkdocsSlug(strings.TrimLeft(c.heading, "# ")); got != c.want {
+			t.Errorf("%q → %q, want %q", c.heading, got, c.want)
+		}
+	}
+}
+
+func TestEveryHeadingKeepsItsOldAnchor(t *testing.T) {
+	in := strings.Join([]string{
+		"# Performance",
+		"",
+		"See the [design note](#the-html-escaper-rewrite-how-go-overtakes-the-c-extension).",
+		"",
+		"### The HTML-escaper rewrite — how Go overtakes the C extension",
+		"",
+		"```",
+		"# not a heading",
+		"```",
+		"",
+		"## Options",
+		"",
+		"## Options",
+		"",
+		"## Already has one {#kept}",
+		"",
+	}, "\n")
+	got, _ := convertBody(in)
+
+	for _, want := range []string{
+		"# Performance {#performance}",
+		"### The HTML-escaper rewrite — how Go overtakes the C extension {#the-html-escaper-rewrite-how-go-overtakes-the-c-extension}",
+		// ⛔ A repeated heading is numbered the way MkDocs numbers it —
+		// `options_1`, not goldmark's `options-1` — because the numbering is
+		// part of the URL too.
+		"## Options {#options}",
+		"## Options {#options_1}",
+		"## Already has one {#kept}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q is missing from:\n%s", want, got)
+		}
+	}
+	// A heading inside a fence is a comment in a shell example.
+	if strings.Contains(got, "# not a heading {#") {
+		t.Errorf("a line inside a fence was given an anchor:\n%s", got)
+	}
+	// And the link is left exactly as it was, because the anchor it names now
+	// exists.
+	if !strings.Contains(got, "(#the-html-escaper-rewrite-how-go-overtakes-the-c-extension)") {
+		t.Errorf("the in-page link was altered:\n%s", got)
+	}
 }
