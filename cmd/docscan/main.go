@@ -173,6 +173,23 @@ func classify(org string, all []ghRepo, f *finding) (have map[string]bool, modul
 			if r.Archived {
 				f.archived[r.Name] = true
 			}
+			// ⛔ AND A FORK IS OWNED. `have` is "the organisation owns this
+			// name", so a fork belongs in it: the repository is there, a link
+			// to it resolves, and a surface that lists it is not pointing at
+			// something gone. Excluding it meant go-images, whose jpeg2000 is
+			// an actively developed fork pushed that morning, was told its
+			// brand-new profile "still lists, and the org no longer has:
+			// jpeg2000" — a sentence about the organisation, produced by a
+			// predicate about this function's module set. The same reasoning
+			// written three lines above for archived was simply not carried
+			// across.
+			//
+			// It stays OUT of modules, which is the other half: owned does not
+			// mean it must be advertised. A fork taken to patch a dependency
+			// once is not something a profile owes a row to.
+			if r.Fork {
+				have[r.Name] = true
+			}
 			continue
 		}
 		// ⛔ have is "the organisation owns this name", which is a different
