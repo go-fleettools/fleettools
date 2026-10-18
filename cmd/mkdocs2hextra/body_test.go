@@ -250,7 +250,7 @@ func TestTheWorkflowPublishesOneVersionAndFailsOnAWarning(t *testing.T) {
 		"--panicOnWarning",
 		`DOCS_URL: "https://x.github.io/docs"`,
 		"submodules: recursive",
-		`rm -rf "docs/${version}"`,
+		"cmd/pagespublish@",
 		"group: gh-pages-deploy",
 		"cancel-in-progress: false",
 		"lycheeverse/lychee-action@v2",
@@ -746,5 +746,29 @@ func TestEveryHeadingKeepsItsOldAnchor(t *testing.T) {
 	// exists.
 	if !strings.Contains(got, "(#the-html-escaper-rewrite-how-go-overtakes-the-c-extension)") {
 		t.Errorf("the in-page link was altered:\n%s", got)
+	}
+}
+
+// ⛔ THE PUBLISH STEP MUST NOT WRITE UNDER docs/. The first version of the
+// generated workflow copied the built site to docs/<version>/ inside gh-pages
+// — and a project repository named "docs" is already served at /docs/, so the
+// site landed at /docs/docs/main/ while /docs/latest/ went on serving the
+// MkDocs build mike had left behind. Both URLs answered 200, which is why no
+// check caught it; 76 repositories had merged it before a curl did.
+func TestTheWorkflowPublishesAtTheBranchRoot(t *testing.T) {
+	w := workflow(readMkdocs("site_name: x\nsite_url: https://x.github.io/docs/\n"), "main")
+	if strings.Contains(w, `"docs/${version}"`) || strings.Contains(w, "docs/${{ needs.build.outputs.version }}") {
+		t.Error("the publish step writes under docs/, one level too deep")
+	}
+	if !strings.Contains(w, "github.com/go-fleettools/fleettools/cmd/pagespublish@") {
+		t.Errorf("the publish step does not call pagespublish:\n%s", w)
+	}
+	// ⛔ Pinned, not @latest: a documentation site that publishes itself with
+	// @latest changes how it publishes without anybody choosing it.
+	if strings.Contains(w, "pagespublish@latest") {
+		t.Error("the publish step is pinned to @latest")
+	}
+	if !strings.Contains(w, "pagespublish@"+pagespublishPin) {
+		t.Errorf("the publish step is not pinned to %s", pagespublishPin)
 	}
 }

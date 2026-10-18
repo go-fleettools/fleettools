@@ -47,7 +47,16 @@ import (
 // hextraPin is the fork's tag this converter wires in. It is a constant and not
 // a flag: eighty-five sites pinned to whatever was newest on the day each one
 // was converted is eighty-five different sites.
+// ⛔ The fork's tag this converter wires in. A constant and not a flag:
+// eighty-five sites pinned to whatever was newest on the day each one was
+// converted is eighty-five different sites.
 const hextraPin = "v0.16.0"
+
+// pagespublishPin is the release of this repository whose cmd/pagespublish the
+// generated workflow runs. Pinned for the same reason: a documentation site
+// that publishes itself with "@latest" changes how it publishes without
+// anybody choosing it.
+const pagespublishPin = "v0.26.0"
 
 const longHelp = `Converts an MkDocs Material site (mkdocs.yml plus docs/*.md) to Hugo with the
 tannevaled/hextra fork, in place:
