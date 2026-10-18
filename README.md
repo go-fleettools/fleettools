@@ -68,10 +68,41 @@ from a clean tree. It says something in every other case **including "I could
 not tell"** — a check that falls silent when it cannot answer teaches you to
 trust a silence it never earned.
 
-The test that keeps it honest enumerates `cmd/` **on disk** rather than naming
+⛔ **It asks whether those commits could reach THIS command**, and this is where
+it nearly destroyed itself. Until 2026-10-18 it compared the *module*, so a
+binary installed the way Go installs tools — `go install …/cmd/vulngate@v0.18.1`
+— was called STALE because some *other* command had moved. Measured by a peer
+session and verified here: `git diff --name-only v0.18.1..v0.20.1 -- cmd/vulngate
+internal/fleet` is **empty**, those four commits touching only `README.md`,
+`cmd/buildscan`, `cmd/docscan` and `cmd/modrename`; built with `-buildvcs=false`
+the two `vulngate` binaries have the **same sha256**. The weaker case is the
+better evidence: a one-line README fix — the commonest commit here — made every
+tool print "Those commits may change what this pass reports", all afternoon,
+until it was being read past. A warning that fires on the canonical install is
+how a true warning gets ignored.
+
+The rule is **provable, not a heuristic**: `package main` cannot be imported, so
+a change under `cmd/Y` can never reach a binary built from `cmd/X`. Everything
+else — `internal/`, a root package, `go.mod`, `go.sum` — keeps the warning. The
+quieter line still names the distance, because "nothing reached you" is a fact
+worth printing, not a silence.
+
+⛔ Three things make that safe rather than clever. GitHub's compare endpoint
+returns at most **300 files and does not announce that it truncated**, so at the
+cap the answer is unknown and the warning stands — unknown is never quiet. An
+**empty `debug.BuildInfo.Path`** reaches everything: not knowing which command is
+running is not evidence that the commits miss it. And the list of paths that
+"cannot end up in a binary" (`*.md`, `.github/`, LICENSE, .gitignore,
+renovate.json) is held to the real tree by a test that reads every `go:embed`
+directive in the module and fails if one names such a path — it also fails if it
+reads **no** directive at all, because a walk that finds nothing asserts nothing.
+
+The tests that keep this honest enumerate `cmd/` **on disk** rather than naming
 the commands: a list written in a test has to be remembered, a directory
 listing cannot be forgotten, so a ninth command fails the suite until it is
-wired up. Both sabotage directions are checked.
+wired up. Both sabotage directions are checked — for the per-command rule that
+means a row for every "still warns" case too, since a function that always went
+quiet would pass a one-directional test and take away a true warning.
 
 To rebuild them all:
 
