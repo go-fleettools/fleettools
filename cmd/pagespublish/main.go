@@ -70,7 +70,7 @@ func run(args []string, out io.Writer) error {
 	// repository has a control for exactly that, and the control was right
 	// about this command before this loop existed.
 	for _, a := range args {
-		if a == "-h" || a == "--help" || a == "-help" {
+		if fleet.IsHelpRequest(a) {
 			fmt.Fprintln(out, usage)
 			return nil
 		}

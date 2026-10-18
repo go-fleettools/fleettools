@@ -84,11 +84,8 @@ times, -wait apart, until the page is 200 and has every string.
 	fs.IntVar(&o.retry, "retry", 0, "poll up to N more times until the page is 200 and has every string")
 	fs.DurationVar(&o.wait, "wait", 20*time.Second, "time between polls")
 	fs.DurationVar(&o.timeout, "timeout", 20*time.Second, "timeout of one request")
-	if err := fs.Parse(args); err != nil {
-		if err == flag.ErrHelp {
-			return 0
-		}
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	o.bust = !*noBust
 	if o.retry < 0 || o.wait < 0 || o.timeout <= 0 {

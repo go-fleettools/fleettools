@@ -11,6 +11,37 @@ import (
 	"testing"
 )
 
+// ⛔ `blobpurge -h` ANSWERED 2 UNTIL 2026-10-18, measured by running the
+// binary: this command dispatches on a subcommand, so `-h` was neither "scan"
+// nor "strip" and fell through to the unknown-subcommand branch. Both
+// subcommands' own flag sets were already right, and the repository's text
+// gate was satisfied, which is why only the spelling somebody types FIRST was
+// wrong. Both directions here: the question answers 0, naming nothing is still
+// 2.
+func TestHelpIsAnsweredAndNothingIsStillAMistake(t *testing.T) {
+	var out, errb bytes.Buffer
+	for _, arg := range []string{"-h", "-help", "--help", "help"} {
+		out.Reset()
+		errb.Reset()
+		if code := run([]string{arg}, &out, &errb); code != 0 {
+			t.Errorf("run(%q) = %d, want 0", arg, code)
+		}
+		if !strings.Contains(out.String(), "blobpurge") {
+			t.Errorf("run(%q) printed no usage on stdout:\n%s", arg, out.String())
+		}
+	}
+	out.Reset()
+	errb.Reset()
+	if code := run(nil, &out, &errb); code != 2 {
+		t.Errorf("run(nil) = %d, want 2 -- naming no subcommand is a usage error", code)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := run([]string{"purge"}, &out, &errb); code != 2 {
+		t.Errorf("run(unknown subcommand) = %d, want 2", code)
+	}
+}
+
 func run1(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)

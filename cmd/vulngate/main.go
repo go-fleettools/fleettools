@@ -105,8 +105,8 @@ func run(args []string, out io.Writer) int {
 	maxAge := fs.Duration("max-db-age", 21*24*time.Hour, "refuse a scan whose vulnerability database is older than this")
 	wantGo := fs.String("go", "", "the `toolchain` the scan must have judged the standard library as, e.g. go1.27.2;\n"+
 		"empty accepts whatever it reports, which is one question less than the lane asked")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(out, "usage: vulngate [-max-db-age 21d] [-go go1.27.2] findings.json")

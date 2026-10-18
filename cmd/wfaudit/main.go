@@ -58,8 +58,8 @@ func run(args []string, stdout, stderr io.Writer, tokenPerm func(dir string) (st
 	fs.SetOutput(stderr)
 	api := fs.Bool("api", false, "ask GitHub each repository's default token permission (one call per repository)")
 	failOn := fs.Bool("fail", false, "exit 1 when a MEDIUM or HIGH finding is reported")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	if fs.NArg() == 0 {
 		fmt.Fprintln(stderr, "usage: wfaudit [-api] [-fail] DIR...")

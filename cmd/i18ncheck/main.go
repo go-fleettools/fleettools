@@ -67,8 +67,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fl.SetOutput(stderr)
 	base := fl.String("base", "en", "the language the others were translated from")
 	comments := fl.Bool("comments", false, "let comments differ inside blocks whose language has them (hcl, sh, yaml, toml, ini, go...): a translated comment in a configuration example; output blocks stay byte-exact")
-	if err := fl.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fl, args); !ok {
+		return code
 	}
 	if fl.NArg() != 1 {
 		fmt.Fprintln(stderr, usage)
