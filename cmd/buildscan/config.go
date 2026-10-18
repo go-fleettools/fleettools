@@ -228,71 +228,172 @@ func configsOfJob(where string, wfEnv map[string]string, j job, m map[string]str
 	base := merge(subst(wfEnv, m), subst(j.Env, m))
 
 	for _, st := range j.Steps {
-		run := substText(st.Run, m)
-		if !goCmdRE.MatchString(run) {
+		block := substText(st.Run, m)
+		if !goCmdRE.MatchString(block) {
 			continue
 		}
 		env := merge(base, subst(st.Env, m))
-		goos := firstOf(goosRE, run, env["GOOS"])
-		goarch := firstOf(goarchRE, run, env["GOARCH"])
-		tags := tagsOf(run, env)
-		cgo := cgoOf(run, env["CGO_ENABLED"])
-		wd := workingDir(substText(st.WorkingDirectory, m), substText(j.Defaults.Run.WorkingDirectory, m), run)
+		for _, run := range commandsOf(block) {
+			goos := firstOf(goosRE, run, env["GOOS"])
+			goarch := firstOf(goarchRE, run, env["GOARCH"])
+			tags := tagsOf(run, env)
+			cgo := cgoOf(run, env["CGO_ENABLED"])
+			wd := workingDir(substText(st.WorkingDirectory, m), substText(j.Defaults.Run.WorkingDirectory, m), run)
 
-		what := st.Name
-		if what == "" {
-			what = firstLine(run)
-		}
-		if exprRE.MatchString(goos) || exprRE.MatchString(goarch) ||
-			set(goosAnyRE, run, env["GOOS"]) != (goos != "") ||
-			set(goarchAnyRE, run, env["GOARCH"]) != (goarch != "") {
-			open = append(open, unresolved{where: where, what: "GOOS/GOARCH comes from a value not in the file: " + what})
-			continue
-		}
-		if goos != "" && goarch == "" {
-			// GOOS alone is a real configuration: the arch stays the host's.
-			// js is the exception that matters, since js only has wasm.
-			if goos == "js" {
-				goarch = "wasm"
+			what := st.Name
+			if what == "" {
+				what = firstLine(run)
 			}
-		}
-		switch {
-		case goos != "" && goarch != "":
-			cfgs = append(cfgs, config{goos: goos, goarch: goarch, tags: tags, cgo: cgo, dir: wd, where: where})
-		case goos != "" || goarch != "":
-			// One half given, the other the runner's: one configuration per
-			// host this job runs on.
-			for _, h := range host {
-				os_, arch, ok := hostPair(h)
-				if !ok {
-					open = append(open, unresolved{where: where, what: "cannot tell what a " + h + " runner compiles"})
-					continue
-				}
-				if goos != "" {
-					os_ = goos
-				}
-				if goarch != "" {
-					arch = goarch
-				}
-				cfgs = append(cfgs, config{goos: os_, goarch: arch, tags: tags, cgo: cgo, dir: wd, where: where})
+			if exprRE.MatchString(goos) || exprRE.MatchString(goarch) ||
+				set(goosAnyRE, run, env["GOOS"]) != (goos != "") ||
+				set(goarchAnyRE, run, env["GOARCH"]) != (goarch != "") {
+				open = append(open, unresolved{where: where, what: "GOOS/GOARCH comes from a value not in the file: " + what})
+				continue
 			}
-		default:
-			for _, h := range host {
-				os_, arch, ok := hostPair(h)
-				if !ok {
-					open = append(open, unresolved{where: where, what: "cannot tell what a " + h + " runner compiles"})
-					continue
+			if goos != "" && goarch == "" {
+				// GOOS alone is a real configuration: the arch stays the host's.
+				// js is the exception that matters, since js only has wasm.
+				if goos == "js" {
+					goarch = "wasm"
 				}
-				cfgs = append(cfgs, config{goos: os_, goarch: arch, tags: tags, cgo: cgo, dir: wd, where: where})
+			}
+			switch {
+			case goos != "" && goarch != "":
+				cfgs = append(cfgs, config{goos: goos, goarch: goarch, tags: tags, cgo: cgo, dir: wd, where: where})
+			case goos != "" || goarch != "":
+				// One half given, the other the runner's: one configuration per
+				// host this job runs on.
+				for _, h := range host {
+					os_, arch, ok := hostPair(h)
+					if !ok {
+						open = append(open, unresolved{where: where, what: "cannot tell what a " + h + " runner compiles"})
+						continue
+					}
+					if goos != "" {
+						os_ = goos
+					}
+					if goarch != "" {
+						arch = goarch
+					}
+					cfgs = append(cfgs, config{goos: os_, goarch: arch, tags: tags, cgo: cgo, dir: wd, where: where})
+				}
+			default:
+				for _, h := range host {
+					os_, arch, ok := hostPair(h)
+					if !ok {
+						open = append(open, unresolved{where: where, what: "cannot tell what a " + h + " runner compiles"})
+						continue
+					}
+					cfgs = append(cfgs, config{goos: os_, goarch: arch, tags: tags, cgo: cgo, dir: wd, where: where})
+				}
 			}
 		}
 	}
 	return cfgs, open
 }
 
+// commandsOf splits a `run:` block into the commands that compile, so that a
+// step holding two of them is read as two configurations.
+//
+// ⛔ ONE CONFIGURATION PER STEP WAS WRONG, and using this tool is what said
+// so. go-agentsync/agentsync's lane was first written as
+//
+//	run: |
+//	  GOOS=darwin GOARCH=arm64 go vet ./...
+//	  GOOS=darwin GOARCH=amd64 go vet ./...
+//
+// and buildscan listed ONE of them: the regexps read the whole block and take
+// their first match, so the second invocation was invisible. The workflow was
+// rewritten as two steps to work around it, with a comment saying why -- which
+// is a tool making its reader carry its limitation.
+//
+// Three things it has to keep right, and each is a test:
+//
+//   - a BACKSLASH continues a command onto the next line, and the packages
+//     are routinely on that next line. Joined before splitting, which is the
+//     lesson testscan learnt when `go test … \` + `./...` read as naming no
+//     packages at all.
+//   - `&&` stays INSIDE one command, because `cd tools && go run ./covergate`
+//     is where the working directory comes from.
+//   - an assignment on its OWN line applies to the commands after it:
+//     `export GOOS=js` then `go test ./...` is one configuration, js/wasm,
+//     and splitting naively would lose the GOOS the whole block had.
+func commandsOf(block string) []string {
+	joined := strings.ReplaceAll(block, "\\\n", " ")
+	var out []string
+	var carried []string // assignments seen on their own lines, in order
+	var carriedDir string
+	for _, line := range strings.Split(joined, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if goCmdRE.MatchString(line) {
+			// Everything carried goes AFTER the line, so what the line itself
+			// says still wins: firstOf and workingDir both take the first
+			// match.
+			parts := append([]string{line}, carried...)
+			if carriedDir != "" {
+				parts = append(parts, "cd "+carriedDir)
+			}
+			// ⛔ Joined with NEWLINES, not spaces. cdRE is anchored to the
+			// start of a line, so a carried `cd tools` appended after the
+			// command never matched -- the first version of this did join with
+			// spaces and the test for it failed, naming the two directories it
+			// had lost. The command's own text stays FIRST either way, and
+			// every reader here takes its first match, so what the line says
+			// still wins.
+			out = append(out, strings.Join(parts, "\n"))
+			continue
+		}
+		if bareAssignRE.MatchString(line) {
+			carried = append(carried, strings.TrimPrefix(line, "export "))
+			continue
+		}
+		// ⛔ A `cd` ON ITS OWN LINE applies to the commands under it, and
+		// forgetting that is a regression this split introduced and an A/B
+		// caught: reading the whole block, `cd tools` anywhere in it reached
+		// workingDir, and reading line by line it stopped doing so. The
+		// fleet-wide count of modules nobody compiles went from 38 to 40 on
+		// the same 647 checkouts, which is what a mis-attributed module looks
+		// like from the outside.
+		//
+		// The LAST one wins, since that is where the shell would be. A `cd ..`
+		// leaves the checkout and clean() refuses it, so such a block falls
+		// back to the root rather than guessing.
+		if m := cdRE.FindStringSubmatch(line); m != nil && !strings.Contains(line, "&&") {
+			carriedDir = m[1]
+		}
+	}
+	if len(out) == 0 {
+		// Nothing matched line by line -- a shape this split does not
+		// understand. The whole block is the answer rather than silence.
+		return []string{block}
+	}
+	return out
+}
+
+// bareAssignRE matches a line that is only an assignment, with or without
+// `export`: the shape that sets a variable for the commands after it.
+var bareAssignRE = regexp.MustCompile(`^(?:export\s+)?[A-Z_][A-Z0-9_]*=\S*$`)
+
 // cdRE catches the other way a step changes where it compiles: `cd gitstore &&
 // go test ./...`, which no YAML key records.
-var cdRE = regexp.MustCompile(`(?m)^\s*cd\s+["']?([^\s"'&;|]+)`)
+//
+// ⛔ A LEADING `(` COUNTS, because a subshell is how a loop body changes
+// directory without changing it for the next turn. go-asmgen/asmgen does
+//
+//	(cd examples/wasm/verify && go run . "$k" "/tmp/$k.wasm")
+//
+// inside a `for`, and an anchor of `^\s*cd` does not match `(cd`. Without the
+// bracket, that module read as compiled by nobody.
+//
+// The old whole-block reading got the right answer there for the WRONG
+// reason: it credited a `cd examples/wasm/verify` four lines above, which
+// belongs to a `go mod download` -- a command that downloads and compiles
+// nothing. Reading per command and matching the bracket agrees with it, and
+// now for the reason that is true.
+var cdRE = regexp.MustCompile(`(?m)^[\s({]*cd\s+["']?([^\s"'&;|)]+)`)
 
 // workingDir is where a step runs: its own working-directory, the job's
 // default, or a `cd` inside the command itself. "." when none of those says.

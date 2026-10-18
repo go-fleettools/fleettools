@@ -784,3 +784,195 @@ func TestAnUnreadableWorkflowIsSaidSoRatherThanSkipped(t *testing.T) {
 		t.Errorf("unresolved = %v, want one note saying it could not be parsed", open)
 	}
 }
+
+// ⛔ A step with TWO invocations is two configurations.
+//
+// Using this tool is what found it. go-agentsync/agentsync's lane was first
+// written as one block with `GOOS=darwin GOARCH=arm64 go vet ./...` and
+// `GOOS=darwin GOARCH=amd64 go vet ./...`, and buildscan listed ONE: the
+// regexps read the whole block and take their first match. The workflow was
+// rewritten as two steps to work around it, with a comment explaining why --
+// a tool making its reader carry its limitation.
+//
+// The three shapes asserted together, because a naive split fixes the first
+// and breaks the other two.
+func TestAStepWithTwoInvocationsIsTwoConfigurations(t *testing.T) {
+	const wf = `
+jobs:
+  cross:
+    runs-on: ubuntu-latest
+    steps:
+      - name: two of them in one block
+        run: |
+          set -eu
+          GOOS=darwin GOARCH=arm64 go vet ./...
+          GOOS=darwin GOARCH=amd64 go vet ./...
+  continued:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a command continued onto the next line
+        run: |
+          GOOS=js GOARCH=wasm go test -count 1 \
+            -timeout 5m ./...
+  exported:
+    runs-on: ubuntu-latest
+    steps:
+      - name: an assignment on its own line
+        run: |
+          export GOOS=windows
+          go vet ./...
+  chained:
+    runs-on: ubuntu-latest
+    steps:
+      - name: a cd and a go run in one command
+        run: cd tools && go run ./covergate
+`
+	cfgs, open := configsOfWorkflow("ci.yml", []byte(wf))
+	got := map[string]bool{}
+	for _, c := range cfgs {
+		got[c.String()] = true
+	}
+	for _, want := range []string{
+		"darwin/arm64",         // both halves of the pair, which is the point
+		"darwin/amd64",         //
+		"js/wasm",              // the continuation did not lose its packages
+		"windows/amd64",        // the exported assignment reached the command after it
+		"linux/amd64 in tools", // `&&` stayed inside one command
+	} {
+		if !got[want] {
+			t.Errorf("%s is missing from %v", want, keysOf(got))
+		}
+	}
+	// And nothing was invented: `set -eu` is not a configuration, and the
+	// exported GOOS must not leak into another job.
+	if got["linux/amd64"] && !got["linux/amd64 in tools"] {
+		t.Errorf("a bare linux/amd64 appeared from a block that names its platform: %v", keysOf(got))
+	}
+	for _, u := range open {
+		t.Errorf("unresolved: %s: %s", u.where, u.what)
+	}
+}
+
+// ⛔ A `cd` ON ITS OWN LINE applies to the commands under it.
+//
+// Reading the whole block, `cd tools` anywhere in it reached workingDir.
+// Reading line by line, it stopped doing so -- a regression the per-command
+// split introduced, and one an A/B caught rather than a test: over the same
+// 647 checkouts the fleet-wide count of modules nobody compiles went from 38
+// to 40, which is what two mis-attributed modules look like from outside.
+//
+// Both spellings are asserted here, because the `&&` form kept working the
+// whole time and would have hidden the broken one.
+func TestACdOnItsOwnLineReachesTheCommandsUnderIt(t *testing.T) {
+	const wf = `
+jobs:
+  own-line:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          cd tools
+          go run ./covergate -floor 75 ../js.cover
+  chained:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cd other && go run ./gate
+  both:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          go test ./...
+          cd third
+          go vet ./...
+`
+	cfgs, open := configsOfWorkflow("ci.yml", []byte(wf))
+	got := map[string]bool{}
+	for _, c := range cfgs {
+		got[c.String()] = true
+	}
+	for _, want := range []string{
+		"linux/amd64 in tools",
+		"linux/amd64 in other",
+		"linux/amd64 in third",
+		"linux/amd64", // the command BEFORE the cd stays at the root
+	} {
+		if !got[want] {
+			t.Errorf("%s is missing from %v", want, keysOf(got))
+		}
+	}
+	for _, u := range open {
+		t.Errorf("unresolved: %s: %s", u.where, u.what)
+	}
+}
+
+// And a `cd` that leaves the checkout is refused rather than followed, which
+// is the path guard a step can reach through this carrying.
+func TestACarriedCdOutOfTheTreeFallsBackToTheRoot(t *testing.T) {
+	const wf = `
+jobs:
+  escape:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          cd ../../../tmp
+          go build ./...
+`
+	cfgs, _ := configsOfWorkflow("ci.yml", []byte(wf))
+	if len(cfgs) != 1 {
+		t.Fatalf("configurations = %v, want one", cfgs)
+	}
+	if cfgs[0].dir != "." {
+		t.Errorf("the configuration landed in %q, want the root", cfgs[0].dir)
+	}
+}
+
+// ⛔ A SUBSHELL is how a loop body changes directory without changing it for
+// the next turn, and `(cd x && go run .)` must be read as x.
+//
+// go-asmgen/asmgen does exactly that inside a `for`, and an anchor of
+// `^\s*cd` does not match `(cd`. Without the bracket its verify module read
+// as compiled by nobody -- found by diffing a fleet run against the previous
+// implementation's, which is the only reason it was noticed at all.
+//
+// The surrounding block is the real one, because what makes it interesting is
+// that the EARLIER standalone `cd` belongs to a `go mod download`: a command
+// that downloads and compiles nothing. The old whole-block reading credited
+// that one and got the right answer for the wrong reason.
+func TestASubshellCdIsWhereItCompiles(t *testing.T) {
+	const wf = `
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Regenerate + compile + verify each kernel
+        run: |
+          set -eo pipefail
+          cd examples/wasm/verify
+          go mod download
+          cd ../../..
+          for k in matchlen hex; do
+            go run ./examples/wasm/"$k" > "/tmp/$k.wat"
+            (cd examples/wasm/verify && go run . "$k" "/tmp/$k.wasm")
+          done
+      - name: go test the wasm example packages
+        run: go test ./examples/wasm/...
+`
+	cfgs, open := configsOfWorkflow("ci.yml", []byte(wf))
+	got := map[string]bool{}
+	for _, c := range cfgs {
+		got[c.String()] = true
+	}
+	if !got["linux/amd64 in examples/wasm/verify"] {
+		t.Errorf("the subshell's directory was not read: %v", keysOf(got))
+	}
+	// And the two commands that run from the root are at the root: the
+	// `cd ../../..` above them leaves the checkout, so it is refused rather
+	// than followed.
+	if !got["linux/amd64"] {
+		t.Errorf("the root is missing from %v", keysOf(got))
+	}
+	for _, u := range open {
+		// `./examples/wasm/"$k"` carries a shell variable, but it is a PACKAGE
+		// path and not a GOOS, so nothing here should be unresolved.
+		t.Errorf("unresolved: %s: %s", u.where, u.what)
+	}
+}

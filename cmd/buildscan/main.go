@@ -46,8 +46,15 @@
 //
 // It reads the working tree: every .go file's constraints (through
 // go/build, so a `_windows.go` name counts as much as a `//go:build` line),
-// and every `go test|build|vet|install` step in .github/workflows, with the
-// strategy matrix expanded.
+// and every `go test|build|vet|install|run` COMMAND in .github/workflows,
+// with the strategy matrix expanded.
+//
+// Per command rather than per step, because a step holding two of them
+// declares two configurations -- which this tool got wrong at first, and
+// which using it is what found: a lane written as one block with
+// `GOOS=darwin GOARCH=arm64 go vet ./...` and the amd64 line under it was
+// reported as one configuration, and the workflow was rewritten as two steps
+// to work around a limitation its reader should never have had to carry.
 //
 // Four things it cannot resolve, each reported rather than guessed:
 //
