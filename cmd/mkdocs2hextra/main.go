@@ -128,6 +128,34 @@ func run(cmd *cobra.Command, dir string, apply bool, version string) error {
 		total.add(stats)
 		writes[p.dest] = frontMatter(p.title(string(src)), p.weight) + strings.TrimLeft(body, "\n")
 	}
+	// ⛔ EVERY OTHER FILE UNDER docs/ IS CONTENT TOO. MkDocs serves docs/ as
+	// the site root, so docs/assets/fs/x.png is served at /assets/fs/x.png;
+	// Hugo serves static/ that way instead. A converter that moved only the
+	// pages lost every picture: go-filesystems/docs lost 53 of them, and the
+	// local build did not care — a missing image is not a build error — so
+	// the link checker in CI is what said so.
+	//
+	// ⛔ AND A PAGE THE NAV DOES NOT NAME IS STILL A PAGE. MkDocs builds every
+	// .md under docs/ whether the nav lists it or not, so an unlisted page is
+	// reachable by its URL and may be linked from one that IS listed. They are
+	// carried over, after the listed ones, and counted out loud.
+	extra, orphans, err := alsoUnderDocs(dir, pages)
+	if err != nil {
+		return unanswerable("reading docs/: %v", err)
+	}
+	for name, body := range extra {
+		writes[name] = body
+	}
+	for _, p := range orphans {
+		src, err := os.ReadFile(p.source)
+		if err != nil {
+			return unanswerable("%s: %v", p.source, err)
+		}
+		body, stats := convertBody(string(src))
+		total.add(stats)
+		writes[p.dest] = frontMatter(p.title(string(src)), p.weight) + strings.TrimLeft(body, "\n")
+	}
+
 	writes["hugo.yaml"] = hugoConfig(s, version)
 	writes[filepath.Join(".github", "workflows", "docs.yml")] = workflow(s, version)
 
@@ -155,10 +183,26 @@ func run(cmd *cobra.Command, dir string, apply bool, version string) error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// ⛔ The static files are COUNTED rather than listed: one site has 53
+	// pictures, and a report nobody reads to the end is a report.
+	staticFiles, staticBytes := 0, 0
 	for _, name := range names {
+		if strings.HasPrefix(name, "static"+string(filepath.Separator)) {
+			staticFiles++
+			staticBytes += len(writes[name])
+			continue
+		}
 		fmt.Fprintf(out, "  %s %-46s %d bytes\n", verb(apply), name, len(writes[name]))
 	}
+	if staticFiles > 0 {
+		fmt.Fprintf(out, "  %s %-46s %d bytes (pictures and the like, from docs/)\n",
+			verb(apply), fmt.Sprintf("static/ — %d files", staticFiles), staticBytes)
+	}
 	fmt.Fprintf(out, "carried over: %v\n", total)
+	if len(orphans) > 0 {
+		fmt.Fprintf(out, "⚠ %d page(s) the nav never named, carried over after the rest: %s\n",
+			len(orphans), strings.Join(orphanNames(orphans), ", "))
+	}
 	if readmeNote != "" {
 		fmt.Fprintf(out, "⚠ %s\n", readmeNote)
 	}

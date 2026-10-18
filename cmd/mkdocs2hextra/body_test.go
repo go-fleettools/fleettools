@@ -8,6 +8,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -583,4 +584,83 @@ func TestTheBuiltWithSentenceIsReplacedWhole(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ⛔ MkDocs SERVES docs/ AS THE SITE ROOT, so docs/assets/x.png is at
+// /assets/x.png and Hugo serves static/ that way instead. A converter that
+// moved only the pages lost every picture on the site — go-filesystems/docs,
+// 53 of them — and the local build did not care, because a missing image is
+// not a build error. And a .md the nav never named is still built by MkDocs
+// and still reachable, so dropping it loses a page.
+func TestEverythingElseUnderDocs(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		path := filepath.Join(dir, "docs", name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("index.md", "# Home\n")
+	write("listed.md", "# Listed\n")
+	write("forgotten.md", "# Forgotten\n")
+	write("notes/aside.md", "# An aside\n")
+	write("assets/fs/apfs.png", "\x89PNG\r\n\x1a\nnot really")
+	write("favicon.ico", "\x00\x00\x01\x00")
+	write("css/extra.css", "body{}")
+
+	nav := readMkdocs("nav:\n  - Home: index.md\n  - Listed: listed.md\n").Nav
+	pages, missing := collect(nav, dir)
+	if len(missing) != 0 {
+		t.Fatalf("missing: %v", missing)
+	}
+	static, orphans, err := alsoUnderDocs(dir, pages)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The three non-pages move to static/, at the SAME relative path, because
+	// that is the path the pages' own links use.
+	for _, want := range []string{
+		filepath.Join("static", "assets", "fs", "apfs.png"),
+		filepath.Join("static", "favicon.ico"),
+		filepath.Join("static", "css", "extra.css"),
+	} {
+		if _, ok := static[want]; !ok {
+			t.Errorf("%s was not carried over; got %v", want, keysOf(static))
+		}
+	}
+	if len(static) != 3 {
+		t.Errorf("%d static files, want three: %v", len(static), keysOf(static))
+	}
+	// ⛔ And the bytes are the bytes: a picture read as text and written back
+	// has to be identical, or every image on the site is subtly corrupt.
+	if got := static[filepath.Join("static", "assets", "fs", "apfs.png")]; got != "\x89PNG\r\n\x1a\nnot really" {
+		t.Errorf("the picture's bytes changed: %q", got)
+	}
+
+	// The two pages the nav never named are carried over, after the rest.
+	var names []string
+	for _, p := range orphans {
+		names = append(names, filepath.Base(p.source))
+		if p.weight < 1000 {
+			t.Errorf("%s has weight %d, which puts it among the pages the nav ordered", p.source, p.weight)
+		}
+	}
+	sort.Strings(names)
+	if len(names) != 2 || names[0] != "aside.md" || names[1] != "forgotten.md" {
+		t.Errorf("the pages the nav never named came back as %v", names)
+	}
+}
+
+func keysOf(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
