@@ -54,7 +54,7 @@
 // implementation of a format is the thing that drifts.
 //
 //	covblocks cov.out                 # the uncovered blocks, and the totals
-//	covblocks -max 3 cov.out          # tolerate three, fail on a fourth
+//	covblocks --max 3 cov.out         # tolerate three, fail on a fourth
 //	covblocks a.out b.out             # several profiles, one verdict
 //
 // ⛔ AN EMPTY PROFILE IS A FAILURE. A profile with no blocks reports the same
@@ -63,48 +63,67 @@
 package main
 
 import (
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 	"golang.org/x/tools/cover"
 )
 
+const longHelp = `Counts the blocks a Go coverage profile never entered, and exits 1 if there are
+more than --max.
+
+` + "`go tool cover -func`" + ` rounds to one decimal, so a gate written against it
+passes at 99.95%.
+
+⛔ AN EMPTY PROFILE IS A FAILURE. A profile with no blocks reports the same
+"0 uncovered" as one that covered everything, and this fleet has published a
+zero that meant "could not read".
+
+Exit status: 0 within --max, 1 more uncovered blocks than allowed, 2 a profile
+could not be read or holds no blocks at all.`
+
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		max   int
+		quiet bool
+	)
+	c := cli.New("covblocks [flags] profile [profile...]",
+		"The blocks a Go coverage profile never entered", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return countBlocks(cmd, max, quiet, args)
+	}
+	f := c.Flags()
+	f.IntVar(&max, "max", 0, "how many uncovered blocks to tolerate before failing")
+	// --quiet carries the old -q as its shorthand, so every existing call site
+	// spelling -q reaches it unchanged: pflag accepts a one-letter flag with
+	// one dash, and only the longer names moved.
+	f.BoolVarP(&quiet, "quiet", "q", false, "print the totals only, not each uncovered block")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
 func run(argv []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("covblocks", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	max := fs.Int("max", 0, "how many uncovered `blocks` to tolerate before failing")
-	quiet := fs.Bool("q", false, "print the totals only, not each uncovered block")
-	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: covblocks [-max 0] [-q] profile [profile...]")
-		fmt.Fprintln(stderr, "\nCounts the blocks a Go coverage profile never entered, and exits 1 if there")
-		fmt.Fprintln(stderr, "are more than -max. `go tool cover -func` rounds to one decimal, so a gate")
-		fmt.Fprintln(stderr, "written against it passes at 99.95%.")
-		fs.PrintDefaults()
-	}
-	if err := fs.Parse(argv); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 2
-	}
-	paths := fs.Args()
+	return cli.Drive(RootCmd(), argv, stdout, stderr)
+}
+
+func countBlocks(cmd *cobra.Command, max int, quiet bool, paths []string) error {
+	stdout, stderr := cli.Out(cmd), cli.Err(cmd)
 	if len(paths) == 0 {
-		fs.Usage()
-		return 2
+		return cli.Unanswerable("usage: covblocks [--max 0] [-q] profile [profile...]")
 	}
-	if *max < 0 {
-		fmt.Fprintln(stderr, "covblocks: -max cannot be negative")
-		return 2
+	if max < 0 {
+		return cli.Unanswerable("--max cannot be negative")
 	}
 
 	var (
@@ -116,8 +135,7 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	for _, path := range paths {
 		profiles, err := cover.ParseProfiles(path)
 		if err != nil {
-			fmt.Fprintf(stderr, "covblocks: %s: %v\n", path, err)
-			return 2
+			return cli.Unanswerable("%s: %v", path, err)
 		}
 		for _, p := range profiles {
 			for _, b := range p.Blocks {
@@ -138,11 +156,10 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	// ⛔ A PROFILE WITH NO BLOCKS IS NOT A PASS. It reports the same zero as a
 	// profile that covered everything.
 	if blocks == 0 {
-		fmt.Fprintf(stderr, "covblocks: %d profile(s) hold no blocks at all — nothing was measured\n", len(paths))
-		return 2
+		return cli.Unanswerable("%d profile(s) hold no blocks at all — nothing was measured", len(paths))
 	}
 
-	if !*quiet {
+	if !quiet {
 		for _, l := range lines {
 			fmt.Fprintln(stdout, l)
 		}
@@ -155,11 +172,11 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "  %-60s %d\n", f, perFile[f])
 	}
 
-	if uncovered > *max {
-		fmt.Fprintf(stderr, "covblocks: %d uncovered block(s) > %d allowed\n", uncovered, *max)
-		return 1
+	if uncovered > max {
+		fmt.Fprintf(stderr, "covblocks: %d uncovered block(s) > %d allowed\n", uncovered, max)
+		return cli.FromStatus(1)
 	}
-	return 0
+	return nil
 }
 
 // sortedByCount orders files by how many uncovered blocks they hold, most

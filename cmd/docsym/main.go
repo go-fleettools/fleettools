@@ -1,9 +1,9 @@
 // docsym reports the Go identifiers a module's README names that its code
 // does not have.
 //
-//	docsym DIR...                     # each DIR a module checkout
-//	docsym -goos linux,darwin DIR...  # the platforms to type-check under
-//	docsym -fail DIR...               # exit 1 when anything is missing
+//	docsym DIR...                      # each DIR a module checkout
+//	docsym --goos linux,darwin DIR...  # the platforms to type-check under
+//	docsym --fail DIR...               # exit 1 when anything is missing
 //
 // A README rots in a few ways, and this catches the commonest one a program
 // can: a NAME that was renamed or removed. It reads inline code spans
@@ -27,24 +27,36 @@
 package main
 
 import (
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
+const longHelp = `Reports the Go identifiers a module's README names that its code does not have.
+
+It reads inline code spans (` + "`toolkit.NewButton`, `Entry.Text`" + `) and go
+fences, and type-checks the module — and the packages it requires from its own
+organisation — under each platform asked for, so a name that exists only in one
+platform's build is found.
+
+Each reference ends as found, MISSING, not ours (the qualifier is a variable or
+another organisation's package: skipped and counted), or unreadable (the package
+failed to type-check, so a miss there would be a guess: counted, never reported
+as missing).
+
+Exit status: 0 nothing missing, 1 something is missing and --fail was given,
+2 a module could not be loaded at all — a scan that read nothing must not look
+like a clean one.`
+
 func main() {
-	opts, code, proceed := parseArgs(os.Args[1:], os.Stderr)
-	if !proceed {
-		os.Exit(code)
-	}
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(opts, os.Stdout, os.Stderr, Load))
+	cli.Run(RootCmd())
 }
 
 type options struct {
@@ -54,33 +66,67 @@ type options struct {
 	dirs []string
 }
 
-func parseArgs(args []string, stderr io.Writer) (options, int, bool) {
-	fs := flag.NewFlagSet("docsym", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	goos := fs.String("goos", "linux,darwin,windows,js", "comma-separated GOOS values to type-check under")
-	fail := fs.Bool("fail", false, "exit 1 when a README names something the code does not have")
-	bare := fs.Bool("bare", false, "also list bare names in code spans that no loaded package has (mostly platform and protocol names; never fails the run)")
-	switch err := fs.Parse(args); {
-	case errors.Is(err, flag.ErrHelp):
-		return options{}, 0, false
-	case err != nil:
-		return options{}, 2, false
+// RootCmd builds the command. Tests drive it through parseArgs, below.
+func RootCmd() *cobra.Command {
+	var (
+		o    options
+		goos string
+	)
+	c := command(&o, &goos)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		if err := settle(&o, goos, args); err != nil {
+			return err
+		}
+		// run keeps its body and its three statuses, each documented against
+		// the wrong answer it came from.
+		return cli.FromStatus(run(o, cli.Out(cmd), cli.Err(cmd), Load))
 	}
-	if fs.NArg() == 0 {
-		fmt.Fprintln(stderr, "usage: docsym [-goos list] [-fail] DIR...")
-		return options{}, 2, false
+	return c
+}
+
+func command(o *options, goos *string) *cobra.Command {
+	c := cli.New("docsym [flags] DIR...",
+		"Identifiers a README names that the code does not have", longHelp)
+	f := c.Flags()
+	f.StringVar(goos, "goos", "linux,darwin,windows,js", "comma-separated GOOS values to type-check under")
+	f.BoolVar(&o.fail, "fail", false, "exit 1 when a README names something the code does not have")
+	f.BoolVar(&o.bare, "bare", false,
+		"also list bare names in code spans that no loaded package has "+
+			"(mostly platform and protocol names; never fails the run)")
+	return c
+}
+
+// settle turns the flags into the options run takes, and refuses the two inputs
+// that would make the measurement meaningless: no directory to read, and no
+// platform to read it under.
+func settle(o *options, goos string, args []string) error {
+	if len(args) == 0 {
+		return cli.Unanswerable("usage: docsym [--goos list] [--fail] DIR...")
 	}
-	var gs []string
-	for _, g := range strings.Split(*goos, ",") {
+	o.goos = nil
+	for _, g := range strings.Split(goos, ",") {
 		if g = strings.TrimSpace(g); g != "" {
-			gs = append(gs, g)
+			o.goos = append(o.goos, g)
 		}
 	}
-	if len(gs) == 0 {
-		fmt.Fprintln(stderr, "docsym: -goos names no platform")
-		return options{}, 2, false
+	if len(o.goos) == 0 {
+		return cli.Unanswerable("--goos names no platform")
 	}
-	return options{goos: gs, fail: *fail, bare: *bare, dirs: fs.Args()}, 0, true
+	o.dirs = args
+	return nil
+}
+
+// parseArgs keeps the signature this command's tests were written against.
+func parseArgs(args []string, stderr io.Writer) (options, int, bool) {
+	var (
+		o    options
+		goos string
+	)
+	c := command(&o, &goos)
+	c.RunE = func(_ *cobra.Command, rest []string) error { return settle(&o, goos, rest) }
+	code := cli.Drive(c, args, stderr, stderr)
+	// --help exits 0 and is not a reason to proceed; cobra returns nil for it.
+	return o, code, code == 0 && !cli.HelpRequested(c)
 }
 
 func run(o options, stdout, stderr io.Writer, load func(string, []string) (*Index, error)) int {

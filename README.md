@@ -483,3 +483,41 @@ stub `gh` on PATH -- a wrong field name there would make every runner in the
 fleet look healthy, silently.
 
 See "What one pass costs" above before scheduling it beside another sweep.
+
+## Flags: one dash became two
+
+Every command here is a **cobra** command. Until v0.20.1 they used the standard
+`flag` package, and the two disagree about one spelling — the one this fleet
+typed everywhere:
+
+    flag   accepts -releases, --releases and -j   (one dash or two, any length)
+    pflag  accepts --releases and -j              (one dash means ONE letter)
+
+So `vulngate -go go1.27.2` is no longer the long flag. **It still works**, and
+says so once on stderr: `internal/cli`'s `Compat` rewrites a single-dash long
+flag into its double-dash spelling when the long flag is registered, warns, and
+will not outlive the next major. It leaves an unknown token alone so pflag still
+rejects it, copies everything after `--` verbatim, and **refuses the ambiguous
+case** — `-ab` when `ab` is a long flag and `a` and `b` are both shorthands,
+where pflag reads a cluster and `flag` read the long name.
+
+The scope was measured before the migration began, with a Go tool rather than a
+guess: **16 call sites in workflows across 13 repositories**, all of them
+`vulngate -go` or `brandcheck -org`, plus 71 more in this repository's scripts,
+READMEs and Go source. There was no flag day, because those lanes install a
+**pinned** version: a lane on v0.20.1 keeps working unchanged, and only a lane
+that bumps has to spell its flags with two dashes.
+
+One-letter flags did not move. `-q`, `-n`, `-j`, `-v` are registered as
+shorthands of a named flag (`--quiet`, `--dry-run`, `--jobs`, `--verbose`), so
+every existing call site reaches them.
+
+`internal/cli` carries the three things all of them shared, so that they are
+decided once instead of thirty-three times:
+
+| | |
+|---|---|
+| `Exit{Code, Err}`, `Found`, `Unanswerable`, `Wrap`, `FromStatus` | the exit convention — **0** clean, **1** found something, **2** could not look. `FromStatus` lets a `run(...) int` keep its body verbatim, which matters: those statuses are chosen one defect at a time, and re-deciding thirty-three of them by hand is how a 1 becomes a 2. |
+| `New`, `Run`, `Drive`, `Status` | `Run` is the whole of every `main()`. `Drive` runs a command exactly as `Run` does, shim included, and returns the status instead of exiting — so each command's existing `run(args, out, errOut) int` became a one-line adapter and **every test written against it kept passing unchanged**. What those tests exercise is now the real surface: pflag parsing, the shim, the status mapping. |
+| `SetInterspersed(false)` and help on **stderr** | two differences from `flag` that change what a command MEANS, not how it is spelled. `flag` stops parsing at the first operand and pflag does not, so `brief -n 5 go test -count=1` would have had the child's flags read as brief's. And cobra writes help to stdout, which is these commands' answer — a child's output, a CI annotation, a table something counts. |
+

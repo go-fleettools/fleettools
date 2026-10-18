@@ -24,7 +24,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,16 +36,28 @@ import (
 
 	"golang.org/x/mod/modfile"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
+const longHelp = `Reports every repository in the fleet whose root go.mod requires a given module,
+and at which version.
+
+It reads fleetfind's inventory rather than listing organisations itself, and
+fetches one go.mod per repository.
+
+⛔ What it does NOT see is printed with every answer: private repositories,
+repositories created after the inventory was taken, nested modules, and
+non-default branches. A count that does not say what it could not read is a
+count somebody will quote as a total.
+
+Exit status: 0 every repository was read, 2 some could not be — an unread
+repository makes the count a floor and not a total.`
+
 func main() {
-	o, code, proceed := parseArgs(os.Args[1:], os.Stderr)
-	if !proceed {
-		os.Exit(code)
-	}
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(o, os.Stdout, os.Stderr, fetchGoMod))
+	cli.Run(RootCmd())
 }
 
 type options struct {
@@ -55,26 +66,48 @@ type options struct {
 	archived                   bool
 }
 
+// RootCmd builds the command with the real fetch behind it.
+func RootCmd() *cobra.Command {
+	var o options
+	c := command(&o)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		if err := validate(&o, args); err != nil {
+			return err
+		}
+		return cli.FromStatus(run(o, cli.Out(cmd), cli.Err(cmd), fetchGoMod))
+	}
+	return c
+}
+
+func command(o *options) *cobra.Command {
+	c := cli.New("gorequires --module PATH [flags]",
+		"Which repositories require a module, and at which version", longHelp)
+	f := c.Flags()
+	f.StringVar(&o.module, "module", "", "the module path to look for (required)")
+	f.StringVar(&o.version, "version", "", "only report go.mod files requiring exactly this version")
+	f.StringVar(&o.inventory, "inventory", defaultInventory(),
+		"fleetfind's inventory (fleetfind --refresh writes it)")
+	// --jobs keeps the old -j as its shorthand, so existing call sites reach it.
+	f.IntVarP(&o.jobs, "jobs", "j", 8, "go.mod files fetched at once")
+	f.BoolVar(&o.archived, "archived", false, "include archived repositories")
+	return c
+}
+
+func validate(o *options, args []string) error {
+	if o.module == "" || len(args) > 0 || o.jobs < 1 {
+		return cli.Unanswerable("usage: gorequires --module PATH [--version vX.Y.Z] " +
+			"[--inventory FILE] [-j N] [--archived]")
+	}
+	return nil
+}
+
+// parseArgs keeps the signature this command's tests were written against.
 func parseArgs(args []string, stderr io.Writer) (options, int, bool) {
-	fs := flag.NewFlagSet("gorequires", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	o := options{}
-	fs.StringVar(&o.module, "module", "", "the module path to look for (required)")
-	fs.StringVar(&o.version, "version", "", "only report go.mod files requiring exactly this version")
-	fs.StringVar(&o.inventory, "inventory", defaultInventory(), "fleetfind's inventory (fleetfind -refresh writes it)")
-	fs.IntVar(&o.jobs, "j", 8, "go.mod files fetched at once")
-	fs.BoolVar(&o.archived, "archived", false, "include archived repositories")
-	switch err := fs.Parse(args); {
-	case errors.Is(err, flag.ErrHelp):
-		return o, 0, false
-	case err != nil:
-		return o, 2, false
-	}
-	if o.module == "" || fs.NArg() > 0 || o.jobs < 1 {
-		fmt.Fprintln(stderr, "usage: gorequires -module PATH [-version vX.Y.Z] [-inventory FILE] [-j N] [-archived]")
-		return o, 2, false
-	}
-	return o, 0, true
+	var o options
+	c := command(&o)
+	c.RunE = func(_ *cobra.Command, rest []string) error { return validate(&o, rest) }
+	code := cli.Drive(c, args, stderr, stderr)
+	return o, code, code == 0 && !cli.HelpRequested(c)
 }
 
 func defaultInventory() string {
