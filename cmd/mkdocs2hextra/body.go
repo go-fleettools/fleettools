@@ -49,6 +49,13 @@ var (
 	// A link to another page of the same site, which Hugo does not serve under
 	// that name.
 	mdLinkRE = regexp.MustCompile(`\]\(([^)\s]+?\.md)(#[^)\s]*)?\)`)
+	// ⛔ AND THE SAME LINK WRITTEN AS RAW HTML. 12 of the 85 sites use the
+	// md_in_html extension and write card grids as <a href="page.md">, which a
+	// Markdown-link regexp cannot see. The local Hugo build does not mind —
+	// an attribute is an attribute — so this was found only by the link
+	// checker in CI, on the first site with such a grid: three dead links on
+	// its front page, pointing at .md files no Hugo site serves.
+	htmlLinkRE = regexp.MustCompile(`href=(["'])([^"'\s]+?\.md)(#[^"'\s]*)?(["'])`)
 	// A fence, so that none of the above is applied inside one.
 	fenceRE = regexp.MustCompile("^\\s*(```|~~~)")
 )
@@ -171,6 +178,21 @@ func convertInline(line string) (string, conversion) {
 			target = strings.TrimSuffix(target, "index.md") + "_index.md"
 		}
 		return fmt.Sprintf(`]({{< relref "%s%s" >}})`, target, anchor)
+	})
+	line = htmlLinkRE.ReplaceAllStringFunc(line, func(m string) string {
+		parts := htmlLinkRE.FindStringSubmatch(m)
+		target, anchor := parts[2], parts[3]
+		if strings.HasPrefix(target, "http") || strings.HasPrefix(target, "/") {
+			return m
+		}
+		s.Links++
+		if target == "index.md" || strings.HasSuffix(target, "/index.md") {
+			target = strings.TrimSuffix(target, "index.md") + "_index.md"
+		}
+		// ⛔ SINGLE QUOTES around the attribute, because the shortcode brings
+		// its own double ones: href="{{< relref "x.md" >}}" ends the attribute
+		// at the shortcode's first quote and leaves the rest as stray markup.
+		return fmt.Sprintf(`href='{{< relref "%s%s" >}}'`, target, anchor)
 	})
 	if attrListRE.MatchString(line) && !strings.HasPrefix(strings.TrimSpace(line), "|") {
 		// ⛔ Dropped and COUNTED. attr_list is 84 of the 85 sites' extensions,

@@ -510,3 +510,77 @@ func TestWhichRepositoryTheReadmeIsFor(t *testing.T) {
 		}
 	}
 }
+
+// ⛔ A LINK WRITTEN AS RAW HTML is the same defect and a different regexp. 12
+// of the 85 sites use md_in_html and write card grids as
+// `<a href="page.md">`; the local Hugo build does not mind — an attribute is
+// an attribute — so the first site with such a grid (go-aiquota/docs) shipped
+// THREE DEAD LINKS on its front page and only the link checker in CI saw
+// them.
+func TestALinkWrittenAsHtml(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{
+			`<a class="repo-card" href="repos/tray.md"><code>tray</code></a>`,
+			`<a class="repo-card" href='{{< relref "repos/tray.md" >}}'><code>tray</code></a>`,
+		},
+		{
+			`<a href='guide.md#part-two'>part two</a>`,
+			`<a href='{{< relref "guide.md#part-two" >}}'>part two</a>`,
+		},
+		{
+			`<a href="index.md">home</a>`,
+			`<a href='{{< relref "_index.md" >}}'>home</a>`,
+		},
+		// Left alone: an absolute path, an external URL, and a link to
+		// something that is not a page.
+		{`<a href="/docs/x.md">x</a>`, `<a href="/docs/x.md">x</a>`},
+		{`<a href="https://example.com/a.md">a</a>`, `<a href="https://example.com/a.md">a</a>`},
+		{`<img src="diagram.png">`, `<img src="diagram.png">`},
+	} {
+		got, _ := convertBody(c.in + "\n")
+		if got != c.want+"\n" {
+			t.Errorf("\n got %q\nwant %q", got, c.want)
+		}
+	}
+}
+
+// ⛔ THE SENTENCE DOES NOT END AT THE FIRST FULL STOP, because the first full
+// stop is inside the URL: `squidfunk.github.io`. The first version of this cut
+// there and left `github.io/mkdocs-material/) and versioned with [mike](…)`
+// standing in the README — visible in the very first diff, which is the
+// argument for a tool that writes files a person then reads.
+func TestTheBuiltWithSentenceIsReplacedWhole(t *testing.T) {
+	for _, c := range []struct{ name, in string }{
+		{
+			"MkDocs and mike, over two lines",
+			"built\nwith [MkDocs Material](https://squidfunk.github.io/mkdocs-material/) and\n" +
+				"versioned with [mike](https://github.com/jimporter/mike). Published to the\n" +
+				"`gh-pages` branch and served at <https://x.github.io/docs/>.\n",
+		},
+		{
+			"MkDocs alone",
+			"built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/). Published to the\n" +
+				"`gh-pages` branch.\n",
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, changed := updateREADME(c.in, "x/docs", "https://x.github.io/docs/")
+			if !changed {
+				t.Fatal("nothing was recognised")
+			}
+			for _, leftover := range []string{"squidfunk", "github.io/mkdocs-material", "jimporter", "MkDocs", "mike]"} {
+				if strings.Contains(got, leftover) {
+					t.Errorf("%q survived:\n%s", leftover, got)
+				}
+			}
+			// The rest of the sentence is kept, and the full stop is not
+			// doubled.
+			if !strings.Contains(got, "Published to the") {
+				t.Errorf("the rest of the sentence was eaten:\n%s", got)
+			}
+			if strings.Contains(got, "..") {
+				t.Errorf("a doubled full stop:\n%s", got)
+			}
+		})
+	}
+}

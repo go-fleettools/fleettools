@@ -41,16 +41,28 @@ func updateREADME(current, repo, siteURL string) (out string, changed bool) {
 	out = current
 
 	// 1. What it is built with.
+	//
+	// ⛔ NOT "TO THE NEXT FULL STOP". That was the first version, and the next
+	// full stop is inside the URL: `squidfunk.github.io` ends the match at the
+	// dot after "squidfunk", leaving `github.io/mkdocs-material/) and
+	// versioned with [mike](…)` standing in the README of every site. Visible
+	// in the first diff, which is the argument for a tool that writes files a
+	// person then reads.
+	//
+	// The span is from the MkDocs link to the end of the mike link beside it,
+	// or to the end of the MkDocs link when there is none — both forms occur,
+	// and a link's extent is something a reader of Markdown can state exactly.
 	if i := strings.Index(out, mkdocsBuiltWith); i >= 0 {
-		// The sentence runs to the next full stop, and both forms occur:
-		// "built with MkDocs Material and versioned with mike." and
-		// "built with MkDocs Material." alone.
-		end := strings.Index(out[i:], ".")
-		if end < 0 {
-			end = len(out) - i
+		end := closeParen(out, i)
+		if m := strings.Index(out[i:], mikeLink); m >= 0 && m < 200 {
+			end = closeParen(out, i+m)
+			// "and versioned with" sits between the two links and goes with
+			// them.
 		}
-		out = out[:i] + hugoBuiltWith + out[i+end+1:]
-		changed = true
+		if end > i {
+			out = out[:i] + hugoBuiltWith + out[end:]
+			changed = true
+		}
 	}
 
 	// 2. The local preview: a Python virtual environment becomes a submodule
@@ -73,9 +85,26 @@ func updateREADME(current, repo, siteURL string) (out string, changed bool) {
 	return out, changed
 }
 
+// closeParen is the index just past the `)` that ends the Markdown link
+// starting at or after i.
+func closeParen(s string, i int) int {
+	open := strings.Index(s[i:], "](")
+	if open < 0 {
+		return i
+	}
+	close := strings.Index(s[i+open:], ")")
+	if close < 0 {
+		return i
+	}
+	return i + open + close + 1
+}
+
+// ⛔ NO FULL STOP AT THE END: what follows the replaced span is the rest of
+// the original sentence — ". Published to the `gh-pages` branch and served
+// at …" — and a period here would double it.
 const hugoBuiltWith = "[Hugo](https://gohugo.io/) and this fleet's " +
 	"[Hextra fork](https://github.com/tannevaled/hextra) — upstream Hextra plus " +
-	"the opt-in features the fleet's sites use."
+	"the opt-in features the fleet's sites use"
 
 const localPreview = "```bash\n" +
 	"git submodule update --init --recursive   # themes/hextra, pinned at a release tag\n" +
