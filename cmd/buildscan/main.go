@@ -89,7 +89,9 @@
 //
 // ⛔ It COMPILES the tree, which means it builds the dependencies that tree
 // names and may fetch them. The scan without it reads files and makes no API
-// calls at all; `-vet` does not have that property, and pointing it at a
+// call at all -- one local `git` for each checkout that has no workflows, to
+// tell a repository missing a lane from a tree with no origin, and nothing
+// else; `-vet` does not have that property, and pointing it at a
 // checkout somebody else controls is the same decision as building that
 // checkout. GOOS, GOARCH and the tags reach `go` as arguments and environment
 // values, never through a shell, and a `working-directory` that leaves the
@@ -131,7 +133,17 @@ type finding struct {
 	open    []unresolved
 	vetFail []vetFailure
 	noCI    bool
-	noGo    bool
+	// noRemote: no origin at all, so this tree exists only on this disk.
+	//
+	// ⛔ It is the difference between a repository with no CI and a directory
+	// that could not have any. Ten checkouts came back "no workflows at all"
+	// on 2026-10-18, and reading them one by one: five were forks or upstream
+	// (hashicorp's hcl, usbarmory's tamago…), two had no remote, one held no
+	// Go file at all and two were two- and three-file stubs. Not one was a
+	// repository of ours missing a lane — so the ten was a number with no
+	// decision behind it, which is the kind this tool exists to avoid.
+	noRemote bool
+	noGo     bool
 }
 
 // ignoreTag is the constraint that means "never compile this".
@@ -147,7 +159,17 @@ type vetFailure struct {
 // tool could not resolve is worth seeing, since it bounds what the rest of the
 // report means.
 func (f finding) interesting() bool {
-	return f.actionable() || len(f.open) > 0
+	// ⛔ `f.noCI` is here as well as in actionable(), and dropping it made
+	// three checkouts VANISH rather than be printed-and-not-counted: with no
+	// origin they are not actionable, and with no unresolved note they were
+	// not interesting either, so the branch that counts them never ran and the
+	// summary line never appeared. The fleet run said "7 with no workflows"
+	// where the previous one said 10 and accounted for the other three
+	// nowhere.
+	//
+	// The test for it could not see that: it used -dir, which prints every
+	// repository whatever this says.
+	return f.actionable() || len(f.open) > 0 || f.noCI
 }
 
 // actionable decides whether it COUNTS towards "something to decide about".
@@ -157,7 +179,10 @@ func (f finding) interesting() bool {
 // read that step" is a limit of the instrument, and putting it in the same
 // number as a file nobody compiles makes the number mean neither.
 func (f finding) actionable() bool {
-	return len(f.orphans) > 0 || len(f.unbuilt) > 0 || len(f.vetFail) > 0 || f.noCI
+	// ⛔ A tree with no REMOTE is not a repository missing a lane: nothing can
+	// run CI for something nobody can fetch. Still printed, because "it exists
+	// only on this disk" is worth seeing -- just not counted as a decision.
+	return len(f.orphans) > 0 || len(f.unbuilt) > 0 || len(f.vetFail) > 0 || (f.noCI && !f.noRemote)
 }
 
 func run(argv []string, stdout, stderr io.Writer) int {
@@ -256,6 +281,13 @@ func scan(dir, name string) (finding, error) {
 	}
 	f.configs, f.open = cfgs, open
 	f.noCI = wfFiles == 0
+	if f.noCI {
+		// Asked only when it changes the answer: one `git` per checkout with
+		// no workflows, not per checkout.
+		if _, ok := checkout.DefaultRef(dir); !ok {
+			f.noRemote = true
+		}
+	}
 
 	files, err := goFiles(dir)
 	if err != nil {
@@ -542,6 +574,7 @@ type totals struct {
 	repos, hits      int
 	files, modules   int
 	noCI, unreadable int
+	noRemote         int
 	vetFails         int
 }
 
@@ -564,6 +597,10 @@ func report(found []finding, verbose, all, fail, vetted bool, w io.Writer) int {
 		}
 		fmt.Fprintf(w, "\n%s\n", f.repo)
 		switch {
+		case f.noCI && f.noRemote:
+			t.noRemote++
+			fmt.Fprintln(w, "  no workflows, and no origin either: this exists only on this disk, "+
+				"so there is nowhere for CI to run")
 		case f.noCI:
 			t.noCI++
 			fmt.Fprintln(w, "  no workflows at all: every configuration below is compiled by nobody")
@@ -630,6 +667,9 @@ func report(found []finding, verbose, all, fail, vetted bool, w io.Writer) int {
 	}
 	if t.noCI > 0 || t.unreadable > 0 {
 		fmt.Fprintf(w, "  %d with no workflows at all, %d whose steps could not be read\n", t.noCI, t.unreadable)
+	}
+	if t.noRemote > 0 {
+		fmt.Fprintf(w, "  %d with no workflows AND no origin, which are not counted above\n", t.noRemote)
 	}
 	if t.hits > 0 && fail {
 		return 1
