@@ -687,6 +687,12 @@ func TestTheAnchorMkdocsGaveEachHeading(t *testing.T) {
 		{"## Options, flags & friends", "options-flags-friends"},
 		{"## `escapeHTML` — the five-character escape", "escapehtml-the-five-character-escape"},
 		{"## **Bold** and _italic_", "bold-and-italic"},
+		// ⛔ An INTRAWORD underscore is an identifier, not emphasis:
+		// Python-Markdown keeps it, and go-ruby-minitest/docs links to
+		// #mu_pp. Stripping underscores wholesale gave `mupp` and broke that
+		// link — the gate caught the fix, not the defect.
+		{"## mu_pp", "mu_pp"},
+		{"## assert_equal and refute_nil", "assert_equal-and-refute_nil"},
 		{"## A [link](https://example.com) inside", "a-link-inside"},
 		{"## Déjà vu", "dj-vu"}, // non-ASCII is dropped, as Python-Markdown drops it
 		{"## 100% of statements", "100-of-statements"},

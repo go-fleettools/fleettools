@@ -40,10 +40,17 @@ var (
 	hasID     = regexp.MustCompile(`\{#[^}]+\}\s*$`)
 	// Inline markup that is not part of the heading's text.
 	mdLinkTextRE = regexp.MustCompile(`\[([^\]]*)\]\([^)]*\)`)
-	mdMarkersRE  = regexp.MustCompile("[*_`~]")
-	htmlTagRE    = regexp.MustCompile(`<[^>]+>`)
-	runsRE       = regexp.MustCompile(`[-\s]+`)
-	dropRE       = regexp.MustCompile(`[^\w\s-]`)
+	// ⛔ `*`, a backtick and `~` are always markup in a heading. An
+	// UNDERSCORE is not: `## mu_pp` is an identifier, and Python-Markdown
+	// keeps it — its slug is `mu_pp`, which is what go-ruby-minitest's own
+	// link says. Stripping underscores wholesale gave `mupp` and broke that
+	// link, which is the gate catching the fix rather than the defect.
+	mdMarkersRE = regexp.MustCompile("[*`~]")
+	// An underscore that wraps a word IS emphasis: `_italic_`.
+	wrapUnderRE = regexp.MustCompile(`(^|[^\w])_+|_+($|[^\w])`)
+	htmlTagRE   = regexp.MustCompile(`<[^>]+>`)
+	runsRE      = regexp.MustCompile(`[-\s]+`)
+	dropRE      = regexp.MustCompile(`[^\w\s-]`)
 )
 
 // mkdocsSlug is Python-Markdown's slugify, which is what MkDocs Material uses
@@ -57,6 +64,7 @@ func mkdocsSlug(heading string) string {
 	text := mdLinkTextRE.ReplaceAllString(heading, "$1")
 	text = htmlTagRE.ReplaceAllString(text, "")
 	text = mdMarkersRE.ReplaceAllString(text, "")
+	text = wrapUnderRE.ReplaceAllString(text, "$1$2")
 
 	// NFKD and "drop what is not ASCII", which is what makes an em dash
 	// disappear rather than become a hyphen.
