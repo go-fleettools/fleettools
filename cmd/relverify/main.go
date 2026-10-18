@@ -116,20 +116,23 @@ func verify(w io.Writer, repo, tag, dir string, wait time.Duration, runHost bool
 		}
 		return false, fmt.Errorf("%w: no GitHub release for %s; the tag's runs (%s) published none", errUnverifiable, tag, strings.Join(names, ", "))
 	}
-	if err := os.RemoveAll(dir); err != nil {
+	final := dir
+	dir, err = runDir(final)
+	if err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return false, err
-	}
+	published := false
+	defer func() {
+		if !published {
+			os.RemoveAll(dir)
+		}
+	}()
 	if _, err := gh("release", "download", tag, "-R", repo, "-D", dir); err != nil {
 		if strings.Contains(err.Error(), "no assets") {
 			return false, fmt.Errorf("%w: the release for %s publishes no files: release notes only", errUnverifiable, tag)
 		}
 		return false, fmt.Errorf("%w: download: %v", errUnverifiable, err)
 	}
-	fmt.Fprintf(w, "  in   %s\n", dir)
-
 	files, err := checkFiles(w, repo, tag, commit, dir)
 	if err != nil {
 		return false, err
@@ -144,12 +147,44 @@ func verify(w io.Writer, repo, tag, dir string, wait time.Duration, runHost bool
 			ok = false
 		}
 	}
+	if err := publishRun(dir, final); err != nil {
+		published = true // kept where it is, and said so
+		fmt.Fprintf(w, "  kept %s (%v)\n", dir, err)
+	} else {
+		published = true
+		fmt.Fprintf(w, "  kept %s\n", final)
+	}
 	verdict := "verified"
 	if !ok {
 		verdict = "FAILED"
 	}
 	fmt.Fprintf(w, "%s %s: %d file(s), %s\n", repo, tag, len(files), verdict)
 	return ok, nil
+}
+
+// runDir is a directory of this run's own, beside final.
+//
+// ⛔ Two runs on one release used to share final: each removed it and
+// downloaded into it, so the second emptied the first mid-check, and the first
+// reported "no such file" for files the release did publish (2026-10-18,
+// fileshare v0.30.0, two runs a minute apart). A run now downloads and checks
+// in a directory nobody else knows, and only the finished result is moved to
+// final -- where a later reader, a page's transcript, expects it.
+func runDir(final string) (string, error) {
+	parent := filepath.Dir(final)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(parent, filepath.Base(final)+".run-*")
+}
+
+// publishRun replaces final with a finished run. Two runs finishing together
+// each leave a complete download there, which is all a reader needs.
+func publishRun(run, final string) error {
+	if err := os.RemoveAll(final); err != nil {
+		return err
+	}
+	return os.Rename(run, final)
 }
 
 // tagCommit is the commit a tag names, through an annotated tag if it is one.
@@ -284,6 +319,12 @@ type file struct {
 	attested string // "" when gh attestation verify accepted it
 	build    string // "" for a correct Go binary or a file that is not one
 	goBinary bool
+	// inner are the Go binaries an archive holds, by their names in it.
+	inner []string
+	// hostName and hostData are the Go binary inside this machine's archive,
+	// kept to be run once every check has passed.
+	hostName string
+	hostData []byte
 }
 
 func (f file) ok() bool { return f.listed && f.sum == "" && f.attested == "" && f.build == "" }
@@ -325,6 +366,8 @@ func checkFiles(w io.Writer, repo, tag, commit, dir string) ([]file, error) {
 		if bi, err := buildinfo.ReadFile(path); err == nil {
 			f.goBinary = true
 			f.build = checkBuild(bi.Main.Version, bi.Settings, tag, commit)
+		} else if isArchive(e.Name()) {
+			checkArchive(&f, path, tag, commit)
 		}
 		files = append(files, f)
 		report(w, f)
@@ -343,11 +386,39 @@ func checkFiles(w io.Writer, repo, tag, commit, dir string) ([]file, error) {
 	return files, nil
 }
 
+// checkArchive holds every Go binary inside an archive to the build checks.
+// An archive that cannot be read fails: a release file nobody can open is not
+// one anybody can install.
+func checkArchive(f *file, path, tag, commit string) {
+	ms, err := goBinariesIn(path)
+	if err != nil {
+		f.build = "archive: " + err.Error()
+		return
+	}
+	var problems []string
+	for _, m := range ms {
+		f.goBinary = true
+		f.inner = append(f.inner, m.name)
+		if p := checkBuild(m.bi.Main.Version, m.bi.Settings, tag, commit); p != "" {
+			problems = append(problems, m.name+": "+p)
+		}
+		if isHost(f.name) && f.hostData == nil {
+			f.hostName, f.hostData = m.name, m.data
+		}
+	}
+	f.build = strings.Join(problems, "; ")
+}
+
 func report(w io.Writer, f file) {
 	if f.ok() {
 		what := "sum, attestation"
-		if f.goBinary {
+		switch {
+		case len(f.inner) > 0:
+			what += ", build info of " + strings.Join(f.inner, ", ")
+		case f.goBinary:
 			what += ", build info"
+		case isArchive(f.name):
+			what += " (no Go binary inside)"
 		}
 		fmt.Fprintf(w, "  ok   %-32s %s\n", f.name, what)
 		return
@@ -444,29 +515,56 @@ func cmp(s, otherwise string) string {
 	return s
 }
 
-// hostSuffix is the name ending of this machine's binary.
-func hostSuffix() string {
-	s := "-" + runtime.GOOS + "-" + runtime.GOARCH
-	if runtime.GOOS == "windows" {
-		s += ".exe"
+// isHost says whether a published file is this machine's: its name holds
+// GOOS and GOARCH, joined the way one release or another joins them --
+// tool-darwin-arm64, tool_v1.2.3_darwin_arm64.tar.gz -- and followed by
+// nothing, an extension, or another field. arm must not match arm64, nor
+// amd64 amd64v3.
+func isHost(name string) bool {
+	for _, sep := range []string{"-", "_"} {
+		key := sep + runtime.GOOS + sep + runtime.GOARCH
+		for rest := name; ; {
+			i := strings.Index(rest, key)
+			if i < 0 {
+				break
+			}
+			rest = rest[i+len(key):]
+			if rest == "" || rest[0] == '.' || rest[0] == '_' || rest[0] == '-' {
+				return true
+			}
+		}
 	}
-	return s
+	return false
 }
 
 // runHostBinary runs this machine's binary with --version and wants the tag
-// in what it prints. It runs only a file every other check accepted.
+// in what it prints. It runs only a file every other check accepted -- for an
+// archive, the Go binary read out of it, written under its base name alone so
+// that a member called ../../x lands nowhere but here.
 func runHostBinary(w io.Writer, dir, tag string, files []file) bool {
-	i := slices.IndexFunc(files, func(f file) bool { return strings.HasSuffix(f.name, hostSuffix()) })
+	i := slices.IndexFunc(files, func(f file) bool { return isHost(f.name) && f.goBinary })
 	if i < 0 {
-		fmt.Fprintf(w, "  --   no *%s binary to run\n", hostSuffix())
+		fmt.Fprintf(w, "  --   no %s/%s Go binary to run\n", runtime.GOOS, runtime.GOARCH)
 		return true
 	}
 	f := files[i]
-	if !f.ok() || !f.goBinary {
+	if !f.ok() {
 		fmt.Fprintf(w, "  --   %s not run: it failed a check above\n", f.name)
-		return f.ok()
+		return false
 	}
 	path := filepath.Join(dir, f.name)
+	if f.hostData != nil {
+		host := filepath.Join(dir, ".host")
+		if err := os.MkdirAll(host, 0o755); err != nil {
+			fmt.Fprintf(w, "  FAIL %-32s %v\n", f.name, err)
+			return false
+		}
+		path = filepath.Join(host, filepath.Base(filepath.Clean("/"+f.hostName)))
+		if err := os.WriteFile(path, f.hostData, 0o755); err != nil {
+			fmt.Fprintf(w, "  FAIL %-32s %v\n", f.name, err)
+			return false
+		}
+	}
 	if err := os.Chmod(path, 0o755); err != nil {
 		fmt.Fprintf(w, "  FAIL %-32s %v\n", f.name, err)
 		return false
