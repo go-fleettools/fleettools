@@ -204,21 +204,25 @@ jobs:
           name: site
           path: site
 
-      # Only the version being built is replaced; every other version stays as
-      # it is, and /docs/latest/ follows the newest.
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+
+      # ⛔ THE VERSION GOES AT THE BRANCH ROOT, and the first version of this
+      # step got that wrong in 76 repositories at once: it wrote
+      # docs/<version>/, but a project repository named "docs" is ALREADY
+      # served at /docs/, so the site landed at /docs/docs/main/ while
+      # /docs/latest/ went on serving the MkDocs build mike had left there.
+      # Both URLs answered 200, which is why no check caught it.
+      #
+      # pagespublish replaces that version and nothing else, writes
+      # versions.json in mike's format (what the Hextra fork's version selector
+      # reads), points latest at the newest release, and leaves the root
+      # redirecting to it.
       - name: Publish ${{ needs.build.outputs.version }}
-        working-directory: gh-pages
-        run: |
-          version="${{ needs.build.outputs.version }}"
-          rm -rf "docs/${version}"
-          mkdir -p "docs/${version}"
-          cp -R ../site/. "docs/${version}/"
-          newest=$(ls docs | grep -E '^[0-9]+\.[0-9]+$' | sort -t. -k1,1n -k2,2n | tail -1 || true)
-          if [ -n "${newest}" ]; then
-            rm -rf docs/latest
-            cp -R "docs/${newest}" docs/latest
-          fi
-          touch .nojekyll
+        run: >-
+          go run github.com/go-fleettools/fleettools/cmd/pagespublish@%s
+          "${{ needs.build.outputs.version }}" site gh-pages
 
       - name: Push gh-pages
         working-directory: gh-pages
@@ -232,5 +236,5 @@ jobs:
           fi
           git commit -q -m "Deployed ${GITHUB_SHA::7} to ${{ needs.build.outputs.version }} with Hugo ${HUGO_VERSION}"
           git push origin HEAD:gh-pages
-`, base, base)
+`, base, base, pagespublishPin)
 }
