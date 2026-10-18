@@ -231,7 +231,7 @@ func orgsToSweep(named []string, all func() ([]byte, error)) ([]string, error) {
 }
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help" || os.Args[1] == "help") {
+	if len(os.Args) > 1 && fleet.IsHelpRequest(os.Args[1]) {
 		fmt.Println("usage: prmerge [org...]")
 		fmt.Println()
 		fmt.Println("Merges dependency pull requests that are mergeable AND fully green.")

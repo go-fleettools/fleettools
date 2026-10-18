@@ -63,8 +63,8 @@ Use the same GOOS, GOARCH and -tags for go list as for the build.
 Exits 2 on an error.
 `)
 	}
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	if fs.NArg() != 1 || *deps == "" || (*by != "package" && *by != "module") {
 		fs.Usage()

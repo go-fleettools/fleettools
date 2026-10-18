@@ -40,8 +40,8 @@ func run(stdout, stderr io.Writer, args []string) int {
 	fs := flag.NewFlagSet("prscan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	all := fs.Bool("all", false, "list every repository, not the busiest 25")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 
 	orgs, err := fleet.Orgs()

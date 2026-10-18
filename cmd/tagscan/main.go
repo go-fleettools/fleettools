@@ -77,8 +77,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tagscan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	only := fs.String("orgs", "", "comma-separated organisations instead of the whole fleet")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	orgs, err := organisations(*only)
 	if err != nil {

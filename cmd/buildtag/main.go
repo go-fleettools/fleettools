@@ -57,11 +57,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: buildtag -and EXPR [-n] file.go...")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	if *and == "" || fs.NArg() == 0 {
 		fs.Usage()

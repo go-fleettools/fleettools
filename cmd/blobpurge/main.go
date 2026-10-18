@@ -64,6 +64,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, usage)
 		return 2
 	}
+	// ⛔ A QUESTION IS NOT A MISTAKE, and this dispatch could not tell: `-h` is
+	// neither "scan" nor "strip", so it fell through to the unknown-subcommand
+	// branch below and answered 2. The subcommands' own flag sets were already
+	// right, which is why only `blobpurge -h` -- the spelling somebody types
+	// first -- was wrong.
+	if fleet.IsHelpRequest(args[0]) {
+		fmt.Fprintln(stdout, usage)
+		return 0
+	}
 	switch args[0] {
 	case "scan":
 		return runScan(args[1:], stdout, stderr)
@@ -237,8 +246,8 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("blobpurge scan", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	minFlag := fs.String("min", "512KiB", "report blobs of at least this size")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(stderr, usage)
@@ -291,8 +300,8 @@ func runStrip(args []string, stdout, stderr io.Writer) int {
 	var ids idList
 	fs.Var(&ids, "blob", "a blob ID to strip (repeatable)")
 	to := fs.String("to", "", "the new repository to write; must not exist")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	if fs.NArg() != 1 || len(ids) == 0 || *to == "" {
 		fmt.Fprintln(stderr, usage)

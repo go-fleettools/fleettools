@@ -58,7 +58,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"go/parser"
@@ -160,14 +159,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	min := flags.Int("min", 2, "how many French signals in one block before it is reported")
 	verbose := flags.Bool("v", false, "print the signals that matched and the first line of the block")
-	if err := flags.Parse(args); err != nil {
-		// ⛔ Asking for help is not a usage error. A command that answered 2 to
-		// -h would be reported as broken by whatever checks exit statuses, and
-		// a fleet tool that RAN on -h has already cost a full sweep here.
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 2
+	// ⛔ Asking for help is not a usage error, which is why this goes through
+	// fleet.ParseFlags: a command that answered 2 to -h would be reported as
+	// broken by whatever checks exit statuses, and a fleet tool that RAN on -h
+	// has already cost a full sweep here.
+	if code, ok := fleet.ParseFlags(flags, args); !ok {
+		return code
 	}
 	if *min < 1 {
 		fmt.Fprintln(stderr, "langcheck: -min must be at least 1; a threshold of zero reports every block")

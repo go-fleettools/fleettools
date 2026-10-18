@@ -97,8 +97,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// people to ignore it.
 	strict := fs.Bool("fail-on-drift", false, "exit non-zero when anything is unlisted or stale")
 	fs.Var(treeFlag{}, "tree", "owner/repo=dir: read this repository's surfaces from a\ncheckout instead of the API, so a pull request is judged on\nwhat it proposes rather than on its default branch")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	// ⛔ A result is only as good as what was read, so SAY what was read. A
 	// green run whose tree flag was ignored looks exactly like a green run that

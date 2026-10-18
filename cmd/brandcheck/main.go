@@ -51,8 +51,8 @@ func run(args []string, out, errOut io.Writer) int {
 	fs := flag.NewFlagSet("brandcheck", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	org := fs.String("org", "", "the organisation the assets are for (default: the directory's name)")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	dir := "."
 	if fs.NArg() > 0 {

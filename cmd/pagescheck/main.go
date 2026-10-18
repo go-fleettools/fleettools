@@ -82,8 +82,8 @@ func run(args []string, out, errOut io.Writer) int {
 	only := fs.String("orgs", "", "comma-separated organisations instead of the whole fleet")
 	failOnDrift := fs.Bool("fail-on-drift", false, "exit non-zero when a page is not the one its repository builds")
 	workers := fs.Int("workers", 6, "concurrent organisations")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	orgs, err := organisations(*only)
 	if err != nil {

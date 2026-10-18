@@ -145,8 +145,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	apply := fs.Bool("apply", false, "open pull requests; without it this only reports")
 	pause := fs.Duration("pause", 3*time.Second, "wait this long between repositories; GitHub's SECONDARY limit brakes a burst and waiting is the whole remedy")
 	limit := fs.Int("limit", 0, "stop after this many repositories that needed a change (0: no limit)")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	if *version == "" {
 		fmt.Fprintln(stderr, "gopin: -version is required: there is no safe default, and a default would be the same unreviewable choice as `stable`")

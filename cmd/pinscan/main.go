@@ -110,11 +110,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pinscan", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	verbose := flags.Bool("v", false, "name every pair rather than only counting")
-	if err := flags.Parse(args); err != nil {
-		if err == flag.ErrHelp {
-			return 0
-		}
-		return 2
+	if code, ok := fleet.ParseFlags(flags, args); !ok {
+		return code
 	}
 	roots := flags.Args()
 	if len(roots) == 0 {

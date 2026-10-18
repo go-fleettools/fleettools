@@ -156,8 +156,8 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string, exe runner) i
 		timeout  = fs.Duration("timeout", 20*time.Minute, "per clone and per govulncheck run")
 		self     = fs.Bool("selftest", false, "judge the recorded fixtures and exit: a known positive, a known clean, a known load failure")
 	)
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := fleet.ParseFlags(fs, args); !ok {
+		return code
 	}
 	if *self {
 		return selftest(stdout)

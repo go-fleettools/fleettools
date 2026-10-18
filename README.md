@@ -112,6 +112,54 @@ To rebuild them all:
 
     GOWORK=off GOBIN=~/.local/bin go install ./cmd/...
 
+### Every one of them answers `-h` with 0
+
+Measured 2026-10-18 by building all 25 flag-parsing commands and asking each
+one: **13 of 25 answered `-h` with exit 2.** Now 0 of 25 do.
+
+The cause is one the standard library hands you and then hides. `flag` reports
+a help request as an error like any other — `flag.ErrHelp` — and the two-line
+shape every command here was written with cannot tell it from a typo:
+
+```go
+if err := fs.Parse(args); err != nil {
+	return 2
+}
+```
+
+`flag.ExitOnError` *does* tell them apart: it calls `os.Exit(0)` for `ErrHelp`
+and `os.Exit(2)` for the rest. Every command here uses `flag.ContinueOnError`
+instead, so that `run()` can be tested rather than exit the process — and that
+choice silently gave the distinction up. It is decided in one place now,
+`fleet.ParseFlags`, which is also the only place the help branch has to be
+covered; thirteen hand-written copies would be thirteen branches nobody
+exercises, and the twelve commands that *did* get it right prove the shape is
+as easy to forget as it is to type.
+
+⛔ **The text gate missed one, and the behavioural measure caught it.**
+`blobpurge` dispatches on a subcommand, so `-h` was neither `scan` nor `strip`
+and fell through to "I do not know that subcommand" → 2, with both subcommands'
+own flag sets already correct. Running the binaries is what found it; a check
+reading sources was satisfied. `fleet.IsHelpRequest` answers that half, and the
+three commands that asked it by hand each knew a **different three** of the four
+spellings people type — `prmerge` missed `-help`, `pagespublish` missed `help`,
+`blobpurge` asked nothing at all.
+
+⛔ **And fixing it broke the control next door**, which is the lesson worth more
+than the fix: `TestEveryCommandReadsItsArguments` recognises the *spelling*
+`.Parse(` or `"-h"`, so moving the idiom into two helpers made it fail for 13
+commands it had just been made right about. A check that names one spelling of
+the answer fails at the refactor instead of at the defect. Both helpers are
+named in it now, because what they guarantee by construction — the arguments
+are read before anything happens — is the intent it was always testing.
+
+Why `-h` matters more here than in most repositories: these tools sweep
+thousands of repositories, `-h` is how somebody finds out what one does before
+running it, and a non-zero status there is read as "this tool is broken" by
+every wrapper that checks statuses. The sibling failure is worse and has
+happened — on 2026-10-11 `redscan -h`, run to read its flags, **started a sweep
+of every organisation** and had to be killed.
+
 
 **`prmerge` never merges a Go toolchain bump.** The org presets set
 `automerge: false` on it, and a sweep that merges whatever is green does not
