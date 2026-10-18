@@ -74,7 +74,7 @@ func TestTheConstructsAMkdocsPageHolds(t *testing.T) {
 		{
 			"two content tabs become one tab set",
 			"=== \"Go\"\n    go build\n\n=== \"Shell\"\n    make\n",
-			"{{< tabs items=\"Go,Shell\" >}}\n\n{{% tab %}}\n\ngo build\n\n{{% /tab %}}\n\n{{% tab %}}\n\nmake\n\n{{% /tab %}}\n\n{{< /tabs >}}\n",
+			"{{< tabs >}}\n\n{{% tab name=\"Go\" %}}\n\ngo build\n\n{{% /tab %}}\n\n{{% tab name=\"Shell\" %}}\n\nmake\n\n{{% /tab %}}\n\n{{< /tabs >}}\n",
 		},
 		{
 			"a link to another page resolves at build time",

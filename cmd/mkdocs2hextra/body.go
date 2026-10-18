@@ -281,9 +281,14 @@ func tabSet(lines []string, from int) ([]string, conversion, int) {
 		}
 	}
 	s.Tabs++
-	out := []string{fmt.Sprintf(`{{< tabs items="%s" >}}`, strings.Join(labels, ","))}
-	for _, body := range bodies {
-		out = append(out, "", `{{% tab %}}`, "")
+	// ⛔ "name" ON EACH TAB, not "items" on the set. The fork accepts items and
+	// calls warnf about it — and the build runs with --panicOnWarning, so a
+	// deprecation IS a failure. The first site with content tabs
+	// (cloud-boot/docs, six sets) refused to build and nothing was committed
+	// for it, which is the gate working rather than a setback.
+	out := []string{`{{< tabs >}}`}
+	for n, body := range bodies {
+		out = append(out, "", fmt.Sprintf(`{{%% tab name="%s" %%}}`, labels[n]), "")
 		out = append(out, body...)
 		out = append(out, "", `{{% /tab %}}`)
 	}
