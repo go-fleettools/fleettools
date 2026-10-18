@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -974,5 +975,109 @@ jobs:
 		// `./examples/wasm/"$k"` carries a shell variable, but it is a PACKAGE
 		// path and not a GOOS, so nothing here should be unresolved.
 		t.Errorf("unresolved: %s: %s", u.where, u.what)
+	}
+}
+
+// ⛔ A tree with NO ORIGIN is not a repository missing a lane.
+//
+// Ten checkouts came back "no workflows at all" on 2026-10-18. Read one by
+// one: five were forks or upstream, two had no remote, one held no Go file at
+// all and two were two- and three-file stubs. Not one was a repository of ours
+// missing a lane -- so the ten was a number with no decision behind it.
+//
+// Nothing can run CI for something nobody can fetch, so it is printed and not
+// counted. The control is the other half: a checkout WITH a remote and no
+// workflows still counts, because that one is a decision.
+func TestATreeWithNoRemoteIsNotCountedAsMissingCI(t *testing.T) {
+	root := t.TempDir()
+	orphan := filepath.Join(root, "o", "orphan")
+	write(t, orphan, "go.mod", "module example.test\n\ngo 1.27\n")
+	write(t, orphan, "a.go", "package a\n")
+
+	var out, errOut strings.Builder
+	if code := run([]string{"-dir", orphan, "-fail"}, &out, &errOut); code != 0 {
+		t.Errorf("-fail exited %d over a tree with no remote, want 0:\n%s", code, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "no origin either") {
+		t.Errorf("it did not say the tree has no remote:\n%s", got)
+	}
+	if !strings.Contains(got, "0 with something to decide about") {
+		t.Errorf("a tree nobody can fetch was counted as a decision:\n%s", got)
+	}
+	if !strings.Contains(got, "no workflows AND no origin") {
+		t.Errorf("the totals do not account for it separately:\n%s", got)
+	}
+
+	// The control: the same tree, with a remote, IS a decision. The remote
+	// does not have to exist -- DefaultRef only has to find one configured.
+	if _, err := exec.Command("git", "-C", orphan, "init", "-q").Output(); err != nil {
+		t.Skipf("git init is not available here: %v", err)
+	}
+	if _, err := exec.Command("git", "-C", orphan, "remote", "add", "origin",
+		"https://example.test/o/orphan.git").Output(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.Command("git", "-C", orphan, "symbolic-ref",
+		"refs/remotes/origin/HEAD", "refs/remotes/origin/main").Output(); err != nil {
+		t.Skipf("cannot point origin/HEAD here: %v", err)
+	}
+	out.Reset()
+	if code := run([]string{"-dir", orphan, "-fail"}, &out, &errOut); code != 1 {
+		t.Errorf("-fail exited %d over a repository with a remote and no workflows, want 1:\n%s",
+			code, out.String())
+	}
+	if !strings.Contains(out.String(), "no workflows at all") {
+		t.Errorf("the finding changed shape once there was a remote:\n%s", out.String())
+	}
+}
+
+// ⛔ And in the FLEET path, where nothing is printed by default.
+//
+// The test above uses -dir, which prints every repository whatever
+// interesting() says -- so it could not see the thing that actually went
+// wrong: with no origin a finding is not actionable, with no unresolved note
+// it was not interesting either, and three checkouts VANISHED instead of being
+// printed and not counted. The fleet run said "7 with no workflows" where the
+// previous one said 10, and accounted for the other three nowhere.
+//
+// This drives the same scan through -root, which is the mode that hides
+// uninteresting repositories.
+func TestATreeWithNoRemoteIsStillPrintedInAFleetScan(t *testing.T) {
+	root := t.TempDir()
+	// Two checkouts: one with nothing to say, one with no workflows and no
+	// origin. checkout.Repos only lists directories holding a .git DIRECTORY.
+	for _, name := range []string{"quiet", "orphan"} {
+		dir := filepath.Join(root, "o", name)
+		write(t, dir, "go.mod", "module example.test\n\ngo 1.27\n")
+		write(t, dir, "a.go", "package a\n")
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(t, filepath.Join(root, "o", "quiet"), ".github/workflows/ci.yml", `
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./...
+`)
+
+	var out, errOut strings.Builder
+	if code := run([]string{"-root", root, "-fail"}, &out, &errOut); code != 0 {
+		t.Errorf("-fail exited %d, want 0: nothing here is a decision\n%s", code, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "o/orphan") {
+		t.Errorf("the repository with no origin was not printed at all:\n%s", got)
+	}
+	if !strings.Contains(got, "no workflows AND no origin") {
+		t.Errorf("the totals do not account for it:\n%s", got)
+	}
+	// The control: the quiet one, which has a lane and nothing to report, is
+	// NOT printed -- otherwise this test would pass over a report that prints
+	// everything.
+	if strings.Contains(got, "o/quiet") {
+		t.Errorf("a repository with nothing to report was printed:\n%s", got)
 	}
 }
