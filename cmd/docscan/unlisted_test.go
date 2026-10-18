@@ -163,8 +163,22 @@ func TestClassifySortsTheOrganisation(t *testing.T) {
 	if f.archived["a-fork"] {
 		t.Error("a fork was recorded as archived")
 	}
-	if have["nonnil"] || have["a-fork"] {
-		t.Errorf("an archived repository or a fork counts as owned: %v", have)
+	// ⛔ ARCHIVED stays out of `have`, and that is load-bearing: it is what
+	// routes the name to the archived line instead of "the org no longer has".
+	if have["nonnil"] {
+		t.Errorf("an archived repository counts as owned, so it will be reported as GONE: %v", have)
+	}
+	// ⛔ A FORK, on the other hand, IS owned — and this assertion used to say the
+	// opposite, bundled with the archived one. Excluding it routed a surface that
+	// lists an owned fork to "the org no longer has", which is false: go-images
+	// got that sentence about jpeg2000, a fork pushed that same morning. There is
+	// no fork line to route to, so the only honest answer is that the name is
+	// owned and nothing is wrong.
+	if !have["a-fork"] {
+		t.Errorf("a fork is owned by the organisation and must count as owned: %v", have)
+	}
+	if f.archived["a-fork"] {
+		t.Error("a fork was recorded as archived")
 	}
 	if !have["brand"] || !have["composites"] {
 		t.Errorf("an owned name is missing: %v", have)
@@ -318,5 +332,43 @@ func TestSilentOrgNeedsBothHalves(t *testing.T) {
 	}
 	if silentOrg([]string{"profile"}, 7) {
 		t.Error("an organisation with a surface is judged by comparison, not by this")
+	}
+}
+
+// ⛔ Le contrôle ATTEIGNABLE que ce fichier exige de lui-même: supprimer les deux
+// lignes qui font entrer un fork dans `have` doit faire échouer quelque chose.
+// C'est ce test. Sans lui, la correction se ferait supprimer par accident — ce qui
+// est exactement ce qui est arrivé une fois aux deux lignes remplissant f.archived.
+func TestASurfaceListingAnOwnedForkIsNotStale(t *testing.T) {
+	var f finding
+	f.archived = map[string]bool{}
+	have, modules := classify("go-images", []ghRepo{
+		{Name: "images", Disk: 900},
+		{Name: "jpeg2000", Disk: 300, Fork: true},
+	}, &f)
+
+	// Le fork n'est pas un module: une surface ne lui doit pas de ligne.
+	if got := strings.Join(modules, " "); got != "images" {
+		t.Errorf("modules = %q, want %q — a fork is owned but not owed a row", got, "images")
+	}
+	// Mais il est possédé, donc une surface qui le nomme n'est pas périmée.
+	// La surface est un vrai profil, pas une liste de noms: c'est Entry qui
+	// décide ce que « nommer » veut dire, et on ne la contourne pas.
+	profile := Surface{Name: "profile", Org: "go-images", Body: `
+| [` + "`images`" + `](https://github.com/go-images/images) | the library |
+| [` + "`jpeg2000`" + `](https://github.com/go-images/jpeg2000) | a fork, pushed this morning |
+`}
+	if gone := Stale(profile, have); len(gone) > 0 {
+		t.Errorf("a surface listing an owned fork was called stale: %v\n"+
+			"That is the sentence go-images got about jpeg2000, a fork pushed that morning.", gone)
+	}
+	// Et le contrôle dans l'autre sens: un nom que l'organisation n'a vraiment
+	// plus doit toujours être rapporté, sinon ce test ne prouve rien.
+	away := Surface{Name: "profile", Org: "go-images", Body: `
+| [` + "`images`" + `](https://github.com/go-images/images) | the library |
+| [` + "`renamed-away`" + `](https://github.com/go-images/renamed-away) | gone |
+`}
+	if gone := Stale(away, have); len(gone) != 1 || gone[0] != "renamed-away" {
+		t.Errorf("a name the organisation really does not have was not reported: %v", gone)
 	}
 }
