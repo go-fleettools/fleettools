@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/go-fleettools/fleettools/internal/procstat"
 )
 
 func main() {
@@ -40,39 +41,31 @@ measurement can refuse to start on a loaded machine. Exits 2 on an error.
 	}
 	flag.Parse()
 
-	a, err := read()
+	a, err := procstat.ReadFile("/proc/stat")
 	if err != nil {
 		fail(err)
 	}
 	time.Sleep(*interval)
-	b, err := read()
+	b, err := procstat.ReadFile("/proc/stat")
 	if err != nil {
 		fail(err)
 	}
-	u := between(a.all, b.all)
-	cs := perCPU(a, b)
+	u := procstat.Between(a.All, b.All)
+	cs := procstat.PerCPU(a, b)
 
 	if *k > 0 {
-		fmt.Println(pick(cs, *k))
+		fmt.Println(procstat.Pick(cs, *k))
 	} else {
 		fmt.Printf("busy %.1f%%  (user %.1f%%, nice %.1f%%, system %.1f%%, iowait %.1f%%, steal %.1f%%) over %v, %d CPUs\n",
-			100*u.busy, 100*u.user, 100*u.nice, 100*u.system, 100*u.iowait, 100*u.steal, *interval, len(cs))
+			100*u.Busy, 100*u.User, 100*u.Nice, 100*u.System, 100*u.IOWait, 100*u.Steal, *interval, len(cs))
 		for _, c := range cs {
-			fmt.Printf("cpu%d %.0f%%\n", c.id, 100*c.busy)
+			fmt.Printf("cpu%d %.0f%%\n", c.ID, 100*c.Busy)
 		}
 	}
-	if *maxBusy >= 0 && 100*u.busy > *maxBusy {
-		fmt.Fprintf(os.Stderr, "hostload: busy %.1f%% > %.1f%%\n", 100*u.busy, *maxBusy)
+	if *maxBusy >= 0 && 100*u.Busy > *maxBusy {
+		fmt.Fprintf(os.Stderr, "hostload: busy %.1f%% > %.1f%%\n", 100*u.Busy, *maxBusy)
 		os.Exit(1)
 	}
-}
-
-func read() (snapshot, error) {
-	data, err := os.ReadFile("/proc/stat")
-	if err != nil {
-		return snapshot{}, err
-	}
-	return parseStat(data)
 }
 
 func fail(err error) {
