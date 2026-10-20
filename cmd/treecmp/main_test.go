@@ -26,7 +26,10 @@ func runCmd(t *testing.T, args ...string) (string, int) {
 	c.SetOut(&out)
 	c.SetErr(&out)
 	c.SetArgs(args)
-	return out.String() + "", execute(c)
+	// Run first: `return out.String(), execute(c)` evaluates left to right
+	// and returns the output from BEFORE the command ran.
+	code := execute(c)
+	return out.String(), code
 }
 
 func TestIdenticalTreesAgree(t *testing.T) {
