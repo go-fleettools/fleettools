@@ -573,7 +573,7 @@ func runHostBinary(w io.Writer, dir, tag string, files []file) bool {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, path, "--version").CombinedOutput()
 	line := firstLine(string(out))
-	if err != nil || !strings.Contains(line, tag) {
+	if err != nil || !saysVersion(line, tag) {
 		fmt.Fprintf(w, "  FAIL %-32s --version: %q %v\n", f.name, line, cmpErr(err))
 		return false
 	}
@@ -591,6 +591,44 @@ func cmpErr(err error) string {
 func firstLine(s string) string {
 	line, _, _ := strings.Cut(strings.TrimSpace(s), "\n")
 	return line
+}
+
+// saysVersion is whether a --version line names this tag, with or without the
+// leading `v`, as a WORD.
+//
+// ⛔ THE `v` BELONGS TO THE TAG, NOT TO THE VERSION. Until 2026-10-20 this
+// was `strings.Contains(line, tag)`, which demanded it in the printed output
+// — and the fleet does not agree about it. go-pkgx/pkgx's own release
+// workflow compares `--version` against `${TAG#v}` on purpose, so `pkgs
+// --version` prints "pkgs 0.23.2" and a v0.23.2 release of it was reported
+// FAILED by this tool while being correct by the rule its own CI enforces.
+// go-pkgx/bk prints "bk v0.23.2". Both are ordinary; a verifier that insists
+// on one of them is borrowing a convention rather than checking a fact.
+//
+// ⛔ AND THE OLD CHECK WAS LOOSE IN THE OTHER DIRECTION, which is why this
+// is a word match and not a second Contains: "pkgs 0.23.25" CONTAINS
+// "0.23.2", so a binary stamped with a different version passed. Fixing the
+// false negative without fixing that would have traded a tool that cries
+// wolf for one that nods along.
+func saysVersion(line, tag string) bool {
+	bare := strings.TrimPrefix(tag, "v")
+	if bare == "" {
+		return false
+	}
+	for _, f := range strings.FieldsFunc(line, func(r rune) bool {
+		// A version is delimited by space or by the punctuation that
+		// surrounds it in the shapes seen here -- "fileshare version 0.29.2
+		// (abcdef)", "pkgs 0.23.2," -- never by '.' or '-', which are part
+		// of a semantic version and of its prerelease.
+		return r == ' ' || r == '\t' || r == '(' || r == ')' ||
+			r == ',' || r == ';' || r == ':' || r == '"' || r == '\'' ||
+			r == '[' || r == ']'
+	}) {
+		if f == tag || f == bare {
+			return true
+		}
+	}
+	return false
 }
 
 func sortedKeys(m map[string]string) []string {
