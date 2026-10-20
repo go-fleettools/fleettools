@@ -137,9 +137,9 @@ func main() {
 // ---- build ----
 
 type buildOptions struct {
-	repo, content, branch, url, out, development, hugo string
-	only                                               []string
-	hugoArgs                                           []string
+	repo, content, branch, skeleton, url, out, development, hugo string
+	only                                                         []string
+	hugoArgs                                                     []string
 }
 
 func buildCmd() *cobra.Command {
@@ -166,6 +166,7 @@ func buildCmd() *cobra.Command {
 	f.StringVar(&o.repo, "repo", ".", "the documentation repository")
 	f.StringVar(&o.content, "content", "content", "the directory a version consists of")
 	f.StringVar(&o.branch, "branch", "main", "the default branch: its tree is the look of every version")
+	f.StringVar(&o.skeleton, "skeleton", "", "a ref whose tree is the look instead of the default branch, and the content of development: HEAD on a merge request, to preview the branch")
 	f.StringVar(&o.url, "url", "", "where the versions are served; version V gets baseURL URL/V/")
 	f.StringVar(&o.out, "out", "versions", "directory the builds are written to, one subdirectory per version")
 	f.StringVar(&o.development, "development", "development", "name of the default branch's version")
@@ -236,6 +237,12 @@ func newer(a, b string) bool {
 // skeletonRef is the default branch as the remote has it when there is one:
 // in CI the local branch may not exist, and locally it may be behind.
 func skeletonRef(o buildOptions) (string, error) {
+	if o.skeleton != "" {
+		if _, err := runGit(o.repo, "rev-parse", "--verify", "--quiet", o.skeleton+"^{commit}"); err != nil {
+			return "", fmt.Errorf("--skeleton %q is not a commit", o.skeleton)
+		}
+		return o.skeleton, nil
+	}
 	for _, ref := range []string{"refs/remotes/origin/" + o.branch, "refs/heads/" + o.branch} {
 		if _, err := runGit(o.repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err == nil {
 			return ref, nil

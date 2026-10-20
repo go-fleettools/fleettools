@@ -143,6 +143,30 @@ func TestEveryVersionHasTheDefaultBranchLook(t *testing.T) {
 	}
 }
 
+// On a merge request the look AND the development content are the branch's.
+func TestSkeletonPreviewsABranch(t *testing.T) {
+	dir := repo(t)
+	git(t, dir, "switch", "-q", "-c", "feature")
+	put(t, dir, "hugo.yaml", "look: feature\n")
+	put(t, dir, "content/a.md", "three\n")
+	git(t, dir, "add", "-A")
+	git(t, dir, "commit", "-q", "-m", "feature")
+	fakeHugo(t, "")
+	out := filepath.Join(t.TempDir(), "v")
+	if msg, code := runCmd(t, "build", "--repo", dir, "--url", "https://ex.org/docs", "--out", out, "--skeleton", "HEAD", "--only", "development,v1.0.0"); code != 0 {
+		t.Fatalf("exit %d:\n%s", code, msg)
+	}
+	if got := index(t, out, "development"); !strings.HasPrefix(got, "look: feature|a.md=three") {
+		t.Errorf("development on the branch: %s", got)
+	}
+	if got := index(t, out, "v1.0.0"); !strings.HasPrefix(got, "look: feature|a.md=one|") {
+		t.Errorf("a release previewed with the branch's look: %s", got)
+	}
+	if _, code := runCmd(t, "build", "--repo", dir, "--url", "https://ex.org/docs", "--out", out, "--skeleton", "no-such-ref"); code != 1 {
+		t.Errorf("an unknown skeleton: exit %d, want 1", code)
+	}
+}
+
 func TestOnlyAndUnknownVersions(t *testing.T) {
 	dir := repo(t)
 	fakeHugo(t, "")
