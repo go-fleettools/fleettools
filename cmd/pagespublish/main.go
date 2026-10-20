@@ -30,20 +30,18 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	// Aliased: `pages` is this command's name for the gh-pages checkout.
+	pagesrules "github.com/go-fleettools/fleettools/internal/pages"
 )
 
-var versionRE = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+var versionRE = pagesrules.VersionRE
 
 func main() {
 	// Every command here says whether the binary is older than the module it
@@ -113,69 +111,13 @@ func run(args []string, out io.Writer) error {
 		fmt.Fprintf(out, "removed %s, which an earlier workflow published one level too deep\n", pruned)
 	}
 
-	versions, err := published(pages)
+	versions, latest, err := pagesrules.Reconcile(pages)
 	if err != nil {
-		return err
-	}
-	latest := versions[0]
-	if err := writeVersions(pages, versions, latest); err != nil {
-		return err
-	}
-	if err := writeLatest(pages, latest); err != nil {
-		return err
-	}
-	if err := writeRedirect(pages); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "published %s; latest is %s; versions: %s\n",
 		version, latest, strings.Join(versions, ", "))
 	return nil
-}
-
-// published is the versions in the branch, newest release first and main last.
-//
-// ⛔ 0.10 SORTS AFTER 0.9, which string order gets wrong — and a documentation
-// site that offers "latest" has to mean it.
-func published(pages string) ([]string, error) {
-	entries, err := os.ReadDir(pages)
-	if err != nil {
-		return nil, err
-	}
-	var releases []string
-	hasMain := false
-	for _, e := range entries {
-		// A symlink is an alias (latest), not a version.
-		if fi, err := os.Lstat(filepath.Join(pages, e.Name())); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-			continue
-		}
-		switch {
-		case e.Name() == "main":
-			hasMain = true
-		case versionRE.MatchString(e.Name()):
-			releases = append(releases, e.Name())
-		}
-	}
-	sort.Slice(releases, func(i, j int) bool {
-		ai, bi := split(releases[i]), split(releases[j])
-		if ai[0] != bi[0] {
-			return ai[0] > bi[0]
-		}
-		return ai[1] > bi[1]
-	})
-	if hasMain {
-		releases = append(releases, "main")
-	}
-	if len(releases) == 0 {
-		return nil, fmt.Errorf("%s holds no version directory, not even the one just written", pages)
-	}
-	return releases, nil
-}
-
-func split(v string) [2]int {
-	parts := strings.SplitN(v, ".", 2)
-	a, _ := strconv.Atoi(parts[0])
-	b, _ := strconv.Atoi(parts[1])
-	return [2]int{a, b}
 }
 
 // pruneMisplaced removes a `docs` directory at the branch root that holds
@@ -205,71 +147,6 @@ func pruneMisplaced(pages string) (string, error) {
 		return "", err
 	}
 	return "docs/", nil
-}
-
-type entry struct {
-	Version    string            `json:"version"`
-	Title      string            `json:"title"`
-	Aliases    []string          `json:"aliases"`
-	Properties map[string]bool   `json:"properties,omitempty"`
-	extra      map[string]string `json:"-"`
-}
-
-func writeVersions(pages string, versions []string, latest string) error {
-	list := make([]entry, 0, len(versions))
-	for _, v := range versions {
-		e := entry{Version: v, Title: v, Aliases: []string{}}
-		if v == latest {
-			e.Aliases = []string{"latest"}
-		}
-		if v == "main" {
-			e.Properties = map[string]bool{"development": true}
-		}
-		list = append(list, e)
-	}
-	b, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(pages, "versions.json"), append(b, '\n'), 0o644)
-}
-
-func writeLatest(pages, latest string) error {
-	link := filepath.Join(pages, "latest")
-	if err := os.RemoveAll(link); err != nil {
-		return err
-	}
-	return os.Symlink(latest, link)
-}
-
-const redirect = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Redirecting</title>
-  <noscript>
-    <meta http-equiv="refresh" content="1; url=latest/" />
-  </noscript>
-  <script>
-    window.location.replace(
-      "latest/" + window.location.search + window.location.hash
-    );
-  </script>
-</head>
-<body>
-  Redirecting to <a href="latest/">latest/</a>...
-</body>
-</html>
-`
-
-func writeRedirect(pages string) error {
-	if err := os.WriteFile(filepath.Join(pages, "index.html"), []byte(redirect), 0o644); err != nil {
-		return err
-	}
-	// ⛔ .nojekyll, or GitHub Pages runs Jekyll over the build and drops every
-	// directory whose name begins with an underscore — which is most of what
-	// Hugo writes.
-	return os.WriteFile(filepath.Join(pages, ".nojekyll"), nil, 0o644)
 }
 
 func copyTree(from, to string) error {

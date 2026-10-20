@@ -87,7 +87,16 @@ func TestWhichVersionIsLatest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var list []entry
+	// ⛔ The test declares the shape it expects rather than reusing the
+	// producer's struct. Decoding with the writer's own type agrees with it by
+	// construction: a renamed JSON tag would still round-trip, and the version
+	// selector that actually reads this file would be the one to find out.
+	var list []struct {
+		Version    string          `json:"version"`
+		Title      string          `json:"title"`
+		Aliases    []string        `json:"aliases"`
+		Properties map[string]bool `json:"properties,omitempty"`
+	}
 	if err := json.Unmarshal(b, &list); err != nil {
 		t.Fatal(err)
 	}
