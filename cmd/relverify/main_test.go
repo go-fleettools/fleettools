@@ -277,3 +277,44 @@ func TestABinaryBuiltFromNoTagIsRefused(t *testing.T) {
 		t.Errorf("%+v", files)
 	}
 }
+
+// ⛔ THE `v` BELONGS TO THE TAG, NOT TO THE VERSION — and this tool used to
+// insist on it. Measured 2026-10-20: go-pkgx/pkgx v0.23.2 verified on every
+// file for sum, attestation and build info, and was then reported FAILED on
+// `pkgs --version: "pkgs 0.23.2"`. That output is correct by the rule its own
+// release workflow enforces (`${TAG#v}`); go-pkgx/bk prints the `v`. A
+// verifier that insists on one spelling is borrowing a convention rather than
+// checking a fact, and a tool that cries wolf about a correct release is one
+// nobody runs.
+//
+// ⛔ AND THE CONTROLS ARE THE OTHER HALF. The check it replaces was
+// `strings.Contains(line, tag)`, which is loose in the opposite direction:
+// "0.23.25" contains "0.23.2". Accepting the bare spelling without matching a
+// WORD would trade a tool that cries wolf for one that nods along, so the
+// near-misses below are the point of this test.
+func TestAVersionLineMayOrMayNotCarryTheV(t *testing.T) {
+	const tag = "v0.23.2"
+	for _, c := range []struct {
+		line string
+		want bool
+	}{
+		{"pkgs 0.23.2", true},                        // go-pkgx/pkgx, which stamps ${TAG#v}
+		{"bk v0.23.2", true},                         // go-pkgx/bk, which stamps the tag
+		{"fileshare version 0.23.2 (a1b2c3d)", true}, // a commit in parentheses
+		{"tool 0.23.2, built 2026-10-20", true},      // trailing comma
+		{"pkgs 0.23.25", false},                      // ⛔ the old Contains accepted this
+		{"pkgs v0.23.25", false},
+		{"pkgs 10.23.2", false},
+		{"pkgs 0.23.2-rc1", false}, // a prerelease is a different version
+		{"pkgs dev", false},        // the unstamped build this fleet has shipped twice
+		{"", false},
+	} {
+		if got := saysVersion(c.line, tag); got != c.want {
+			t.Errorf("saysVersion(%q, %q) = %v, want %v", c.line, tag, got, c.want)
+		}
+	}
+	// An empty tag matches nothing, or every line would verify.
+	if saysVersion("pkgs 0.23.2", "v") {
+		t.Error("an empty tag matched a version line")
+	}
+}
