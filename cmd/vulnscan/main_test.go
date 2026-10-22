@@ -275,7 +275,7 @@ func TestTheScanRunsAsLinuxUnderTheAskedToolchain(t *testing.T) {
 		t.Fatalf("%d scans, want 1", len(f.runs))
 	}
 	env := strings.Join(f.runs[0].env, " ")
-	for _, want := range []string{"GOOS=linux", "GOTOOLCHAIN=go1.27.2", "GOARCH=amd64"} {
+	for _, want := range []string{"GOOS=linux", "GOTOOLCHAIN=go1.27.3", "GOARCH=amd64"} {
 		if !strings.Contains(env, want) {
 			t.Errorf("env %q lacks %s", env, want)
 		}
