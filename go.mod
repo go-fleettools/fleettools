@@ -1,6 +1,6 @@
 module github.com/go-fleettools/fleettools
 
-go 1.27.2
+go 1.27.3
 
 // ⛔ v0.1.0 CONTAINS TWO COMPILED EXECUTABLES, 8.4 MB of them: `gopin` and
 // `docscan`, tracked at the repository root because there was no .gitignore at

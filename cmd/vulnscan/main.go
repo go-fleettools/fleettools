@@ -147,7 +147,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string, exe runner) i
 		rescan   = fs.Bool("rescan", false, "with -state, scan every repository again")
 		retry    = fs.Bool("retry-unread", false, "with -state, scan again the repositories that were UNREAD")
 		jobs     = fs.Int("j", 2, fmt.Sprintf("repositories scanned at once (at most %d)", maxJobs))
-		goTool   = fs.String("go", "go1.27.2", "GOTOOLCHAIN for every scan: the toolchain CI builds with, which decides every standard-library finding")
+		goTool   = fs.String("go", "go1.27.3", "GOTOOLCHAIN for every scan: the toolchain CI builds with, which decides every standard-library finding")
 		goosList = fs.String("goos", "linux", "comma-separated GOOS values; each module is scanned under each")
 		goarch   = fs.String("goarch", "amd64", "GOARCH for every scan")
 		gvc      = fs.String("govulncheck", filepath.Join(home, "go", "bin", "govulncheck"), "govulncheck binary")
