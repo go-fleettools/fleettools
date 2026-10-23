@@ -494,28 +494,40 @@ func pageOf(t *testing.T, html string) page {
 func TestJudge(t *testing.T) {
 	old := pageOf(t, `<html><head><style>x{}</style><script>var a="hidden";</script></head><body><h1>acme</h1><p>Pure-Go stack with CGO_ENABLED=0 inside.</p><span>CGO_ENABLED=0</span><p>Everything is <b>BSD-3-Clause</b>.</p><a href="/x">x</a><img src="/l.svg"><img src="https://img.shields.io/badge/license-BSD-blue"></body></html>`)
 	off := pageOf(t, `<body><nav>acme</nav><h1>acme</h1><p>Pure-Go stack with CGO_ENABLED=0 inside.</p><span>CGO_ENABLED=0</span><p>Everything is <b>BSD-3-Clause</b>.</p><a href="/x">x</a><img src="/l.svg"></body>`)
-	on := pageOf(t, `<body><nav>acme</nav><h1>acme</h1><p>Pure-Go stack with CGO_ENABLED=0 inside.</p><a href="/x">x</a><img src="/l.svg"></body>`)
+	strip := `<div class="mantra" role="note"><span class="mantra-row"><code class="mantra-chip">LICENSE=BSD-3-Clause</code><code class="mantra-chip">CGO_ENABLED=0</code></span></div>`
+	on := pageOf(t, `<body><nav>acme`+strip+`</nav><h1>acme</h1><p>Pure-Go stack with CGO_ENABLED=0 inside.</p><a href="/x">x</a><img src="/l.svg"></body>`)
 	frags := []fragment{
 		{HTML: "CGO_ENABLED=0", Hidden: true},
 		{HTML: "<p>Everything is <b>BSD-3-Clause</b>.</p>", Hidden: true},
 		{HTML: "<img alt=License>", Hidden: true}, // a picture: no text
 		{HTML: "Pure-Go stack with CGO_ENABLED=0 inside.", Hidden: false},
 	}
-	if v := judge(old, on, off, frags); !v.ok() {
+	want := stripItems(nil)
+	if v := judge(old, on, off, frags, want); !v.ok() {
 		t.Fatalf("%+v", v)
+	}
+	// the strip as CSS generated content, as wave 3 shipped it: it looks
+	// right and says nothing, so it fails (go-plot, go-ruby-zlib)
+	css := pageOf(t, `<head><style>.nav::before{content:"LICENSE=BSD-3-Clause"}.nav::after{content:"CGO_ENABLED=0"}</style></head><body><nav>acme</nav><h1>acme</h1><p>Pure-Go stack with CGO_ENABLED=0 inside.</p><a href="/x">x</a><img src="/l.svg"></body>`)
+	if v := judge(old, css, off, frags, want); len(v.NoStrip) != 2 || v.ok() {
+		t.Errorf("a drawn strip passed: %+v", v)
+	}
+	// a data chip that is missing is missing
+	if v := judge(old, on, off, frags, stripItems([]string{"fonts: OFL-1.1"})); len(v.NoStrip) != 1 {
+		t.Errorf("%+v", v)
 	}
 	// text lost
 	bad := pageOf(t, `<body><h1>acme</h1></body>`)
-	if v := judge(old, bad, bad, frags); len(v.Lost) == 0 || len(v.LostLinks) != 2 || v.ok() {
+	if v := judge(old, bad, bad, frags, nil); len(v.Lost) == 0 || len(v.LostLinks) != 2 || v.ok() {
 		t.Errorf("%+v", v)
 	}
 	// more removed than said
 	on2 := pageOf(t, `<body><nav>acme</nav><h1>acme</h1><a href="/x">x</a><img src="/l.svg"></body>`)
-	if v := judge(old, on2, off, frags); len(v.Extra) == 0 {
+	if v := judge(old, on2, off, frags, nil); len(v.Extra) == 0 {
 		t.Errorf("%+v", v)
 	}
 	// a hidden repeat still shown
-	if v := judge(old, off, off, frags); len(v.Shown) == 0 {
+	if v := judge(old, off, off, frags, nil); len(v.Shown) == 0 {
 		t.Errorf("%+v", v)
 	}
 	if _, err := readPage(errReader{}); err == nil {
@@ -537,11 +549,28 @@ func TestVerifyCmd(t *testing.T) {
 	}
 	old := write("old", `<body><p>Hi.</p><span>BSD-3-Clause</span></body>`)
 	off := write("off", `<body><p>Hi.</p><span>BSD-3-Clause</span></body>`)
-	on := write("on", `<body><p>Hi.</p></body>`)
+	on := write("on", `<body><div class="mantra"><code class="mantra-chip">LICENSE=BSD-3-Clause</code><code class="mantra-chip">CGO_ENABLED=0</code></div><p>Hi.</p></body>`)
+	drawn := write("drawn", `<head><style>.nav::before{content:"LICENSE=BSD-3-Clause"}</style></head><body><p>Hi.</p></body>`)
 	rep := filepath.Join(dir, "r.json")
 	writeJSON(rep, report{Fragments: []fragment{{HTML: "<span>BSD-3-Clause</span>", Hidden: true}}})
-	if out, code := runCmd(t, "verify", "--old", old, "--on", on, "--off", off, "--report", rep); code != 0 || !strings.Contains(out, "VERIFIED") {
+	if out, code := runCmd(t, "verify", "--old", old, "--on", on, "--off", off, "--report", rep); code != 0 || !strings.Contains(out, "VERIFIED") || !strings.Contains(out, "as text") {
 		t.Fatalf("exit %d %s", code, out)
+	}
+	if out, code := runCmd(t, "verify", "--old", old, "--on", drawn, "--off", off, "--report", rep); code != 1 || !strings.Contains(out, "NO STRIP") {
+		t.Fatalf("a drawn strip verified: exit %d %s", code, out)
+	}
+	// strip: a deployed page alone
+	if out, code := runCmd(t, "strip", filepath.Join(on, "index.html")); code != 0 || !strings.Contains(out, "LICENSE=BSD-3-Clause | CGO_ENABLED=0") {
+		t.Fatalf("exit %d %s", code, out)
+	}
+	if out, code := runCmd(t, "strip", filepath.Join(drawn, "index.html")); code != 1 || !strings.Contains(out, "not text on the page") {
+		t.Fatalf("exit %d %s", code, out)
+	}
+	if _, code := runCmd(t, "strip", filepath.Join(on, "index.html"), "--data", "fonts: OFL-1.1"); code != 1 {
+		t.Error("a missing data chip passed")
+	}
+	if _, code := runCmd(t, "strip", filepath.Join(dir, "none.html")); code != 2 {
+		t.Error("a missing page")
 	}
 	if out, code := runCmd(t, "verify", "--old", old, "--on", off, "--off", on, "--report", rep); code != 1 || !strings.Contains(out, "LOST") {
 		t.Fatalf("exit %d %s", code, out)
