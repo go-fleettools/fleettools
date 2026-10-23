@@ -25,6 +25,24 @@ type landing struct {
 	Main                        string
 	Footer                      string
 	Scripts                     []string
+	Repos                       []string // the organisation's repositories the page links to
+}
+
+var ghRepoLink = regexp.MustCompile(`href="https://github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)/?"`)
+
+// linkedRepos are the organisation's code repositories a page links to, in
+// order, without the organisation's own (.github, brand, docs, the landing).
+func linkedRepos(src, org string) []string {
+	seen := map[string]bool{".github": true, "brand": true, "docs": true, org + ".github.io": true}
+	var out []string
+	for _, m := range ghRepoLink.FindAllStringSubmatch(src, -1) {
+		if m[1] != org || seen[m[2]] {
+			continue
+		}
+		seen[m[2]] = true
+		out = append(out, m[2])
+	}
+	return out
 }
 
 type cta struct {
@@ -223,11 +241,23 @@ func render(l landing, org string) (index, terminal string) {
 <pre>` + code + `</pre>
     </div>`
 	} else {
-		// no snippet: what a reader types first, from the repositories listed
+		// no snippet: what a reader types first, from [[params.repos]] when
+		// the site has it, else from the repositories the page links to,
+		// else the organisation itself
+		var static strings.Builder
+		for i, r := range l.Repos {
+			if i == 6 {
+				break
+			}
+			fmt.Fprintf(&static, "<span class=\"c-cmd\">$ go get</span> github.com/%s/%s@latest\n", org, r)
+		}
+		if static.Len() == 0 {
+			fmt.Fprintf(&static, "<span class=\"c-cmd\">$ gh repo list</span> %s\n", org)
+		}
 		terminal = `<div class="term">
       <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="t">zsh</span></div>
-<pre>{{ range first 6 .Site.Params.repos }}{{ with or .pkg (strings.TrimPrefix "https://" (.url | default "")) (printf "github.com/` + org + `/%s" .name) }}<span class="c-cmd">$ go get</span> {{ . }}@latest
-{{ end }}{{ end }}</pre>
+<pre>{{ with .Site.Params.repos }}{{ range first 6 . }}{{ with or .pkg (strings.TrimPrefix "https://" (.url | default "")) (printf "github.com/` + org + `/%s" .name) }}<span class="c-cmd">$ go get</span> {{ . }}@latest
+{{ end }}{{ end }}{{ else }}` + static.String() + `{{ end }}</pre>
     </div>`
 	}
 	var b strings.Builder

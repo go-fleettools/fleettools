@@ -27,7 +27,7 @@ var mention = regexp.MustCompile(`(?i)\bBSD\b|\bBSD[- ]?3|\bcgo\b|CGO_ENABLED|\b
 var mantraWords = regexp.MustCompile(`(?i)BSD[- ]?3(?:[- ]clause)?|\bBSD\b|CGO_ENABLED\s*=\s*0|\bCGO\s*=\s*0|\bcgo[- ]free\b|\bno[- ]cgo\b|\bzero[- ]cgo\b|\bwithout[- ]cgo\b|\bcgo[- ]disabled\b|\bcgo\b|\bpure[- ]go\b|\blicen[cs]ed?\b|\blicen[cs]es\b`)
 
 // filler is what a sentence made only of the mantra is built with.
-var filler = regexp.MustCompile(`(?i)\b(is|are|it|its|it's|everything|all|and|the|a|an|under|with|in|of|written|code|whole|stack|entirely|fully|everywhere|disabled|enabled|zero|no|only|by|default|100|%|itself)\b`)
+var filler = regexp.MustCompile(`(?i)\b(is|are|it|its|it's|everything|all|and|the|a|an|under|with|in|of|written|code|whole|stack|entirely|fully|everywhere|throughout|disabled|enabled|zero|no|only|by|default|100|%|itself)\b`)
 
 // repeat says whether text (HTML allowed) says nothing but the mantra.
 func repeat(text string) bool {

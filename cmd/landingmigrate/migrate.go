@@ -10,14 +10,19 @@ import (
 	"strings"
 )
 
-// goCmd runs the go command in dir (replaced in tests).
+// goCmd runs the go command in dir (replaced in tests) and returns its
+// STDOUT alone: `go run` writes "go: … switching to go1.27.3" on stderr,
+// and wave 2 found that line pasted into five hugo.toml files as if it
+// were part of the brand block, which broke their builds.
 var goCmd = func(dir string, args ...string) ([]byte, error) {
 	c := exec.Command("go", args...)
 	c.Dir = dir
 	c.Env = append(os.Environ(), "GOWORK=off")
-	out, err := c.CombinedOutput()
+	var stderr strings.Builder
+	c.Stderr = &stderr
+	out, err := c.Output()
 	if err != nil {
-		return out, fmt.Errorf("go %s: %v\n%s", strings.Join(args, " "), err, out)
+		return out, fmt.Errorf("go %s: %v\n%s%s", strings.Join(args, " "), err, out, stderr.String())
 	}
 	return out, nil
 }
@@ -70,6 +75,35 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 	if err != nil {
 		return r, err
 	}
+	// the logo: the header's, else the conventional one, else the favicon
+	// (some template landings show no logo in the header at all)
+	if l.Logo == "" {
+		for _, c := range []string{"/img/logo.svg", "/favicon.svg"} {
+			if _, err := os.Stat(filepath.Join(dir, "static", c)); err == nil {
+				l.Logo = c
+				break
+			}
+		}
+	}
+	if l.Logo == "" {
+		return r, fmt.Errorf("no logo: none in the header, no static/img/logo.svg, no static/favicon.svg")
+	}
+	conf, err := read("hugo.toml")
+	if err != nil {
+		return r, err
+	}
+	conf = addModule(conf)
+	if !strings.Contains(conf, "[params.brand]") {
+		logo := "static" + l.Logo
+		brand, err := goCmd(dir, "run", "github.com/go-fleettools/landingkit/cmd/landingkit@"+kit, "brand", logo)
+		if err != nil {
+			return r, fmt.Errorf("the brand could not be read from %s: %v", logo, err)
+		}
+		conf = strings.TrimRight(conf, "\n") + "\n\n" + strings.TrimRight(string(brand), "\n") + "\n"
+	}
+	// the repositories the page links to, for a terminal when there is no
+	// snippet and no [[params.repos]] to range over
+	l.Repos = linkedRepos(src, org)
 	index, terminal := render(l, org)
 	index, r.Fragments = repeats(index)
 	if err := write("layouts/index.html", index); err != nil {
@@ -112,23 +146,7 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 	}
 	r.Written = append(r.Written, "go.sum")
 
-	// hugo.toml: the import, the brand read from the logo, the data chips
-	conf, err := read("hugo.toml")
-	if err != nil {
-		return r, err
-	}
-	conf = addModule(conf)
-	if !strings.Contains(conf, "[params.brand]") {
-		logo := "static" + l.Logo
-		if l.Logo == "" {
-			logo = "static/img/logo.svg"
-		}
-		brand, err := goCmd(dir, "run", "github.com/go-fleettools/landingkit/cmd/landingkit@"+kit, "brand", logo)
-		if err != nil {
-			return r, fmt.Errorf("the brand could not be read from %s: %v", logo, err)
-		}
-		conf = strings.TrimRight(conf, "\n") + "\n\n" + strings.TrimRight(string(brand), "\n") + "\n"
-	}
+	// hugo.toml (read and given its import and brand above): the data chips
 	if len(data) > 0 {
 		items := []string{`"LICENSE=BSD-3-Clause"`, `"CGO_ENABLED=0"`}
 		for _, d := range data {
