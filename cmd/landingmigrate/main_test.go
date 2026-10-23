@@ -299,6 +299,11 @@ func TestWorkflowAndConfig(t *testing.T) {
 	if got, ok := addSetupGo(last); !ok || strings.Index(got, "setup-go") > strings.Index(got, "  deploy:") || strings.Index(got, "setup-go") < strings.Index(got, "checkout") {
 		t.Fatal(got)
 	}
+	// a setup-go for another module (a playground's) does not count
+	other := "    steps:\n      - uses: actions/checkout@v7\n      - uses: peaceiris/actions-hugo@v3\n      - run: hugo\n      - uses: actions/setup-go@v7\n        with:\n          go-version-file: playground/go.mod\n"
+	if got, ok := addSetupGo(other); !ok || strings.Count(got, "actions/setup-go") != 2 || strings.Index(got, "go-version-file: go.mod") > strings.Index(got, "run: hugo") {
+		t.Fatal(got)
+	}
 	if _, ok := addSetupGo("steps: []\n"); ok {
 		t.Error("no hugo install found, yet patched")
 	}
@@ -649,6 +654,80 @@ func TestInventory(t *testing.T) {
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// A landing that copied the kit's own partials keeps its layout: the copies
+// go, the module comes in, and the layout's repeats hide.
+func TestMigrateKitCopy(t *testing.T) {
+	goCmd = fakeGo("")
+	d := landingDir(t)
+	layout := `<html><head>{{ partial "styles.html" . }}</head><body><p class="sub">Plots. Pure Go, <code>CGO_ENABLED=0</code>.</p><footer><div class="wrap"><span>© acme · BSD-3-Clause</span></div></footer></body></html>`
+	os.WriteFile(filepath.Join(d, "layouts/index.html"), []byte(layout), 0o644)
+	for _, p := range []string{"styles.html", "theme-toggle.html", "fork-ribbon.html", "icons/github.html"} {
+		os.WriteFile(filepath.Join(d, "layouts/partials", p), []byte("x"), 0o644)
+	}
+	os.WriteFile(filepath.Join(d, "hugo.toml"), []byte("baseURL = \"x\"\n\n[params.brand]\n  base = \"#000000\"\n"), 0o644)
+	// a module already there is added to, never written over
+	os.WriteFile(filepath.Join(d, "go.mod"), []byte("module example.org/mine\n\ngo 1.27.3\n"), 0o644)
+	out, code := runCmd(t, "migrate", d, "--org", "acme", "--kit", "v0.6.0")
+	if gm, _ := os.ReadFile(filepath.Join(d, "go.mod")); !strings.HasPrefix(string(gm), "module example.org/mine") {
+		t.Errorf("go.mod overwritten: %s", gm)
+	}
+	if code != 0 || !strings.Contains(out, "acme: kit-copy landing moved") {
+		t.Fatalf("exit %d %s", code, out)
+	}
+	b, _ := os.ReadFile(filepath.Join(d, "layouts/index.html"))
+	if !strings.Contains(string(b), ifOff+"Pure Go, <code>CGO_ENABLED=0</code>."+end) || !strings.Contains(string(b), "© acme"+ifOff+" · BSD-3-Clause"+end) {
+		t.Error(string(b))
+	}
+	for _, p := range []string{"styles.html", "theme-toggle.html", "fork-ribbon.html", "icons/github.html", "hero-terminal.html"} {
+		if _, err := os.Stat(filepath.Join(d, "layouts/partials", p)); err == nil {
+			t.Errorf("%s is there", p)
+		}
+	}
+	conf, _ := os.ReadFile(filepath.Join(d, "hugo.toml"))
+	if strings.Count(string(conf), "[params.brand]") != 1 || !strings.Contains(string(conf), "[module]") {
+		t.Error(string(conf))
+	}
+}
+
+// With no snippet, no [[params.repos]] and no repository linked, the
+// terminal lists the organisation's repositories (go-deltasync).
+func TestTerminalFromTheOrganisation(t *testing.T) {
+	goCmd = fakeGo("")
+	old := listRepos
+	listRepos = func(string) ([]string, error) { return []string{"chunk", "rdiff"}, nil }
+	defer func() { listRepos = old }()
+	d := landingDir(t)
+	noSnippet := strings.Replace(tmpl, `<pre class="snippet"><code>thing.Do()</code></pre>`, "", 1)
+	noSnippet = strings.Replace(noSnippet, `href="https://github.com/acme/thing"`, `href="https://example.org/thing"`, 1)
+	os.WriteFile(filepath.Join(d, "layouts/index.html"), []byte(noSnippet), 0o644)
+	if out, code := runCmd(t, "migrate", d, "--org", "acme", "--kit", "v0.6.0"); code != 0 {
+		t.Fatalf("exit %d %s", code, out)
+	}
+	b, _ := os.ReadFile(filepath.Join(d, "layouts/partials/hero-terminal.html"))
+	if !strings.Contains(string(b), "github.com/acme/chunk@latest") || !strings.Contains(string(b), "github.com/acme/rdiff@latest") {
+		t.Error(string(b))
+	}
+}
+
+func TestMarkSkip(t *testing.T) {
+	inv := filepath.Join(t.TempDir(), "inv.json")
+	writeJSON(inv, inventoryFile{Orgs: []entry{{Org: "a", State: "copied"}, {Org: "b", State: "copied"}}})
+	if out, code := runCmd(t, "mark", "--inventory", inv, "--skip", "user decision 2026-10-23", "a", "b"); code != 0 {
+		t.Fatalf("exit %d %s", code, out)
+	}
+	if _, code := runCmd(t, "mark", "--inventory", inv, "--skip", "x", "nobody"); code != 1 {
+		t.Error("an unknown org")
+	}
+	if _, code := runCmd(t, "mark", "--inventory", inv, "a"); code != 2 {
+		t.Error("mark without a URL or --skip")
+	}
+	// a fresh inventory keeps the decision
+	got := merge([]entry{{Org: "a", State: "copied"}, {Org: "c"}}, inv)
+	if got[0].Skipped != "user decision 2026-10-23" || got[1].Skipped != "" {
+		t.Errorf("%+v", got)
+	}
 }
 
 func TestMain_(t *testing.T) {

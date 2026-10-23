@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -25,6 +26,25 @@ var goCmd = func(dir string, args ...string) ([]byte, error) {
 		return out, fmt.Errorf("go %s: %v\n%s%s", strings.Join(args, " "), err, out, stderr.String())
 	}
 	return out, nil
+}
+
+// listRepos is the organisation's public, non-archived source repositories
+// (replaced in tests), less its own .github, brand, docs and landing.
+var listRepos = func(org string) ([]string, error) {
+	c := exec.Command("gh", "repo", "list", org, "--limit", "100", "--no-archived", "--source", "--visibility", "public", "--json", "name", "--jq", ".[].name")
+	out, err := c.Output()
+	if err != nil {
+		return nil, err
+	}
+	skip := map[string]bool{".github": true, "brand": true, "docs": true, org + ".github.io": true}
+	var names []string
+	for _, n := range strings.Fields(string(out)) {
+		if !skip[n] {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // report is what a migration did, for its pull request and for verify.
@@ -64,11 +84,19 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 	if err != nil {
 		return r, err
 	}
-	l, err := parseTemplate(src)
-	if err != nil {
-		return r, fmt.Errorf("not migrated, a person should look: %v", err)
+	// A landing that copied the kit's own partials already has the kit's
+	// layout: only the copies go, for the module (and its repeats hide).
+	_, statErr := os.Stat(filepath.Join(dir, "layouts/partials/styles.html"))
+	kitCopy := statErr == nil
+	var l landing
+	if kitCopy {
+		r.Shape = "kit-copy"
+	} else {
+		if l, err = parseTemplate(src); err != nil {
+			return r, fmt.Errorf("not migrated, a person should look: %v", err)
+		}
+		r.Shape = "template"
 	}
-	r.Shape = "template"
 	// every refusal before the first write: a checkout is changed whole or
 	// not at all
 	wfPatches, err := workflowPatches(dir)
@@ -77,13 +105,16 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 	}
 	// the logo: the header's, else the conventional one, else the favicon
 	// (some template landings show no logo in the header at all)
-	if l.Logo == "" {
+	if l.Logo == "" && !kitCopy {
 		for _, c := range []string{"/img/logo.svg", "/favicon.svg"} {
 			if _, err := os.Stat(filepath.Join(dir, "static", c)); err == nil {
 				l.Logo = c
 				break
 			}
 		}
+	}
+	if l.Logo == "" && kitCopy {
+		l.Logo = "/img/logo.svg" // the kit-copy shape reads its brand from there
 	}
 	if l.Logo == "" {
 		return r, fmt.Errorf("no logo: none in the header, no static/img/logo.svg, no static/favicon.svg")
@@ -101,16 +132,31 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 		}
 		conf = strings.TrimRight(conf, "\n") + "\n\n" + strings.TrimRight(string(brand), "\n") + "\n"
 	}
-	// the repositories the page links to, for a terminal when there is no
-	// snippet and no [[params.repos]] to range over
-	l.Repos = linkedRepos(src, org)
-	index, terminal := render(l, org)
-	index, r.Fragments = repeats(index)
-	if err := write("layouts/index.html", index); err != nil {
-		return r, err
-	}
-	if err := write("layouts/partials/hero-terminal.html", terminal); err != nil {
-		return r, err
+	if kitCopy {
+		index, frags := repeats(src)
+		r.Fragments = frags
+		if index != src {
+			if err := write("layouts/index.html", index); err != nil {
+				return r, err
+			}
+		}
+	} else {
+		// the repositories the page links to, for a terminal when there is
+		// no snippet and no [[params.repos]] to range over; when it links to
+		// none, the organisation's own list (go-deltasync's terminal said
+		// only `gh repo list`)
+		l.Repos = linkedRepos(src, org)
+		if len(l.Repos) == 0 {
+			l.Repos, _ = listRepos(org)
+		}
+		index, terminal := render(l, org)
+		index, r.Fragments = repeats(index)
+		if err := write("layouts/index.html", index); err != nil {
+			return r, err
+		}
+		if err := write("layouts/partials/hero-terminal.html", terminal); err != nil {
+			return r, err
+		}
 	}
 	for _, p := range copiedPartials {
 		full := filepath.Join(dir, "layouts/partials", p)
@@ -135,7 +181,14 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 	// the module
 	// the repository's name, not the checkout's: a worktree is named freely
 	module := "github.com/" + org + "/" + org + ".github.io"
-	if err := write("go.mod", "module "+module+"\n\ngo 1.27.3\n\nrequire github.com/go-fleettools/landingkit "+kit+"\n"); err != nil {
+	if _, err := read("go.mod"); err == nil {
+		// a landing with a module already (its playground's, say): add the
+		// kit to it, never write over it
+		if _, err := goCmd(dir, "get", "github.com/go-fleettools/landingkit@"+kit); err != nil {
+			return r, err
+		}
+		r.Written = append(r.Written, "go.mod")
+	} else if err := write("go.mod", "module "+module+"\n\ngo 1.27.3\n\nrequire github.com/go-fleettools/landingkit "+kit+"\n"); err != nil {
 		return r, err
 	}
 	if err := write("kit.go", kitGo); err != nil {
@@ -248,10 +301,15 @@ func installsHugo(s string) bool {
 	return strings.Contains(s, "peaceiris/actions-hugo") || strings.Contains(s, "gohugoio/hugo/releases/download")
 }
 
+var rootGoVersion = regexp.MustCompile(`(?m)go-version-file:\s*["']?(\./)?go\.mod["']?\s*$`)
+
 // addSetupGo inserts actions/setup-go right after the checkout step of a
 // workflow that installs hugo.
 func addSetupGo(wf string) (string, bool) {
-	if strings.Contains(wf, "actions/setup-go") {
+	// already done: a setup-go reading the ROOT go.mod. One reading a
+	// playground's or a figure's module (go-numerics, go-statistics) may
+	// come after the hugo build and is not ours to rely on.
+	if rootGoVersion.MatchString(wf) {
 		return wf, true
 	}
 	if !installsHugo(wf) {
