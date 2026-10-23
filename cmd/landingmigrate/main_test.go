@@ -91,6 +91,13 @@ func TestRepeat(t *testing.T) {
 	}
 }
 
+// Wave 2 kept "BSD-3-Clause throughout." on three landings: a repeat.
+func TestRepeatThroughout(t *testing.T) {
+	if !repeat("BSD-3-Clause throughout.") {
+		t.Error("not a repeat")
+	}
+}
+
 func TestParseTemplate(t *testing.T) {
 	l, err := parseTemplate(tmpl)
 	if err != nil {
@@ -183,8 +190,22 @@ func TestRenderAndRepeats(t *testing.T) {
 	// no snippet: the terminal says what to type
 	l.Main = "<p>x</p>"
 	_, term = render(l, "acme")
-	if !strings.Contains(term, `printf "github.com/acme/%s" .name`) {
+	if !strings.Contains(term, `printf "github.com/acme/%s" .name`) || !strings.Contains(term, `{{ else }}<span class="c-cmd">$ gh repo list</span> acme`) {
 		t.Error(term)
+	}
+	// no [[params.repos]]: the repositories the page links to (wave 2 found
+	// four landings whose terminal failed to build on `first 6 nil`)
+	l.Repos = linkedRepos(`<a href="https://github.com/acme/one">1</a><a href="https://github.com/acme/brand">b</a><a href="https://github.com/other/x">x</a><a href="https://github.com/acme/two/">2</a><a href="https://github.com/acme/one">again</a>`, "acme")
+	if strings.Join(l.Repos, ",") != "one,two" {
+		t.Fatal(l.Repos)
+	}
+	_, term = render(l, "acme")
+	if !strings.Contains(term, "{{ else }}<span class=\"c-cmd\">$ go get</span> github.com/acme/one@latest\n<span class=\"c-cmd\">$ go get</span> github.com/acme/two@latest\n{{ end }}") {
+		t.Error(term)
+	}
+	l.Repos = []string{"a", "b", "c", "d", "e", "f", "g"}
+	if _, term = render(l, "acme"); strings.Contains(term, "acme/g@") {
+		t.Error("more than six")
 	}
 	l.Logo, l.Favicon, l.Footer, l.Description, l.HeadExtra, l.Scripts, l.Tagline, l.Badges, l.CTAs, l.Pills = "", "", "", "", "x", []string{"<script>s</script>"}, "", "", nil, nil
 	index, _ = render(l, "acme")
@@ -432,7 +453,23 @@ func TestMigrateRefusals(t *testing.T) {
 			t.Errorf("%s failing: exit %d %s", fail, code, out)
 		}
 	}
+	// no logo in the header: the conventional file, then the favicon, then a
+	// refusal before any write
 	goCmd = fakeGo("")
+	noLogo := strings.Replace(tmpl, `<img class="logo" width="88" height="88" alt="acme" src="/img/logo.svg">`, "", 1)
+	d = landingDir(t)
+	os.WriteFile(filepath.Join(d, "layouts/index.html"), []byte(noLogo), 0o644)
+	if out, code := runCmd(t, "migrate", d, "--org", "acme", "--kit", "v0.6.0"); code != 1 || !strings.Contains(out, "no logo") {
+		t.Errorf("exit %d %s", code, out)
+	}
+	os.MkdirAll(filepath.Join(d, "static"), 0o755)
+	os.WriteFile(filepath.Join(d, "static/favicon.svg"), []byte("<svg/>"), 0o644)
+	if out, code := runCmd(t, "migrate", d, "--org", "acme", "--kit", "v0.6.0"); code != 0 {
+		t.Errorf("exit %d %s", code, out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(d, "layouts/index.html")); !strings.Contains(string(b), `src="/favicon.svg"`) {
+		t.Error("the favicon is not the brand glyph")
+	}
 	d = landingDir(t)
 	os.Remove(filepath.Join(d, "hugo.toml"))
 	if _, code := runCmd(t, "migrate", d, "--org", "acme", "--kit", "v0.6.0"); code != 1 {
