@@ -205,8 +205,11 @@ func verifyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			v := judge(old, on, off, r.Fragments)
+			v := judge(old, on, off, r.Fragments, stripItems(r.Data))
 			w := cmd.OutOrStdout()
+			for _, s := range v.NoStrip {
+				fmt.Fprintf(w, "NO STRIP %q is not text on the page (CSS generated content is not text: landingkit v0.7.0 renders it)\n", s)
+			}
 			for _, s := range v.Lost {
 				fmt.Fprintf(w, "LOST     %s\n", s)
 			}
@@ -222,8 +225,8 @@ func verifyCmd() *cobra.Command {
 			if !v.ok() {
 				return &failure{errors.New("the migration changed more than it says")}
 			}
-			fmt.Fprintf(w, "VERIFIED %d text nodes, %d links, %d pictures of the old page kept; the strip-on page is the strip-off page minus %d hidden repeat(s)\n",
-				len(old.Nodes), len(old.Hrefs), len(old.Srcs), hiddenCount(r.Fragments))
+			fmt.Fprintf(w, "VERIFIED %d text nodes, %d links, %d pictures of the old page kept; the strip-on page is the strip-off page minus %d hidden repeat(s); the strip says %s as text\n",
+				len(old.Nodes), len(old.Hrefs), len(old.Srcs), hiddenCount(r.Fragments), strings.Join(stripItems(r.Data), ", "))
 			return nil
 		},
 	}

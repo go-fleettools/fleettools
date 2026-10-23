@@ -14,17 +14,22 @@ import (
 type page struct {
 	Nodes []string
 	Text  string
+	Strip []string // the text of the mantra strip's chips, kept apart
 	Hrefs map[string]bool
 	Srcs  map[string]bool
 }
 
 // readPage tokenises a built page. Scripts, styles and the template's own
-// comments are not text; the mantra strip is CSS generated content and is
-// not text either, which is why "said once" is measured on what is left.
+// comments are not text. The mantra strip (landingkit v0.7.0, an element of
+// class "mantra") IS text, and must be: its chips are collected apart, so
+// "said once" is measured on the rest of the page and the strip itself is
+// judged on its own. Up to v0.6.0 the strip was CSS generated content,
+// which this reads as no strip at all, exactly as a reader's tools did.
 func readPage(r io.Reader) (page, error) {
 	p := page{Hrefs: map[string]bool{}, Srcs: map[string]bool{}}
 	z := html.NewTokenizer(r)
 	skip := 0
+	strip := 0 // element depth inside the strip; 0 outside it
 	var all strings.Builder
 	for {
 		tt := z.Next()
@@ -40,6 +45,14 @@ func readPage(r io.Reader) (page, error) {
 			if (t.Data == "script" || t.Data == "style" || t.Data == "noscript") && tt == html.StartTagToken {
 				skip++
 			}
+			if tt == html.StartTagToken {
+				switch {
+				case strip > 0:
+					strip++
+				case hasClass(t, "mantra"):
+					strip = 1
+				}
+			}
 			for _, a := range t.Attr {
 				switch {
 				case a.Key == "href" && t.Data == "a":
@@ -53,17 +66,40 @@ func readPage(r io.Reader) (page, error) {
 			if (t.Data == "script" || t.Data == "style" || t.Data == "noscript") && skip > 0 {
 				skip--
 			}
+			if strip > 0 {
+				strip--
+			}
 		case html.TextToken:
 			if skip > 0 {
 				continue
 			}
 			s := string(z.Text())
+			if strip > 0 {
+				if n := norm(s); n != "" {
+					p.Strip = append(p.Strip, n)
+				}
+				continue
+			}
 			all.WriteString(s)
 			if n := norm(s); len(n) >= 3 && strings.IndexFunc(n, isLetter) >= 0 {
 				p.Nodes = append(p.Nodes, n)
 			}
 		}
 	}
+}
+
+// hasClass says whether a tag carries class c among its classes.
+func hasClass(t html.Token, c string) bool {
+	for _, a := range t.Attr {
+		if a.Key == "class" {
+			for _, f := range strings.Fields(a.Val) {
+				if f == c {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func isLetter(r rune) bool { return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r > 0x7f }
@@ -76,10 +112,17 @@ type verdict struct {
 	LostLinks []string // links and pictures likewise
 	Shown     []string // hidden repeats the page with the strip still shows
 	Extra     []string // what the strip-on page lacks beyond the hidden repeats
+	NoStrip   []string // strip values that are not TEXT on the strip-on page
 }
 
 func (v verdict) ok() bool {
-	return len(v.Lost) == 0 && len(v.LostLinks) == 0 && len(v.Shown) == 0 && len(v.Extra) == 0
+	return len(v.Lost) == 0 && len(v.LostLinks) == 0 && len(v.Shown) == 0 && len(v.Extra) == 0 && len(v.NoStrip) == 0
+}
+
+// stripItems are the values the strip must say: the code's two, then the
+// data chips the migration added.
+func stripItems(data []string) []string {
+	return append([]string{"LICENSE=BSD-3-Clause", "CGO_ENABLED=0"}, data...)
 }
 
 // licenceBadge is the one picture a migration may drop (it says the strip's
@@ -95,8 +138,19 @@ func licenceBadge(src string) bool {
 //   - every link and picture of the old page is still there;
 //   - with the strip on, the new page says exactly the same minus the
 //     hidden repeats, and none of them.
-func judge(old, on, off page, frags []fragment) verdict {
+func judge(old, on, off page, frags []fragment, want []string) verdict {
 	var v verdict
+	// the strip says its values as text: a chip that is only drawn (CSS
+	// generated content, an image) is not said at all
+	have := map[string]bool{}
+	for _, s := range on.Strip {
+		have[s] = true
+	}
+	for _, w := range want {
+		if !have[w] {
+			v.NoStrip = append(v.NoStrip, w)
+		}
+	}
 	for _, n := range old.Nodes {
 		if !strings.Contains(off.Text, n) {
 			v.Lost = append(v.Lost, n)
@@ -163,11 +217,11 @@ func judge(old, on, off page, frags []fragment) verdict {
 			break
 		}
 	}
-	want := map[string]int{}
+	needed := map[string]int{}
 	for _, c := range cuts {
-		want[c]++
+		needed[c]++
 	}
-	for c, n := range want {
+	for c, n := range needed {
 		if used[c] < n && len(v.Extra) == 0 {
 			v.Shown = append(v.Shown, c)
 		}
