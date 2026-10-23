@@ -559,6 +559,19 @@ func TestVerifyCmd(t *testing.T) {
 	if out, code := runCmd(t, "verify", "--old", old, "--on", drawn, "--off", off, "--report", rep); code != 1 || !strings.Contains(out, "NO STRIP") {
 		t.Fatalf("a drawn strip verified: exit %d %s", code, out)
 	}
+	// strip: a deployed page alone
+	if out, code := runCmd(t, "strip", filepath.Join(on, "index.html")); code != 0 || !strings.Contains(out, "LICENSE=BSD-3-Clause | CGO_ENABLED=0") {
+		t.Fatalf("exit %d %s", code, out)
+	}
+	if out, code := runCmd(t, "strip", filepath.Join(drawn, "index.html")); code != 1 || !strings.Contains(out, "not text on the page") {
+		t.Fatalf("exit %d %s", code, out)
+	}
+	if _, code := runCmd(t, "strip", filepath.Join(on, "index.html"), "--data", "fonts: OFL-1.1"); code != 1 {
+		t.Error("a missing data chip passed")
+	}
+	if _, code := runCmd(t, "strip", filepath.Join(dir, "none.html")); code != 2 {
+		t.Error("a missing page")
+	}
 	if out, code := runCmd(t, "verify", "--old", old, "--on", off, "--off", on, "--report", rep); code != 1 || !strings.Contains(out, "LOST") {
 		t.Fatalf("exit %d %s", code, out)
 	}

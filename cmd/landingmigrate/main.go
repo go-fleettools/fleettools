@@ -71,7 +71,7 @@ func RootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(inventoryCmd(), migrateCmd(), verifyCmd(), repeatsCmd(), markCmd())
+	root.AddCommand(inventoryCmd(), migrateCmd(), verifyCmd(), repeatsCmd(), markCmd(), stripCmd())
 	return root
 }
 
@@ -275,6 +275,43 @@ func repeatsCmd() *cobra.Command {
 	}
 	c.Flags().BoolVarP(&write, "write", "w", false, "hide the repeats in the file")
 	c.Flags().StringVar(&rep, "report", "", "write the fragments found, for verify")
+	return c
+}
+
+func stripCmd() *cobra.Command {
+	var data []string
+	c := &cobra.Command{
+		Use:   "strip PAGE.html",
+		Short: "Say whether a built page's mantra strip says its values as text (not drawn by CSS)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			f, err := os.Open(args[0])
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			p, err := readPage(f)
+			if err != nil {
+				return err
+			}
+			have := map[string]bool{}
+			for _, s := range p.Strip {
+				have[s] = true
+			}
+			var missing []string
+			for _, w := range stripItems(data) {
+				if !have[w] {
+					missing = append(missing, w)
+				}
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "strip text: %s\n", strings.Join(p.Strip, " | "))
+			if len(missing) > 0 {
+				return &failure{fmt.Errorf("not text on the page: %s", strings.Join(missing, ", "))}
+			}
+			return nil
+		},
+	}
+	c.Flags().StringArrayVar(&data, "data", nil, "a data chip the strip must also say (repeatable)")
 	return c
 }
 
