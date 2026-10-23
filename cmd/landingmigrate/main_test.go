@@ -266,14 +266,25 @@ func TestWorkflowAndConfig(t *testing.T) {
 	if !ok || again != got {
 		t.Error("not idempotent")
 	}
-	deb := "    steps:\n      - name: Install Hugo CLI\n        run: |\n          wget https://github.com/gohugoio/hugo/releases/download/v1/hugo.deb\n"
-	if got, ok := addSetupGo(deb); !ok || strings.Index(got, "setup-go") > strings.Index(got, "Install Hugo") {
+	// the official template installs hugo BEFORE the checkout: setup-go goes
+	// after the checkout, where go.mod is (CI failed on the first wave)
+	deb := "    steps:\n      - name: Install Hugo CLI\n        run: |\n          wget https://github.com/gohugoio/hugo/releases/download/v1/hugo.deb\n\n      - name: Checkout\n        uses: actions/checkout@v7\n        with:\n          submodules: recursive\n\n      # pages\n      - name: Setup Pages\n        uses: actions/configure-pages@v6\n"
+	got, ok = addSetupGo(deb)
+	if !ok || strings.Index(got, "setup-go") < strings.Index(got, "submodules: recursive") || strings.Index(got, "setup-go") > strings.Index(got, "# pages") {
+		t.Fatal(got)
+	}
+	// the checkout as the last step
+	last := "jobs:\n  b:\n    steps:\n      - uses: peaceiris/actions-hugo@v3\n      - uses: actions/checkout@v7\n  deploy:\n    x: 1\n"
+	if got, ok := addSetupGo(last); !ok || strings.Index(got, "setup-go") > strings.Index(got, "  deploy:") || strings.Index(got, "setup-go") < strings.Index(got, "checkout") {
 		t.Fatal(got)
 	}
 	if _, ok := addSetupGo("steps: []\n"); ok {
 		t.Error("no hugo install found, yet patched")
 	}
 	if _, ok := addSetupGo("uses: peaceiris/actions-hugo@v3\n"); ok {
+		t.Error("no checkout, yet patched")
+	}
+	if _, ok := addSetupGo("uses: peaceiris/actions-hugo@v3\nuses: actions/checkout@v7\n"); ok {
 		t.Error("no step found, yet patched")
 	}
 	conf := addModule("baseURL = \"x\"\n\n[params]\n  a = 1\n")
@@ -310,7 +321,7 @@ func landingDir(t *testing.T) string {
 		"layouts/partials/icons/mark-github.html": "<svg/>",
 		"layouts/partials/icons/OCTICONS-LICENSE": "MIT",
 		"hugo.toml":                    "baseURL = \"x\"\n\n[[params.repos]]\n  name = \"thing\"\n",
-		".github/workflows/deploy.yml": "jobs:\n  build:\n    steps:\n      - uses: peaceiris/actions-hugo@v3\n",
+		".github/workflows/deploy.yml": "jobs:\n  build:\n    steps:\n      - uses: actions/checkout@v7\n      - uses: peaceiris/actions-hugo@v3\n",
 		".github/workflows/other.yml":  "jobs: {}\n",
 		"README.md":                    "# acme\n",
 	}

@@ -230,17 +230,22 @@ func installsHugo(s string) bool {
 	return strings.Contains(s, "peaceiris/actions-hugo") || strings.Contains(s, "gohugoio/hugo/releases/download")
 }
 
-// addSetupGo inserts actions/setup-go before the step that installs hugo:
-// the step is the nearest "- " line at or above the one installing it,
-// less indented than its keys.
+// addSetupGo inserts actions/setup-go right after the checkout step of a
+// workflow that installs hugo.
 func addSetupGo(wf string) (string, bool) {
 	if strings.Contains(wf, "actions/setup-go") {
 		return wf, true
 	}
+	if !installsHugo(wf) {
+		return wf, false
+	}
 	lines := strings.SplitAfter(wf, "\n")
+	// setup-go reads go.mod, so it goes right after the checkout, wherever
+	// the hugo install is: the official template installs hugo BEFORE it
+	// checks the repository out, and a setup-go there finds no go.mod
 	at := -1
 	for i, ln := range lines {
-		if installsHugo(ln) && !strings.HasPrefix(strings.TrimSpace(ln), "#") {
+		if strings.Contains(ln, "actions/checkout") && !strings.HasPrefix(strings.TrimSpace(ln), "#") {
 			at = i
 			break
 		}
@@ -249,25 +254,46 @@ func addSetupGo(wf string) (string, bool) {
 		return wf, false
 	}
 	indentOf := func(s string) int { return len(s) - len(strings.TrimLeft(s, " ")) }
-	start := -1
+	step := -1 // the checkout step's "- " line
 	for i := at; i >= 0; i-- {
 		t := strings.TrimSpace(lines[i])
 		if strings.HasPrefix(t, "- ") && (i == at || indentOf(lines[i]) < indentOf(lines[at])) {
+			step = i
+			break
+		}
+	}
+	if step < 0 {
+		return wf, false
+	}
+	// the step after it starts at the next "- " line of the same indent, or
+	// at the first line less indented (the end of the steps)
+	start := len(lines)
+	for i := step + 1; i < len(lines); i++ {
+		t := strings.TrimSpace(lines[i])
+		if t == "" || strings.HasPrefix(t, "#") && indentOf(lines[i]) > indentOf(lines[step]) {
+			continue
+		}
+		if indentOf(lines[i]) < indentOf(lines[step]) || indentOf(lines[i]) == indentOf(lines[step]) {
 			start = i
 			break
 		}
 	}
-	if start < 0 {
-		return wf, false
+	// a comment block right above the next step stays with it
+	for start > step+1 && strings.HasPrefix(strings.TrimSpace(lines[start-1]), "#") {
+		start--
 	}
-	indent := strings.Repeat(" ", indentOf(lines[start]))
-	step := indent + "# Hugo resolves the landingkit module (hugo.toml [module]) with the go\n" +
+	indent := strings.Repeat(" ", indentOf(lines[step]))
+	setup := indent + "# Hugo resolves the landingkit module (hugo.toml [module]) with the go\n" +
 		indent + "# command, at the version go.mod pins.\n" +
 		indent + "- uses: actions/setup-go@v7\n" +
 		indent + "  with:\n" +
 		indent + "    go-version-file: go.mod\n" +
 		indent + "    cache: false\n"
-	return strings.Join(lines[:start], "") + step + strings.Join(lines[start:], ""), true
+	head := strings.Join(lines[:start], "")
+	if !strings.HasSuffix(head, "\n") {
+		head += "\n" // a checkout on the file's last line, with no newline
+	}
+	return head + setup + strings.Join(lines[start:], ""), true
 }
 
 func writeJSON(path string, v any) error {
