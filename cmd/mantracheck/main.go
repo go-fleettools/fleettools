@@ -160,8 +160,8 @@ type verdict struct {
 	License string
 	Signals []string
 	Data    []string // licence texts besides the root LICENSE: data under another licence
-	Code    bool   // the tree holds Go code
-	Unread  string // why the tree could not be read whole ("" when it was)
+	Code    bool     // the tree holds Go code
+	Unread  string   // why the tree could not be read whole ("" when it was)
 }
 
 // licenseOK: a repository with Go code is BSD-3-Clause. One without code
