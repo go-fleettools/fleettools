@@ -150,6 +150,41 @@ func TestVerboseAndErrors(t *testing.T) {
 	}
 }
 
+// Data under another licence is listed, not failed: the code's licence
+// holds, and the files are for a person to read before a strip names them.
+func TestDataLicences(t *testing.T) {
+	fonts := `{"tree":[
+	 {"path":"LICENSE","type":"blob"},{"path":"go.mod","type":"blob"},{"path":"a.go","type":"blob"},
+	 {"path":"inter/OFL.txt","type":"blob"},{"path":"vera/COPYRIGHT.TXT","type":"blob"},
+	 {"path":"themes/LICENSE-MIT","type":"blob"},{"path":"twemoji/Graphics.LICENSE","type":"blob"},
+	 {"path":"license.go","type":"blob"},{"path":"vendor/x/LICENSE","type":"blob"},
+	 {"path":"web/node_modules/y/LICENSE","type":"blob"},{"path":"docs","type":"tree"},
+	 {"path":"licensed.md","type":"blob"},{"path":"NOTICE","type":"blob"}]}`
+	gh = fake(t, `[{"full_name":"acme/fonts","default_branch":"main","license":{"spdx_id":"BSD-3-Clause"}}]`, map[string]string{"fonts": fonts})
+	out, code := runCmd(t, "acme", "-v")
+	if code != 0 {
+		t.Fatalf("data licences failed the mantra: exit %d\n%s", code, out)
+	}
+	want := "data     acme/fonts                                       NOTICE, inter/OFL.txt, themes/LICENSE-MIT, twemoji/Graphics.LICENSE, vera/COPYRIGHT.TXT"
+	if !strings.Contains(out, want) {
+		t.Fatalf("lacks %q\n%s", want, out)
+	}
+	for _, not := range []string{"vendor/", "node_modules", "license.go", "licensed.md", ", LICENSE"} {
+		if strings.Contains(out, not) {
+			t.Errorf("lists %s\n%s", not, out)
+		}
+	}
+	// more than five are cut short unless -v
+	six := strings.Replace(fonts, `{"path":"NOTICE","type":"blob"}`, `{"path":"NOTICE","type":"blob"},{"path":"z/LICENCE.txt","type":"blob"}`, 1)
+	gh = fake(t, `[{"full_name":"acme/fonts","default_branch":"main","license":{"spdx_id":"BSD-3-Clause"}}]`, map[string]string{"fonts": six})
+	if out, _ := runCmd(t, "acme"); !strings.Contains(out, "vera/COPYRIGHT.TXT, … 1 more") {
+		t.Fatal(out)
+	}
+	if out, _ := runCmd(t, "acme", "-v"); !strings.Contains(out, "z/LICENCE.txt") {
+		t.Fatal(out)
+	}
+}
+
 func TestMain(t *testing.T) {
 	gh = func(args ...string) ([]byte, error) {
 		if strings.HasPrefix(args[1], "orgs/") {
