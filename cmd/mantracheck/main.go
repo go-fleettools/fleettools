@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -117,13 +118,50 @@ func cgoSignals(t tree) (out []string, hasGo bool) {
 	return out, hasGo
 }
 
+// licenceFile matches the base names of licence texts: LICENSE, LICENCE,
+// COPYING, COPYRIGHT, NOTICE, OFL, with an optional suffix (LICENSE-MIT,
+// OFL.txt, COPYING.LIB) or prefix (Vera.LICENSE, fonts-LICENSE.txt).
+var licenceFile = regexp.MustCompile(`(?i)^(.*[-_.])?(licen[cs]e|copying|copyright|notice|ofl)([-_.].*)?$`)
+
+// dataLicences are the licence texts a tree holds besides its root LICENSE:
+// the mark of something shipped under another licence (fonts, graphics,
+// themes, macros), which the code's licence does not cover and a landing's
+// strip must name. vendor/ and node_modules/ are dependencies, not shipped
+// data, and are not looked at; Go files never count.
+func dataLicences(t tree) []string {
+	var out []string
+	for _, e := range t.Tree {
+		if e.Type != "blob" {
+			continue
+		}
+		p := e.Path
+		if strings.HasPrefix(p, "vendor/") || strings.Contains(p, "/vendor/") || strings.Contains(p, "node_modules/") {
+			continue
+		}
+		base := path.Base(p)
+		if path.Ext(base) == ".go" || !licenceFile.MatchString(base) {
+			continue
+		}
+		if !strings.Contains(p, "/") && rootLicence[strings.ToUpper(base)] {
+			continue // the repository's own licence, which GitHub detected
+		}
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// rootLicence are the names GitHub reads the repository's licence from.
+var rootLicence = map[string]bool{"LICENSE": true, "LICENSE.MD": true, "LICENSE.TXT": true, "LICENCE": true, "LICENCE.MD": true, "LICENCE.TXT": true, "COPYING": true}
+
 // verdict is what one repository says about the mantra.
 type verdict struct {
 	Repo    string
 	License string
 	Signals []string
-	Code    bool   // the tree holds Go code
-	Unread  string // why the tree could not be read whole ("" when it was)
+	Data    []string // licence texts besides the root LICENSE: data under another licence
+	Code    bool     // the tree holds Go code
+	Unread  string   // why the tree could not be read whole ("" when it was)
 }
 
 // licenseOK: a repository with Go code is BSD-3-Clause. One without code
@@ -167,6 +205,7 @@ func check(org string) ([]verdict, error) {
 				v.Unread = "GitHub truncated the tree"
 			} else {
 				v.Signals, v.Code = cgoSignals(t)
+				v.Data = dataLicences(t)
 			}
 		}
 		out = append(out, v)
@@ -222,6 +261,19 @@ func report(w *strings.Builder, org string, vs []verdict, verbose bool) bool {
 	}
 	for _, v := range unread {
 		fmt.Fprintf(w, "    UNREAD   %-48s %s\n", v.Repo, v.Unread)
+	}
+	// not a failure: the code's licence still holds, but the strip must
+	// name the data beside it (a third chip), so the files are listed for a
+	// person to open and read
+	for _, v := range vs {
+		if len(v.Data) == 0 {
+			continue
+		}
+		shown := v.Data
+		if !verbose && len(shown) > 5 {
+			shown = append(shown[:5:5], fmt.Sprintf("… %d more", len(v.Data)-5))
+		}
+		fmt.Fprintf(w, "    data     %-48s %s\n", v.Repo, strings.Join(shown, ", "))
 	}
 	return ok
 }
