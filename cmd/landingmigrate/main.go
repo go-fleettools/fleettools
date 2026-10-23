@@ -276,11 +276,16 @@ func repeatsCmd() *cobra.Command {
 }
 
 func markCmd() *cobra.Command {
-	var inv string
+	var inv, skip string
 	c := &cobra.Command{
-		Use:   "mark ORG URL",
-		Short: "Record in the inventory the pull request that migrated ORG",
-		Args:  cobra.ExactArgs(2),
+		Use:   "mark ORG URL | mark --skip REASON ORG...",
+		Short: "Record in the inventory the pull request that migrated ORG, or that ORGs are to be left alone",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if skip != "" {
+				return cobra.MinimumNArgs(1)(cmd, args)
+			}
+			return cobra.ExactArgs(2)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			b, err := os.ReadFile(inv)
 			if err != nil {
@@ -290,17 +295,33 @@ func markCmd() *cobra.Command {
 			if err := json.Unmarshal(b, &f); err != nil {
 				return err
 			}
-			for i := range f.Orgs {
-				if f.Orgs[i].Org == args[0] {
-					f.Orgs[i].Migrated = args[1]
-					f.Orgs[i].State = "kit"
-					return writeJSON(inv, f)
+			targets := args[:1]
+			if skip != "" {
+				targets = args
+			}
+			for _, org := range targets {
+				found := false
+				for i := range f.Orgs {
+					if f.Orgs[i].Org != org {
+						continue
+					}
+					found = true
+					if skip != "" {
+						f.Orgs[i].Skipped = skip
+					} else {
+						f.Orgs[i].Migrated = args[1]
+						f.Orgs[i].State = "kit"
+					}
+				}
+				if !found {
+					return &failure{fmt.Errorf("%s is not in %s", org, inv)}
 				}
 			}
-			return &failure{fmt.Errorf("%s is not in %s", args[0], inv)}
+			return writeJSON(inv, f)
 		},
 	}
 	c.Flags().StringVar(&inv, "inventory", "", "the inventory file")
+	c.Flags().StringVar(&skip, "skip", "", "leave these organisations alone, for this reason: no later wave picks them")
 	return c
 }
 

@@ -25,6 +25,7 @@ type entry struct {
 	State    string `json:"state"` // kit, template, copied, no-landing, archived
 	Kit      string `json:"kit,omitempty"`
 	Migrated string `json:"migrated,omitempty"` // the pull request that moved it, once it has
+	Skipped  string `json:"skipped,omitempty"`  // why no wave may touch it (a person's decision)
 	Note     string `json:"note,omitempty"`
 }
 
@@ -179,6 +180,10 @@ func merge(fresh []entry, path string) []entry {
 			}
 			if fresh[i].Note == "" {
 				fresh[i].Note = p.Note
+			}
+			// a person's decision outlives every re-inventory
+			if fresh[i].Skipped == "" {
+				fresh[i].Skipped = p.Skipped
 			}
 		}
 	}
