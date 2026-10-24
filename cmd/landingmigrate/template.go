@@ -51,9 +51,11 @@ type cta struct {
 }
 
 var (
-	titleRe   = regexp.MustCompile(`(?s)<title>(.*?)</title>`)
-	descRe    = regexp.MustCompile(`(?s)<meta\s+name="description"[^>]*>`)
-	faviconRe = regexp.MustCompile(`(?s)<link\s+rel="icon"[^>]*>`)
+	titleRe = regexp.MustCompile(`(?s)<title>(.*?)</title>`)
+	// a quoted attribute value may hold a '>' (go-doom's description says
+	// "id Software 1997 source release -> …"): attributes are matched whole
+	descRe    = regexp.MustCompile(`(?s)<meta\s+name="description"(?:\s+[A-Za-z-]+="[^"]*")*\s*/?>`)
+	faviconRe = regexp.MustCompile(`(?s)<link\s+rel="icon"(?:\s+[A-Za-z-]+="[^"]*")*\s*/?>`)
 	styleRe   = regexp.MustCompile(`(?s)<style>(.*?)</style>`)
 	logoRe    = regexp.MustCompile(`(?s)<img\s[^>]*class="logo"[^>]*>`)
 	srcRe     = regexp.MustCompile(`\bsrc="([^"]+)"`)

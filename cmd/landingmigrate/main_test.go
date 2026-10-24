@@ -214,6 +214,21 @@ func TestRenderAndRepeats(t *testing.T) {
 	}
 }
 
+// A '>' inside a quoted attribute value does not end the tag: go-doom's
+// description ("… source release -> …") was cut there, and the cut tag
+// broke the build.
+func TestQuotedGreaterThan(t *testing.T) {
+	src := strings.Replace(tmpl, `content="acme — pure Go, no cgo."`, `content="acme: id 1997 source -> tyrquake -> Go."`, 1)
+	src = strings.Replace(src, `<link rel="icon" type="image/svg+xml" href="/favicon.svg">`, `<link rel="icon" type="image/svg+xml" href="/favicon.svg" title="a > b">`, 1)
+	l, err := parseTemplate(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(l.Description, `-> Go.">`) || !strings.HasSuffix(l.Favicon, `title="a > b">`) || l.HeadExtra != "" {
+		t.Fatalf("%q %q %q", l.Description, l.Favicon, l.HeadExtra)
+	}
+}
+
 // Pills ranged from [params] are kept as written: wave 6 rebuilt them and
 // printed one pill reading "{{ . }}" outside the range (go-versions,
 // go-scss, go-avkit, go-attest, openstack-continuous-integration), which
