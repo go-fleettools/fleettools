@@ -20,6 +20,7 @@ type landing struct {
 	Logo                        string
 	H1, Tagline                 string
 	Pills                       []string
+	PillsRaw                    string // the pills div's inner HTML, as written
 	CTAs                        []cta
 	Badges                      string
 	Main                        string
@@ -123,6 +124,14 @@ func parseTemplate(src string) (landing, error) {
 	}
 	for _, m := range pillRe.FindAllStringSubmatch(header, -1) {
 		l.Pills = append(l.Pills, strings.TrimSpace(m[1]))
+	}
+	// the pills are kept as written, not rebuilt from what pillRe saw:
+	// four landings range over [params] pills ({{ range .Site.Params.pills }}
+	// <span class="pill">{{ . }}</span>{{ end }}), and a rebuild printed one
+	// pill reading "{{ . }}" outside any range -- verify caught it as lost text
+	if ps, pe, ok := span(header, `<div class="pills"`, "div"); ok {
+		d := header[ps:pe]
+		l.PillsRaw = strings.TrimSpace(d[strings.Index(d, ">")+1 : len(d)-len("</div>")])
 	}
 	if cs, ce, ok := span(header, `<div class="cta"`, "div"); ok {
 		c := header[cs:ce]
@@ -311,7 +320,10 @@ func render(l landing, org string) (index, terminal string) {
 		}
 		w("      </div>\n")
 	}
-	if len(l.Pills) > 0 {
+	switch {
+	case l.PillsRaw != "":
+		w(`      <div class="trust">`, renameIcons(l.PillsRaw), "</div>\n")
+	case len(l.Pills) > 0:
 		w(`      <div class="trust">`)
 		for _, p := range l.Pills {
 			w(`<span class="pill">`, p, `</span>`)
