@@ -88,12 +88,37 @@ type tree struct {
 // cgoSources are the extensions of sources a cgo build compiles.
 var cgoSources = map[string]bool{".c": true, ".h": true, ".m": true, ".mm": true, ".cc": true, ".cpp": true, ".cxx": true, ".hpp": true, ".swift": true}
 
-// cgoSignals are the files in a tree that suggest cgo: C-family sources and
-// Go files named for cgo, outside testdata/ and vendor/ (a parser's C
-// fixture is not a build input). hasGo says whether the tree holds Go code
-// at all: the mantra is a claim about code, and a repository without any
-// (the organisation's .github, its brand, its landing site) is judged apart.
-func cgoSignals(t tree) (out []string, hasGo bool) {
+// cgoSignalsApart: the files in a tree that suggest cgo -- C-family sources
+// and Go files named for cgo, outside testdata/ and vendor/ (a parser's C
+// fixture is not a build input) -- with those that are not the library's set
+// apart. hasGo says whether the tree holds Go code at all: the mantra is a
+// claim about code, and a repository without any (the organisation's
+// .github, its brand, its landing site) is judged apart.
+// The mantra is a claim about the library: a C comparison benchmark (go-fft's
+// FFTW, go-ruby-regexp's Oniguruma, lzfse's Apple implementation) that lives
+// under a benchmarks/ directory, or in a nested module of its own, is not
+// compiled into it, and `CGO_ENABLED=0 go build ./...` on the library module
+// does not see it. Those are reported apart and do not count; a C file beside
+// the library's own Go code still does.
+func cgoSignalsApart(t tree) (lib, apart []string, hasGo bool) {
+	mods := map[string]bool{}
+	for _, e := range t.Tree {
+		if e.Type == "blob" && path.Base(e.Path) == "go.mod" && path.Dir(e.Path) != "." {
+			mods[path.Dir(e.Path)] = true
+		}
+	}
+	separate := func(p string) bool {
+		for d := path.Dir(p); d != "." && d != "/"; d = path.Dir(d) {
+			if mods[d] {
+				return true // a nested module: not the library's build
+			}
+			switch path.Base(d) {
+			case "benchmarks", "benchmark", "bench", "cbench":
+				return true
+			}
+		}
+		return false
+	}
 	for _, e := range t.Tree {
 		if e.Type != "blob" {
 			continue
@@ -107,15 +132,18 @@ func cgoSignals(t tree) (out []string, hasGo bool) {
 		if ext == ".go" {
 			hasGo = true
 		}
+		signal := cgoSources[ext] || ext == ".go" && (strings.Contains(base, "_cgo") || strings.HasPrefix(base, "cgo_") || base == "cgo.go")
 		switch {
-		case cgoSources[ext]:
-			out = append(out, p)
-		case ext == ".go" && (strings.Contains(base, "_cgo") || strings.HasPrefix(base, "cgo_") || base == "cgo.go"):
-			out = append(out, p)
+		case !signal:
+		case separate(p):
+			apart = append(apart, p)
+		default:
+			lib = append(lib, p)
 		}
 	}
-	sort.Strings(out)
-	return out, hasGo
+	sort.Strings(lib)
+	sort.Strings(apart)
+	return lib, apart, hasGo
 }
 
 // licenceFile matches the base names of licence texts: LICENSE, LICENCE,
@@ -159,6 +187,7 @@ type verdict struct {
 	Repo    string
 	License string
 	Signals []string
+	Apart   []string // C-family files set apart: benchmarks, nested modules
 	Data    []string // licence texts besides the root LICENSE: data under another licence
 	Code    bool     // the tree holds Go code
 	Unread  string   // why the tree could not be read whole ("" when it was)
@@ -204,7 +233,7 @@ func check(org string) ([]verdict, error) {
 			} else if t.Truncated {
 				v.Unread = "GitHub truncated the tree"
 			} else {
-				v.Signals, v.Code = cgoSignals(t)
+				v.Signals, v.Apart, v.Code = cgoSignalsApart(t)
 				v.Data = dataLicences(t)
 			}
 		}
@@ -261,6 +290,18 @@ func report(w *strings.Builder, org string, vs []verdict, verbose bool) bool {
 	}
 	for _, v := range unread {
 		fmt.Fprintf(w, "    UNREAD   %-48s %s\n", v.Repo, v.Unread)
+	}
+	// not a failure: C comparisons outside the library (benchmarks/, a
+	// nested module) are said, so a person sees what was set apart
+	for _, v := range vs {
+		if len(v.Apart) == 0 {
+			continue
+		}
+		shown := v.Apart
+		if !verbose && len(shown) > 3 {
+			shown = append(shown[:3:3], fmt.Sprintf("… %d more", len(v.Apart)-3))
+		}
+		fmt.Fprintf(w, "    apart    %-48s %s (benchmark or nested module: not the library's build)\n", v.Repo, strings.Join(shown, ", "))
 	}
 	// not a failure: the code's licence still holds, but the strip must
 	// name the data beside it (a third chip), so the files are listed for a
