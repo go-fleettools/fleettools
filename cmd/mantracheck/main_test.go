@@ -185,6 +185,35 @@ func TestDataLicences(t *testing.T) {
 	}
 }
 
+// The mantra is about the library. A C comparison benchmark under
+// benchmarks/ (go-fft's FFTW, go-ruby-regexp's Oniguruma) or in a nested
+// module of its own is set apart and does not count; a C file beside the
+// library's own code still does.
+func TestBenchmarksApart(t *testing.T) {
+	lib := `{"tree":[{"path":"go.mod","type":"blob"},{"path":"re.go","type":"blob"},
+	 {"path":"benchmarks/go.mod","type":"blob"},{"path":"benchmarks/main.go","type":"blob"},{"path":"benchmarks/onig/onig_bench.c","type":"blob"},
+	 {"path":"tools/cmp/go.mod","type":"blob"},{"path":"tools/cmp/x_cgo.go","type":"blob"},
+	 {"path":"bench/c/fftw.c","type":"blob"}]}`
+	gh = fake(t, `[{"full_name":"acme/re","default_branch":"main","license":{"spdx_id":"BSD-3-Clause"}}]`, map[string]string{"re": lib})
+	out, code := runCmd(t, "acme")
+	if code != 0 || !strings.Contains(out, "HOLDS") || !strings.Contains(out, "apart    acme/re") ||
+		!strings.Contains(out, "bench/c/fftw.c, benchmarks/onig/onig_bench.c, tools/cmp/x_cgo.go") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	// a C file in the library itself is still a signal
+	withC := strings.Replace(lib, `{"path":"re.go","type":"blob"}`, `{"path":"re.go","type":"blob"},{"path":"shim.c","type":"blob"}`, 1)
+	gh = fake(t, `[{"full_name":"acme/re","default_branch":"main","license":{"spdx_id":"BSD-3-Clause"}}]`, map[string]string{"re": withC})
+	if out, code := runCmd(t, "acme"); code != 1 || !strings.Contains(out, "cgo?     acme/re                                          shim.c") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	// more than three set apart are cut short unless -v
+	many := strings.Replace(lib, `{"path":"re.go","type":"blob"}`, `{"path":"re.go","type":"blob"},{"path":"benchmarks/a.c","type":"blob"}`, 1)
+	gh = fake(t, `[{"full_name":"acme/re","default_branch":"main","license":{"spdx_id":"BSD-3-Clause"}}]`, map[string]string{"re": many})
+	if out, _ := runCmd(t, "acme"); !strings.Contains(out, "… 1 more") {
+		t.Fatal(out)
+	}
+}
+
 func TestMain(t *testing.T) {
 	gh = func(args ...string) ([]byte, error) {
 		if strings.HasPrefix(args[1], "orgs/") {
