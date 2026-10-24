@@ -214,6 +214,25 @@ func TestRenderAndRepeats(t *testing.T) {
 	}
 }
 
+// Pills ranged from [params] are kept as written: wave 6 rebuilt them and
+// printed one pill reading "{{ . }}" outside the range (go-versions,
+// go-scss, go-avkit, go-attest, openstack-continuous-integration), which
+// verify caught as lost text.
+func TestRangedPills(t *testing.T) {
+	ranged := strings.Replace(tmpl, `<span class="pill">stdlib only</span>`, `{{ range .Site.Params.pills }}<span class="pill">{{ . }}</span>{{ end }}`, 1)
+	l, err := parseTemplate(ranged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, _ := render(l, "acme")
+	if !strings.Contains(index, `{{ range .Site.Params.pills }}<span class="pill">{{ . }}</span>{{ end }}`) {
+		t.Errorf("the range is not kept:\n%s", index)
+	}
+	if strings.Count(index, `<span class="pill">{{ . }}</span>`) != 1 {
+		t.Error("the ranged pill was printed outside its range")
+	}
+}
+
 func TestFooterShapes(t *testing.T) {
 	note := func(string, string, bool) {}
 	// a kit footer: spans
