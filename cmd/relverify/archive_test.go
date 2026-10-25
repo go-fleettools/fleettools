@@ -119,7 +119,7 @@ func TestTheGoBinaryInsideAnArchiveIsHeldToTheBuildChecks(t *testing.T) {
 			entry{"README.md", []byte("# tool")}, entry{"tool.exe", exe})
 	})
 	var out bytes.Buffer
-	files, err := checkFiles(&out, "o/r", "v1.2.3", commit, dir)
+	files, err := checkFiles(&out, "o/r", "v1.2.3", commit, dir, skipScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestAnArchiveWithNoGoBinaryIsChecked(t *testing.T) {
 		writeTarGz(t, filepath.Join(dir, "docs.tar.gz"), entry{"index.html", []byte("<html>")})
 	})
 	var out bytes.Buffer
-	files, err := checkFiles(&out, "o/r", "v1.2.3", commit, dir)
+	files, err := checkFiles(&out, "o/r", "v1.2.3", commit, dir, skipScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestAnArchiveThatCannotBeReadFails(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	files, err := checkFiles(&bytes.Buffer{}, "o/r", "v1.2.3", commit, dir)
+	files, err := checkFiles(&bytes.Buffer{}, "o/r", "v1.2.3", commit, dir, skipScan)
 	if err != nil {
 		t.Fatal(err)
 	}
