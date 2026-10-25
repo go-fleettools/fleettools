@@ -210,7 +210,7 @@ func TestCheckFilesHoldsEveryFileToEveryCheck(t *testing.T) {
 		return nil, nil
 	})
 	var out bytes.Buffer
-	files, err := checkFiles(&out, "o/r", "v1.2.3", commit, dir)
+	files, err := checkFiles(&out, "o/r", "v1.2.3", commit, dir, skipScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestABinaryBuiltFromNoTagIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeGH(t, func([]string) ([]byte, error) { return nil, nil })
-	files, err := checkFiles(&bytes.Buffer{}, "o/r", "v1.2.3", commit, dir)
+	files, err := checkFiles(&bytes.Buffer{}, "o/r", "v1.2.3", commit, dir, skipScan)
 	if err != nil {
 		t.Fatal(err)
 	}
