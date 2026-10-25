@@ -36,12 +36,30 @@
 // # WHY IT REFUSES RATHER THAN GUESSES
 //
 // A sweep that edits 333 files cannot be reviewed file by file, so the only
-// safe failure is a loud one. qemufix recognises four shapes (see Shape in
+// safe failure is a loud one. qemufix recognises seven shapes (see Shape in
 // patch.go) and exits non-zero NAMING THE FILE on anything else: a half-patched
-// file, two install steps, a `run:` that is not the step's last key, two
-// emulated lanes of different shapes. The brief for this sweep said there were
-// three shapes; reading the files found a fourth (`retry+case`, a third of the
-// first batch). A tool that guessed would have silently mangled those.
+// file, two install steps, a multi-line install it would have to replace
+// wholesale, a `run:` that is not the step's last key, two emulated lanes of
+// different shapes. The brief for this sweep said there were three shapes;
+// reading the files found a fourth (`retry+case`, a third of the first batch).
+// A tool that guessed would have silently mangled those.
+//
+// ⛔ Three more shapes came out of the thirty files the first version refused,
+// and in each case the REFUSAL MESSAGE said something false about the lane:
+//
+//   - "no `go test -exec=` step naming a qemu emulator" reads as "this lane
+//     never emulates". It is the opposite of true. Twelve go-macos
+//     repositories run a cross-built `pkg.test` under `"$QEMU"`
+//     (oneline+qemuvar) and five go-pkgx ones spell the flag with a SPACE,
+//     `-exec ${{ matrix.qemu }}` (guard+pkgxenv).
+//
+//   - "step has no `run:` key" was true of the enclosing list item and
+//     irrelevant: the line it had read was a MATRIX DATUM,
+//     `exec: "-exec=qemu-riscv64-static"`. A command lives at or after its
+//     step's `run:`; anything before it is data (oneline+matrixflag).
+//
+// Either message, believed, closes the file as nothing to do -- which is the
+// same failure as the green tick this tool exists to remove.
 //
 // It is idempotent: a file already carrying the fix comes back byte-identical
 // and is reported `already-fixed`.
@@ -74,9 +92,11 @@ Each file is rewritten to install "qemu-user qemu-user-binfmt", to accept
 EITHER qemu-<arch>-static or qemu-<arch> at run time, to FAIL the lane when
 neither is installed, and to print which emulator it ran.
 
-Four shapes are recognised. Anything else is refused by name rather than
-guessed at: with 333 repositories to sweep, the only safe failure is a loud
-one.
+Seven shapes are recognised, including a lane that runs a cross-built test
+binary under "$QEMU" with no "go test -exec" at all, and one whose matrix
+carries the whole flag -- empty on the lanes that run natively on purpose.
+Anything else is refused by name rather than guessed at: with 333 repositories
+to sweep, the only safe failure is a loud one.
 
 Running it twice changes nothing: a file already carrying the fix is reported
 already-fixed and left byte-identical.
