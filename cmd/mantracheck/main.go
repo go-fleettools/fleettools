@@ -141,6 +141,14 @@ func cgoSignalsApart(t tree) (lib, apart []string, hasGo bool) {
 			lib = append(lib, p)
 		}
 	}
+	if !hasGo {
+		// cgo is a Go build's: a repository with no Go code at all (a Swift
+		// or C app of its own, such as nano-container-linux's
+		// openpubkey-agent) links nothing into the organisation's Go code,
+		// and its sources are set apart rather than read as cgo
+		apart = append(apart, lib...)
+		lib = nil
+	}
 	sort.Strings(lib)
 	sort.Strings(apart)
 	return lib, apart, hasGo
@@ -301,7 +309,11 @@ func report(w *strings.Builder, org string, vs []verdict, verbose bool) bool {
 		if !verbose && len(shown) > 3 {
 			shown = append(shown[:3:3], fmt.Sprintf("… %d more", len(v.Apart)-3))
 		}
-		fmt.Fprintf(w, "    apart    %-48s %s (benchmark or nested module: not the library's build)\n", v.Repo, strings.Join(shown, ", "))
+		why := "benchmark or nested module: not the library's build"
+		if !v.Code {
+			why = "no Go code in the repository: a separate app, not a cgo build"
+		}
+		fmt.Fprintf(w, "    apart    %-48s %s (%s)\n", v.Repo, strings.Join(shown, ", "), why)
 	}
 	// not a failure: the code's licence still holds, but the strip must
 	// name the data beside it (a third chip), so the files are listed for a
@@ -325,7 +337,9 @@ mantra, LICENSE=BSD-3-Clause and CGO_ENABLED=0, before a landing page shows it.
 The licence is GitHub's detection (NOASSERTION or none is reported, never
 taken for BSD-3-Clause). cgo is read from each file tree: C, C++, Objective-C
 and Swift sources and Go files named for cgo, outside testdata/ and vendor/.
-Those are signals for a person to read, listed with the files that raised
+Those under a benchmarks/ directory or a nested module, and those of a
+repository with no Go code at all (a separate app), are listed apart and do
+not count. The others are signals for a person to read, listed with the files that raised
 them; a tree read whole with no signal has no C sources to link. A truncated
 tree is UNREAD, never clean.
 
