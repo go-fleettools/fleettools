@@ -101,11 +101,17 @@ func assertInvariants(t *testing.T, out string) {
 // the UNFIXED input, where all three must fail.
 func TestTheInvariantCheckersCanSeeAFailure(t *testing.T) {
 	for shape, src := range map[string]string{
-		"oneline+matrix": srcOnelineMatrix,
-		"retry+matrix":   srcRetryMatrix,
-		"retry+case":     srcRetryCase,
-		"oneline+arch":   srcOnelineArch,
+		"oneline+matrix":     srcOnelineMatrix,
+		"retry+matrix":       srcRetryMatrix,
+		"retry+case":         srcRetryCase,
+		"oneline+arch":       srcOnelineArch,
+		"oneline+matrixflag": srcOnelineMatrixFlag,
+		"oneline+qemuvar":    srcOnelineQemuVar,
+		"guard+pkgxenv":      srcGuardPkgxEnv,
 	} {
+		if err := invFailsAndPrints(src); err == nil {
+			t.Errorf("%s: the fail-and-print checker passes on the UNFIXED file", shape)
+		}
 		if err := invInstallsRealPackages(src); err == nil {
 			t.Errorf("%s: the package checker passes on the UNFIXED file", shape)
 		}
@@ -236,6 +242,150 @@ func TestOnelineArch(t *testing.T) {
 	assertIdempotent(t, got, "ci.yml")
 }
 
+func TestOnelineMatrixFlag(t *testing.T) {
+	out, shape, err := Patch("ci.yml", []byte(srcOnelineMatrixFlag))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shape != ShapeOnelineMatrixFlag {
+		t.Fatalf("shape = %q, want %q", shape, ShapeOnelineMatrixFlag)
+	}
+	got := string(out)
+	assertInvariants(t, got)
+	// ⛔ THE TRAP IN THIS SHAPE. The same job carries a NATIVE lane: 386 has
+	// `exec: ""` on purpose, because a 386 ELF executes directly on the x86-64
+	// runner and qemu-i386 was measured to flake. A rewrite that treats an
+	// empty exec as "no emulator found" fails a lane that is correct, so the
+	// rewrite must branch on the empty string -- and this is the assertion that
+	// says so.
+	if !strings.Contains(got, `if [ -n "$flag" ]; then`) {
+		t.Error("the rewrite does not branch on an EMPTY matrix.exec: the native 386 lane would fail for having no emulator")
+	}
+	if !strings.Contains(got, `echo "running ${{ matrix.goarch }} natively"`) {
+		t.Error("the native lane never says it ran natively")
+	}
+	// ⚠ $ex must be UNQUOTED in the command: quoted, an empty value becomes an
+	// empty argument and `go test ""` is not `go test`.
+	if !strings.Contains(got, "go test $ex ./...") {
+		t.Error(`the command must pass $ex unquoted so it vanishes on a native lane`)
+	}
+	// The matrix is left exactly as written: the -static name there is the
+	// FIRST candidate, not a bug.
+	if !strings.Contains(got, `- { goarch: "386",   exec: "", via: native }`) {
+		t.Error("the matrix was rewritten; it is the input to the resolver, not the defect")
+	}
+	assertIdempotent(t, got, "ci.yml")
+}
+
+func TestOnelineQemuVar(t *testing.T) {
+	out, shape, err := Patch("ci.yml", []byte(srcOnelineQemuVar))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shape != ShapeOnelineQemuVar {
+		t.Fatalf("shape = %q, want %q", shape, ShapeOnelineQemuVar)
+	}
+	got := string(out)
+	assertInvariants(t, got)
+	// ⛔ The install step is guarded by `if: matrix.qemu != ''` so the native
+	// lane does not install an emulator it will not use. The one-line install
+	// rewrite replaces the step WHOLESALE, so the `if:` has to be carried over
+	// explicitly -- dropping it would change what the lane does under cover of
+	// fixing something else.
+	if !strings.Contains(got, "if: matrix.qemu != ''") {
+		t.Error("the install step's `if:` was dropped by the wholesale rewrite")
+	}
+	// The emulated branch resolves and runs the resolved name...
+	if !strings.Contains(got, `"$q" ./appicon.test -test.count=1 -test.v`) {
+		t.Error("the test binary is not run under the RESOLVED emulator")
+	}
+	if strings.Contains(got, `"$QEMU" ./appicon.test`) {
+		t.Error("the unresolved $QEMU invocation survives")
+	}
+	// ...and everything else in the step is left alone: QEMU_CPU must be
+	// exported ONLY when it has a value (qemu-user refuses an empty -cpu), and
+	// the native branch is correct as it stands.
+	for _, keep := range []string{
+		`if [ -n "$QEMU_CPU_WANTED" ]; then`,
+		`export QEMU_CPU="$QEMU_CPU_WANTED"`,
+		`if [ -z "$QEMU" ]; then`,
+		`./appicon.test -test.count=1 -test.v`,
+	} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("the rewrite dropped %q", keep)
+		}
+	}
+	assertIdempotent(t, got, "ci.yml")
+}
+
+func TestGuardPkgxEnv(t *testing.T) {
+	out, shape, err := Patch("ci.yml", []byte(srcGuardPkgxEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shape != ShapeGuardPkgxEnv {
+		t.Fatalf("shape = %q, want %q", shape, ShapeGuardPkgxEnv)
+	}
+	got := string(out)
+	assertInvariants(t, got)
+	// The emulator is resolved ONCE, in the step whose job is to put it there,
+	// and crosses to the test step through $GITHUB_ENV. Two resolvers in two
+	// steps would be two chances to disagree.
+	if !strings.Contains(got, `echo "QEMU_EXEC=$q" >> "$GITHUB_ENV"`) {
+		t.Error("the resolved emulator never reaches the test step")
+	}
+	if !strings.Contains(got, `-exec "$QEMU_EXEC" ./...`) {
+		t.Error("the test command does not use the resolved emulator")
+	}
+	if strings.Contains(got, "-exec ${{ matrix.qemu }}") {
+		t.Error("the test command still names the matrix emulator directly")
+	}
+	// ⛔ The old guard was a brace group spanning two lines. Half of it left
+	// behind is a syntax error, and a syntax error in a `run:` block is a red
+	// lane that looks like this fix failing.
+	if strings.Contains(got, "is not in this image") {
+		t.Error("the old guard's message survives")
+	}
+	for _, l := range strings.Split(got, "\n") {
+		if strings.Contains(l, "exit 1; }") {
+			t.Errorf("the old guard's closing brace survives: %s", strings.TrimSpace(l))
+		}
+	}
+	// The lane's own decisions survive: -count=1 is there so a cached PASS from
+	// the host architecture cannot stand in for a run that never happened.
+	for _, keep := range []string{"-count=1", "CGO_ENABLED:", "apt-get update -qq"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("the rewrite dropped %q", keep)
+		}
+	}
+	assertIdempotent(t, got, "ci.yml")
+}
+
+// ⛔ TestRefusesAMultiLineInstallItCannotReplace pins the reason the guard shape
+// needed its own install kind. A multi-line `run:` is not the one-line form,
+// and the one-line rewrite replaces the step wholesale -- it would have thrown
+// the rest of the script away silently.
+func TestRefusesAMultiLineInstallItCannotReplace(t *testing.T) {
+	src := `jobs:
+  arch:
+    steps:
+      - name: install
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static
+          ./scripts/something-else-that-matters.sh
+      - name: Test under qemu
+        run: GOARCH=${{ matrix.goarch }} go test -exec=${{ matrix.qemu }} ./...
+`
+	_, _, err := Patch("badshape.yml", []byte(src))
+	if err == nil {
+		t.Fatal("accepted a multi-line install the one-line rewrite would have destroyed")
+	}
+	if !strings.Contains(err.Error(), "badshape.yml") {
+		t.Errorf("the refusal does not name the file: %v", err)
+	}
+}
+
 // ------------------------------------------------- the planted positive
 
 // ⛔ TestAlreadyFixedFileComesBackUntouched is the planted positive, and it is
@@ -248,10 +398,13 @@ func TestOnelineArch(t *testing.T) {
 // drift from what the tool writes.
 func TestAlreadyFixedFileComesBackUntouched(t *testing.T) {
 	for shape, src := range map[string]string{
-		"oneline+matrix": srcOnelineMatrix,
-		"retry+matrix":   srcRetryMatrix,
-		"retry+case":     srcRetryCase,
-		"oneline+arch":   srcOnelineArch,
+		"oneline+matrix":     srcOnelineMatrix,
+		"retry+matrix":       srcRetryMatrix,
+		"retry+case":         srcRetryCase,
+		"oneline+arch":       srcOnelineArch,
+		"oneline+matrixflag": srcOnelineMatrixFlag,
+		"oneline+qemuvar":    srcOnelineQemuVar,
+		"guard+pkgxenv":      srcGuardPkgxEnv,
 	} {
 		fixed, _, err := Patch("ci.yml", []byte(src))
 		if err != nil {
@@ -477,6 +630,116 @@ jobs:
             ppc64le)  GOARCH=ppc64le go test -exec=qemu-ppc64le-static $(pkgs) ;;
             s390x)    GOARCH=s390x   go test -exec=qemu-s390x-static $(pkgs) ;;
           esac
+`
+
+// go-images/{gif,jpeg,png}, go-ooxml/*, go-opentype/*, go-pdfkit/*: the matrix
+// carries the WHOLE flag, and one of its lanes carries the EMPTY string --
+// which is the trap. Reported fleet-wide as "step at line 75 has no `run:`
+// key", because line 75 is a matrix datum and the tool read it as a command.
+const srcOnelineMatrixFlag = `name: ci
+jobs:
+  arch-qemu:
+    name: arch ${{ matrix.goarch }} (${{ matrix.via }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: riscv64, exec: "-exec=qemu-riscv64-static", via: qemu }
+          - { goarch: s390x,   exec: "-exec=qemu-s390x-static", via: qemu }
+          # 386 runs with NO emulator: a 386 ELF executes directly on the
+          # x86-64 runner. Measured on one commit of go-gfx/gfx, eight lanes
+          # each: under qemu-i386 five failures out of eight, native zero.
+          # qemu-i386 loses the guest's floating-point state across the signal
+          # Go delivers for asynchronous preemption.
+          - { goarch: "386",   exec: "", via: native }
+          - { goarch: arm,     exec: "-exec=qemu-arm-static", via: qemu }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.2'
+      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      - name: Test under qemu (${{ matrix.goarch }})
+        run: GOARCH=${{ matrix.goarch }} go test ${{ matrix.exec }} ./...
+`
+
+// The twelve go-macos repositories: a CROSS-BUILT test binary run under the
+// emulator the matrix named. There is no `go test -exec=` anywhere, which is
+// why the sweep reported these as lanes that never emulate -- the opposite of
+// true, and the reason this fixture exists.
+const srcOnelineQemuVar = `name: ci
+jobs:
+  linux-arch:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: amd64, qemu: "", qemu_cpu: "" }
+          - { goarch: arm64, qemu: qemu-aarch64-static, qemu_cpu: "" }
+          - { goarch: loong64, qemu: qemu-loongarch64-static, qemu_cpu: "" }
+          - { goarch: ppc64le, qemu: qemu-ppc64le-static, qemu_cpu: power10 }
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install qemu-user
+        if: matrix.qemu != ''
+        run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      - name: Build the test binary
+        run: GOOS=linux GOARCH=${{ matrix.goarch }} go test -c -o appicon.test ./...
+      # QEMU_CPU must be EXPORTED ONLY when it has a value: qemu-user refuses to
+      # start with an empty -cpu, and an env: key with an empty value is still a
+      # string, which is what ` + "`env: QEMU_CPU: ${{ matrix.qemu_cpu }}`" + ` does for the
+      # lanes that do not want one.
+      - name: Run it
+        env:
+          QEMU: ${{ matrix.qemu }}
+          QEMU_CPU_WANTED: ${{ matrix.qemu_cpu }}
+        run: |
+          if [ -n "$QEMU_CPU_WANTED" ]; then
+            export QEMU_CPU="$QEMU_CPU_WANTED"
+          fi
+          if [ -z "$QEMU" ]; then
+            ./appicon.test -test.count=1 -test.v
+          else
+            "$QEMU" ./appicon.test -test.count=1 -test.v
+          fi
+`
+
+// The five go-pkgx repositories: the install step ALREADY guards with
+// command -v, and the test step spells the flag with a SPACE
+// (` + "`-exec ${{ matrix.qemu }}`" + `), which is why a search for ` + "`-exec=`" + ` missed it.
+const srcGuardPkgxEnv = `name: ci
+jobs:
+  test-qemu:
+    name: test (${{ matrix.goarch }}, qemu)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: arm64
+            qemu: qemu-aarch64-static
+          - goarch: s390x
+            qemu: qemu-s390x-static
+    steps:
+      - uses: actions/checkout@v7
+      - name: qemu-user
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static
+          # Named, not assumed: a missing emulator must report itself as a
+          # missing tool rather than as a failure on that architecture.
+          command -v ${{ matrix.qemu }} || {
+            echo "::error::${{ matrix.qemu }} is not in this image" >&2; exit 1; }
+      - name: go test
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: ${{ matrix.goarch }}
+          GOOS: linux
+        # -count=1 so a cached PASS from the host architecture cannot stand in
+        # for a run that never happened under emulation.
+        run: go test -count=1 -exec ${{ matrix.qemu }} ./...
 `
 
 // go-tex/engine before #645: the lane derives the emulator name itself and --
