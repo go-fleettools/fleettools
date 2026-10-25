@@ -9,9 +9,12 @@ import (
 	"go/version"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"slices"
 	"strings"
+	"sync"
 
 	"golang.org/x/vuln/scan"
 )
@@ -47,8 +50,9 @@ const defaultVulnDB = "https://vuln.go.dev"
 
 // binaryCaveat is printed once per run that scanned a binary.
 const binaryCaveat = "binary mode: a vulnerability is reported when its symbol is PRESENT in the binary; " +
-	"a binary carries no call graph, so this cannot say whether it is reachable " +
-	"(and a stripped binary is reported for every vulnerable symbol of an affected module)"
+	"a binary carries no call graph, so this cannot say whether it is reachable. " +
+	"A stripped binary shows no symbols at all, so its findings are module-level and are held to " +
+	"a source-mode scan of the module at the tag instead"
 
 // vulnOptions is what the vulnerability and toolchain checks were asked for.
 type vulnOptions struct {
@@ -56,6 +60,7 @@ type vulnOptions struct {
 	db    string          // --vuln-db
 	allow map[string]bool // --allow-vuln
 	minGo string          // --min-go, normalised to "go1.x.y"; "" for none
+	cache *sourceCache    // one source-mode scan per target; nil scans every time
 }
 
 // A vuln is one advisory whose vulnerable symbols a binary holds.
@@ -222,44 +227,279 @@ func olderThan(goVersion, minGo string) string {
 	return ""
 }
 
-// checkVulns scans one Go binary's bytes, already on disk at path, and
-// returns what fails the file, what was allowed, and an error when the scan
-// could not be made at all.
-func checkVulns(ctx context.Context, path, label string, o vulnOptions) (problems, allowed []string, err error) {
+// verdicts is what the scan of one binary decided.
+type verdicts struct {
+	problems   []string // fail the file
+	allowed    []string // accepted by --allow-vuln, still reported
+	allowedIDs []string
+	moduleOnly []string // a stripped binary's findings that are not reachable at the tag
+	stripped   bool
+}
+
+// checkVulns scans one Go binary, on disk at path, and decides what each
+// finding means; err is a scan that could not be made at all.
+//
+// ⛔ A STRIPPED BINARY IS JUDGED BY ITS MODULES, AND THE STREAM DOES NOT SAY
+// SO. The first version of this failed go-authn/authnd v0.12.0 on
+// GO-2026-5932 (golang.org/x/crypto/openpgp) and read it as "openpgp linked
+// whole". It was not linked at all: `go mod why` says the main module does not
+// need it, and the same tree built without -s -w scans clean. authnd's
+// release builds with -ldflags="-s -w", like most of this fleet's, and for a
+// binary without a symbol table govulncheck falls back to "go.mod-level
+// precision": every vulnerable symbol of every affected module version counts
+// as present (x/vuln v1.9.0 internal/vulncheck/binary.go:107-111, after
+// internal/buildinfo/additions_scan.go:85-90 returns no symbols on
+// ErrNoSymbols). No progress message or field marks it; the findings look
+// exactly like symbol-level ones. So relverify asks govulncheck's own extract
+// mode, which prints the vulncheck.Bin the scan works from: an empty
+// pkgSymbols is the stripped case.
+//
+// For a stripped binary each finding not allowed is held to a source-mode
+// scan of the module at the tag -- reachability from the binary's own main
+// package, for its GOOS/GOARCH and its toolchain. Reachable fails; not
+// reachable is reported, by name, as module-level only. A source scan that
+// cannot run is "could not be checked", never a pass.
+func checkVulns(ctx context.Context, path, label string, o vulnOptions, t sourceTarget) (verdicts, error) {
+	var v verdicts
 	vs, err := scanBinary(ctx, path, o.db)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: vulnerabilities in %s could not be checked: %v", errUnverifiable, label, err)
+		return v, fmt.Errorf("%w: vulnerabilities in %s could not be checked: %v", errUnverifiable, cmpStr(label, "the binary"), err)
 	}
-	for _, v := range vs {
-		line := v.ID + " (" + strings.Join(v.Symbols, ", ")
-		if v.Fixed != "" {
-			line += "; fixed in " + v.Fixed
-		}
-		line += ")"
-		if label != "" {
-			line = label + ": " + line
-		}
-		if o.allow[v.ID] {
-			allowed = append(allowed, line)
+	var pending []vuln
+	for _, x := range vs {
+		if o.allow[x.ID] {
+			v.allowed = append(v.allowed, vulnLine(label, x, ""))
+			v.allowedIDs = append(v.allowedIDs, x.ID)
 		} else {
-			problems = append(problems, line)
+			pending = append(pending, x)
 		}
 	}
-	return problems, allowed, nil
+	if len(pending) == 0 {
+		return v, nil
+	}
+	hasSymbols, err := extractBinary(ctx, path)
+	if err != nil {
+		return v, fmt.Errorf("%w: whether %s has a symbol table could not be read: %v", errUnverifiable, cmpStr(label, "the binary"), err)
+	}
+	if hasSymbols {
+		for _, x := range pending {
+			v.problems = append(v.problems, vulnLine(label, x, ""))
+		}
+		return v, nil
+	}
+	v.stripped = true
+	reach, err := o.reachable(ctx, t)
+	if err != nil {
+		return v, fmt.Errorf("%w: %s is stripped, and the source-mode scan of %s@%s could not run: %v",
+			errUnverifiable, cmpStr(label, "the binary"), t.Module, t.Version, err)
+	}
+	for _, x := range pending {
+		if reach[x.ID] {
+			v.problems = append(v.problems, vulnLine(label, x, "binary stripped; REACHABLE in source at "+t.Version))
+		} else {
+			v.moduleOnly = append(v.moduleOnly, vulnLine(label, x,
+				"binary stripped, so presence cannot be seen; source at "+t.Version+": not reachable"))
+		}
+	}
+	return v, nil
+}
+
+func cmpStr(s, otherwise string) string {
+	if s == "" {
+		return otherwise
+	}
+	return s
+}
+
+func vulnLine(label string, v vuln, why string) string {
+	line := v.ID + " (" + strings.Join(v.Symbols, ", ")
+	if v.Fixed != "" {
+		line += "; fixed in " + v.Fixed
+	}
+	line += ")"
+	if why != "" {
+		line += " -- " + why
+	}
+	if label != "" {
+		line = label + ": " + line
+	}
+	return line
 }
 
 // scanFile writes data to a scratch file under dir, unexecutable, scans it,
 // and removes it. Archive members are scanned this way: govulncheck reads a
 // path.
-func scanFile(ctx context.Context, dir, name string, data []byte, o vulnOptions) (problems, allowed []string, err error) {
+func scanFile(ctx context.Context, dir, name string, data []byte, o vulnOptions, t sourceTarget) (verdicts, error) {
 	scratch, err := os.MkdirTemp(dir, ".scan-*")
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", errUnverifiable, err)
+		return verdicts{}, fmt.Errorf("%w: %v", errUnverifiable, err)
 	}
 	defer os.RemoveAll(scratch)
 	path := filepath.Join(scratch, filepath.Base(filepath.Clean("/"+name)))
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", errUnverifiable, err)
+		return verdicts{}, fmt.Errorf("%w: %v", errUnverifiable, err)
 	}
-	return checkVulns(ctx, path, name, o)
+	return checkVulns(ctx, path, name, o, t)
+}
+
+// extractBinary is the seam a test replaces: whether govulncheck sees a
+// symbol table in the binary at path.
+var extractBinary = govulncheckExtract
+
+// govulncheckExtract runs govulncheck -mode extract, which needs no database,
+// and reads the vulncheck.Bin it prints after its header
+// (internal/scan/extract.go:40-52 -- the same createBin the binary scan uses,
+// internal/scan/binary.go:26).
+func govulncheckExtract(ctx context.Context, path string) (bool, error) {
+	var stdout, stderr bytes.Buffer
+	c := scan.Command(ctx, "-mode", "extract", path)
+	c.Stdin = strings.NewReader("")
+	c.Stdout, c.Stderr = &stdout, &stderr
+	if err := c.Start(); err != nil {
+		return false, err
+	}
+	if err := c.Wait(); err != nil {
+		return false, fmt.Errorf("%v %s", err, firstLine(stderr.String()))
+	}
+	dec := json.NewDecoder(&stdout)
+	var h struct{ Name, Version string }
+	if err := dec.Decode(&h); err != nil || h.Name != "govulncheck-extract" {
+		return false, fmt.Errorf("govulncheck -mode extract printed no header (%v)", err)
+	}
+	var bin struct {
+		PkgSymbols []json.RawMessage `json:"pkgSymbols"`
+	}
+	if err := dec.Decode(&bin); err != nil {
+		return false, fmt.Errorf("govulncheck -mode extract: %w", err)
+	}
+	return len(bin.PkgSymbols) > 0, nil
+}
+
+// A sourceTarget is what a source-mode scan reproduces of one binary.
+type sourceTarget struct {
+	Module, Version string // the module, at the tag
+	Package         string // the binary's main package
+	GOOS, GOARCH    string
+	GoVersion       string // the toolchain that built it: the standard library it holds
+}
+
+// sourceCache keeps one source scan per target: six binaries of one release
+// on three platforms ask the same question three times over.
+type sourceCache struct {
+	mu   sync.Mutex
+	done map[sourceTarget]sourceResult
+}
+
+type sourceResult struct {
+	reach map[string]bool
+	err   error
+}
+
+func (o vulnOptions) reachable(ctx context.Context, t sourceTarget) (map[string]bool, error) {
+	if o.cache == nil {
+		return scanSource(ctx, t, o.db)
+	}
+	o.cache.mu.Lock()
+	defer o.cache.mu.Unlock()
+	if o.cache.done == nil {
+		o.cache.done = map[sourceTarget]sourceResult{}
+	}
+	if r, ok := o.cache.done[t]; ok {
+		return r.reach, r.err
+	}
+	reach, err := scanSource(ctx, t, o.db)
+	o.cache.done[t] = sourceResult{reach, err}
+	return reach, err
+}
+
+// scanSource is the seam a test replaces: the IDs reachable, in source mode,
+// from t's main package.
+var scanSource = govulncheckSource
+
+// govulncheckSource downloads the module at the tag through the module proxy
+// and scans the binary's main package in source mode.
+func govulncheckSource(ctx context.Context, t sourceTarget, db string) (map[string]bool, error) {
+	if t.Module == "" || t.Package == "" || t.Version == "" {
+		return nil, fmt.Errorf("the binary names no module or main package (module %q, package %q)", t.Module, t.Package)
+	}
+	dir, err := moduleDir(ctx, t.Module+"@"+t.Version)
+	if err != nil {
+		return nil, err
+	}
+	return scanSourceDir(ctx, dir, t, db)
+}
+
+// moduleDir is `go mod download -json mod@version`'s Dir: the module's files,
+// read-only, in the module cache. It runs outside any module.
+func moduleDir(ctx context.Context, modVersion string) (string, error) {
+	cmd := exec.CommandContext(ctx, "go", "mod", "download", "-json", modVersion)
+	cmd.Dir = os.TempDir()
+	cmd.Env = append(os.Environ(), "GOFLAGS=")
+	out, err := cmd.Output()
+	var m struct{ Dir, Error string }
+	if jerr := json.Unmarshal(out, &m); jerr != nil {
+		return "", fmt.Errorf("go mod download %s: %v %v", modVersion, err, jerr)
+	}
+	if m.Error != "" || m.Dir == "" {
+		return "", fmt.Errorf("go mod download %s: %s", modVersion, cmp(m.Error, "no directory"))
+	}
+	return m.Dir, nil
+}
+
+// scanSourceDir runs govulncheck in source mode over one package of the
+// module in dir.
+//
+// GOVERSION is the binary's toolchain, not this machine's: govulncheck judges
+// the standard library by it (internal/scan/run.go:87-93 reads GOVERSION= from
+// the environment before asking `go env`), and the question is what the
+// RELEASED binary holds. CGO_ENABLED=0 keeps package loading from running a C
+// toolchain over downloaded code.
+//
+// ⛔ GOTOOLCHAIN IS LEFT TO GO. The first version set GOTOOLCHAIN=local, and
+// on this machine the `go` on PATH outside any module is go1.27.1 while
+// authnd v0.12.0 requires go >= 1.27.3: the source scan could not run, and
+// relverify said so (exit 2) for a release that is fine. Go's own selection
+// fetches only the official toolchain the module asks for, checked against
+// the checksum database (go.dev/doc/toolchain).
+func scanSourceDir(ctx context.Context, dir string, t sourceTarget, db string) (map[string]bool, error) {
+	var stdout, stderr bytes.Buffer
+	c := scan.Command(ctx, "-C", dir, "-format", "json", "-db", db, t.Package)
+	c.Stdin = strings.NewReader("")
+	c.Stdout, c.Stderr = &stdout, &stderr
+	c.Env = append(os.Environ(), "GOFLAGS=", "CGO_ENABLED=0")
+	if t.GOOS != "" && t.GOARCH != "" {
+		c.Env = append(c.Env, "GOOS="+t.GOOS, "GOARCH="+t.GOARCH)
+	}
+	if t.GoVersion != "" {
+		c.Env = append(c.Env, "GOVERSION="+t.GoVersion)
+	}
+	if err := c.Start(); err != nil {
+		return nil, err
+	}
+	if err := c.Wait(); err != nil {
+		return nil, fmt.Errorf("%v %s", err, firstLine(stderr.String()))
+	}
+	vs, err := parseScan(&stdout)
+	if err != nil {
+		return nil, err
+	}
+	reach := map[string]bool{}
+	for _, v := range vs {
+		reach[v.ID] = true
+	}
+	return reach, nil
+}
+
+// targetOf is the source scan that reproduces a binary of tag.
+func targetOf(bi *debug.BuildInfo, tag string) sourceTarget {
+	t := sourceTarget{Module: bi.Main.Path, Version: tag, Package: bi.Path, GoVersion: toolchainOf(bi.GoVersion)}
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "GOOS":
+			t.GOOS = s.Value
+		case "GOARCH":
+			t.GOARCH = s.Value
+		}
+	}
+	return t
 }

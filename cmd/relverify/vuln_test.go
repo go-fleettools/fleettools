@@ -71,9 +71,37 @@ func testBinary(t *testing.T, dir, name string) (string, []byte) {
 }
 
 var planted struct {
-	once sync.Once
-	data []byte
-	err  error
+	mu    sync.Mutex
+	built map[string][]byte // by -ldflags
+}
+
+// plantedSourceFiles is a module that calls json.Unmarshal: GO-2099-0001 is
+// reachable in it, GO-2099-0002 (absent symbol) and GO-2099-0003 (fixed
+// version) are not.
+var plantedSourceFiles = map[string]string{
+	"go.mod":  "module planted\n\ngo 1.22\n",
+	"main.go": "package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc main() {\n\tvar v any\n\tfmt.Println(json.Unmarshal([]byte(os.Args[0]), &v))\n}\n",
+}
+
+func plantedSource(t *testing.T) string {
+	t.Helper()
+	src := t.TempDir()
+	for n, body := range plantedSourceFiles {
+		if err := os.WriteFile(filepath.Join(src, n), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return src
+}
+
+// strippedBinary is the planted program built the way this fleet's release
+// workflows build: -trimpath -ldflags="-s -w" (authnd release.yml).
+func strippedBinary(t *testing.T, dir, name string) (string, []byte) {
+	return buildPlanted(t, dir, name, "-s -w")
+}
+
+func plantedBinary(t *testing.T, dir, name string) (string, []byte) {
+	return buildPlanted(t, dir, name, "")
 }
 
 // plantedBinary builds, once, a small program that calls json.Unmarshal and
@@ -87,42 +115,133 @@ var planted struct {
 // vulnerabilities at the go.mod-level precision"). A release build keeps its
 // symbols, so this builds one the way a release does. Standard library only,
 // GOTOOLCHAIN=local: no download.
-func plantedBinary(t *testing.T, dir, name string) (string, []byte) {
+func buildPlanted(t *testing.T, dir, name, ldflags string) (string, []byte) {
 	t.Helper()
-	planted.once.Do(func() {
-		src, err := os.MkdirTemp("", "relverify-planted-")
-		if err != nil {
-			planted.err = err
-			return
-		}
-		defer os.RemoveAll(src)
-		files := map[string]string{
-			"go.mod":  "module planted\n\ngo 1.22\n",
-			"main.go": "package main\n\nimport (\n\t\"encoding/json\"\n\t\"fmt\"\n\t\"os\"\n)\n\nfunc main() {\n\tvar v any\n\tfmt.Println(json.Unmarshal([]byte(os.Args[0]), &v))\n}\n",
-		}
-		for n, body := range files {
-			if planted.err = os.WriteFile(filepath.Join(src, n), []byte(body), 0o644); planted.err != nil {
-				return
-			}
-		}
+	planted.mu.Lock()
+	data, ok := planted.built[ldflags]
+	if !ok {
+		src := plantedSource(t)
 		out := filepath.Join(src, "planted")
-		cmd := exec.Command("go", "build", "-o", out, ".")
+		cmd := exec.Command("go", "build", "-trimpath", "-ldflags="+ldflags, "-o", out, ".")
 		cmd.Dir = src
 		cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "CGO_ENABLED=0", "GOFLAGS=")
 		if b, err := cmd.CombinedOutput(); err != nil {
-			planted.err = fmt.Errorf("go build: %v\n%s", err, b)
-			return
+			planted.mu.Unlock()
+			t.Fatalf("go build: %v\n%s", err, b)
 		}
-		planted.data, planted.err = os.ReadFile(out)
-	})
-	if planted.err != nil {
-		t.Fatal(planted.err)
+		var err error
+		if data, err = os.ReadFile(out); err != nil {
+			planted.mu.Unlock()
+			t.Fatal(err)
+		}
+		if planted.built == nil {
+			planted.built = map[string][]byte{}
+		}
+		planted.built[ldflags] = data
 	}
+	planted.mu.Unlock()
 	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, planted.data, 0o755); err != nil {
+	if err := os.WriteFile(p, data, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return p, planted.data
+	return p, data
+}
+
+// The stripped case is detected through govulncheck's own extract mode, on a
+// binary built the way releases are -- and the unstripped build is the
+// control.
+func TestExtractSeesWhetherABinaryHasSymbols(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds binaries")
+	}
+	dir := t.TempDir()
+	for name, want := range map[string]bool{"with": true, "stripped": false} {
+		var p string
+		if want {
+			p, _ = plantedBinary(t, dir, name)
+		} else {
+			p, _ = strippedBinary(t, dir, name)
+		}
+		got, err := govulncheckExtract(context.Background(), p)
+		if err != nil || got != want {
+			t.Errorf("%s: has symbols = %v, %v; want %v", name, got, err, want)
+		}
+	}
+}
+
+// ⛔ A STRIPPED BINARY IS JUDGED BY ITS SOURCE. The planted program built with
+// -s -w: govulncheck reports GO-2099-0002, a symbol no program has, as if
+// present. Unreachable in source, it is reported as module-level only and
+// does not fail; reachable, it fails; a source scan that cannot run is
+// "could not be checked".
+func TestAStrippedBinaryIsJudgedBySourceReachability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scans a binary")
+	}
+	fakeGH(t, func([]string) ([]byte, error) { return nil, nil })
+	t.Cleanup(func() { scanSource = govulncheckSource })
+	for name, c := range map[string]struct {
+		reach    map[string]bool
+		err      error
+		fail     bool
+		moduleOK int
+	}{
+		"nothing reachable":      {map[string]bool{}, nil, false, 2},
+		"GO-2099-0002 reachable": {map[string]bool{"GO-2099-0002": true}, nil, true, 1},
+		"source scan fails":      {nil, errors.New("go mod download: not found"), true, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var asked []sourceTarget
+			scanSource = func(_ context.Context, tg sourceTarget, _ string) (map[string]bool, error) {
+				asked = append(asked, tg)
+				return c.reach, c.err
+			}
+			dir := t.TempDir()
+			_, b := strippedBinary(t, dir, "tool-linux-amd64")
+			write(t, dir, "SHA256SUMS", sumOf(b)+"  tool-linux-amd64\n")
+			var out bytes.Buffer
+			files, err := checkFiles(&out, "o/r", "v1.2.3", commit, dir, vulnOptions{db: testDB(t), cache: &sourceCache{}})
+			if c.err != nil {
+				if !errors.Is(err, errUnverifiable) || !strings.Contains(err.Error(), "source-mode scan") {
+					t.Fatalf("%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := files[0]
+			if (len(f.vulns) > 0) != c.fail || len(f.moduleOnly) != c.moduleOK {
+				t.Fatalf("vulns %v moduleOnly %v\n%s", f.vulns, f.moduleOnly, out.String())
+			}
+			if c.fail && !strings.Contains(out.String(), "REACHABLE in source at v1.2.3") {
+				t.Errorf("%s", out.String())
+			}
+			if !strings.Contains(out.String(), "module-level only") {
+				t.Errorf("the unreachable findings went silent:\n%s", out.String())
+			}
+			if len(asked) != 1 || asked[0].Module != "planted" || asked[0].Version != "v1.2.3" || asked[0].Package != "planted" ||
+				asked[0].GOOS == "" || asked[0].GoVersion != runtime.Version() {
+				t.Errorf("source scan asked for %+v", asked)
+			}
+		})
+	}
+}
+
+// The real source-mode scan, offline, over the planted module and the
+// planted database: reachability, not presence.
+func TestTheSourceScanReportsWhatIsReachable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("loads packages")
+	}
+	reach, err := scanSourceDir(context.Background(), plantedSource(t),
+		sourceTarget{Package: "planted", GoVersion: runtime.Version()}, testDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reach["GO-2099-0001"] || reach["GO-2099-0002"] || reach["GO-2099-0003"] || len(reach) != 1 {
+		t.Fatalf("%v", reach)
+	}
 }
 
 func TestTheScanFindsThePlantedSymbolAndOnlyIt(t *testing.T) {

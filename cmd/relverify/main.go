@@ -104,7 +104,7 @@ func RootCmd() *cobra.Command {
 		},
 	}
 	c.RunE = func(cmd *cobra.Command, args []string) error {
-		o := vulnOptions{skip: noVuln, db: vulnDB, allow: map[string]bool{}}
+		o := vulnOptions{skip: noVuln, db: vulnDB, allow: map[string]bool{}, cache: &sourceCache{}}
 		if minGo != "" {
 			v, err := normGo(minGo)
 			if err != nil {
@@ -455,6 +455,9 @@ type file struct {
 	vulns      []string // vulnerabilities found and not allowed
 	allowed    []string // vulnerabilities found and allowed by --allow-vuln
 	allowedIDs []string
+	// moduleOnly are a stripped binary's findings that the source-mode scan
+	// at the tag found unreachable: reported, by name, not failing.
+	moduleOnly []string
 	scanned    bool // the vulnerability scan ran on every Go binary in it
 }
 
@@ -469,7 +472,8 @@ const scanTimeout = 10 * time.Minute
 // judgeGo holds one Go binary -- path on disk, or data read out of an archive
 // -- to --min-go and to the vulnerability scan. label is its name inside an
 // archive, "" for a bare binary.
-func judgeGo(f *file, dir, path, label string, data []byte, goVersion string, o vulnOptions) error {
+func judgeGo(f *file, dir, path, label string, data []byte, bi *debug.BuildInfo, tag string, o vulnOptions) error {
+	goVersion := bi.GoVersion
 	tc := cmp(toolchainOf(goVersion), "(none)")
 	if label != "" {
 		tc = label + " " + tc
@@ -489,27 +493,22 @@ func judgeGo(f *file, dir, path, label string, data []byte, goVersion string, o 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), scanTimeout)
 	defer cancel()
-	var problems, allowed []string
+	t := targetOf(bi, tag)
+	var v verdicts
 	var err error
 	if data != nil {
-		problems, allowed, err = scanFile(ctx, dir, label, data, o)
+		v, err = scanFile(ctx, dir, label, data, o, t)
 	} else {
-		problems, allowed, err = checkVulns(ctx, path, label, o)
+		v, err = checkVulns(ctx, path, label, o, t)
 	}
 	if err != nil {
 		return err
 	}
 	f.scanned = true
-	f.vulns = append(f.vulns, problems...)
-	f.allowed = append(f.allowed, allowed...)
-	for _, a := range allowed {
-		id := a
-		if label != "" {
-			id = strings.TrimPrefix(id, label+": ")
-		}
-		id, _, _ = strings.Cut(id, " ")
-		f.allowedIDs = append(f.allowedIDs, id)
-	}
+	f.vulns = append(f.vulns, v.problems...)
+	f.allowed = append(f.allowed, v.allowed...)
+	f.allowedIDs = append(f.allowedIDs, v.allowedIDs...)
+	f.moduleOnly = append(f.moduleOnly, v.moduleOnly...)
 	return nil
 }
 
@@ -551,7 +550,7 @@ func checkFiles(w io.Writer, repo, tag, commit, dir string, o vulnOptions) ([]fi
 		if bi, err := buildinfo.ReadFile(path); err == nil {
 			f.goBinary = true
 			f.build = checkBuild(bi.Main.Version, bi.Settings, tag, commit)
-			if err := judgeGo(&f, dir, path, "", nil, bi.GoVersion, o); err != nil {
+			if err := judgeGo(&f, dir, path, "", nil, bi, tag, o); err != nil {
 				return nil, err
 			}
 		} else if isArchive(e.Name()) {
@@ -592,7 +591,7 @@ func checkArchive(f *file, dir, path, tag, commit string, o vulnOptions) error {
 		if p := checkBuild(m.bi.Main.Version, m.bi.Settings, tag, commit); p != "" {
 			problems = append(problems, m.name+": "+p)
 		}
-		if err := judgeGo(f, dir, "", m.name, m.data, m.bi.GoVersion, o); err != nil {
+		if err := judgeGo(f, dir, "", m.name, m.data, m.bi, tag, o); err != nil {
 			return err
 		}
 		if isHost(f.name) && f.hostData == nil {
@@ -610,6 +609,9 @@ func report(w io.Writer, f file) {
 	for _, a := range f.allowed {
 		fmt.Fprintf(w, "  allow %-31s %s, accepted by --allow-vuln\n", f.name, a)
 	}
+	for _, m := range f.moduleOnly {
+		fmt.Fprintf(w, "  mod  %-32s module-level only: %s\n", f.name, m)
+	}
 	if f.ok() {
 		what := "sum, attestation"
 		switch {
@@ -622,6 +624,8 @@ func report(w io.Writer, f file) {
 		}
 		if f.goBinary {
 			switch {
+			case f.scanned && len(f.moduleOnly) > 0:
+				what += fmt.Sprintf(", no reachable vulnerability (%d module-level only and %d allowed, above)", len(f.moduleOnly), len(f.allowed))
 			case f.scanned && len(f.allowed) > 0:
 				what += fmt.Sprintf(", no vulnerability but the %d allowed above", len(f.allowed))
 			case f.scanned:
