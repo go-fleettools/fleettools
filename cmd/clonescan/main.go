@@ -120,7 +120,7 @@ func RootCmd() *cobra.Command {
 			if bundle != "" {
 				r.bundle, r.bundleErr = writeBundle(r, bundle)
 			}
-			print(out, r)
+			printRepo(out, r)
 			if !r.safe() || r.bundleErr != nil {
 				keep = true
 			}
@@ -154,8 +154,8 @@ func main() {
 	osExit(execute(RootCmd(), os.Args[1:]))
 }
 
-// print writes one repository's verdict and reasons.
-func print(w io.Writer, r *repo) {
+// printRepo writes one repository's verdict and reasons.
+func printRepo(w io.Writer, r *repo) {
 	verdict := "SAFE"
 	if !r.safe() {
 		verdict = "KEEP"
