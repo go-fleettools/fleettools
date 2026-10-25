@@ -110,7 +110,7 @@ func TestAnOrganisationThatHolds(t *testing.T) {
 }
 
 func TestVerboseAndErrors(t *testing.T) {
-	many := `{"tree":[{"path":"a.c","type":"blob"},{"path":"b.c","type":"blob"},{"path":"c.c","type":"blob"},{"path":"d.cpp","type":"blob"},{"path":"e.swift","type":"blob"}]}`
+	many := `{"tree":[{"path":"bind.go","type":"blob"},{"path":"a.c","type":"blob"},{"path":"b.c","type":"blob"},{"path":"c.c","type":"blob"},{"path":"d.cpp","type":"blob"},{"path":"e.swift","type":"blob"}]}`
 	gh = fake(t, `[{"full_name":"acme/bound","default_branch":"main","license":{"spdx_id":"BSD-3-Clause"}}]`, map[string]string{"bound": many})
 	if out, _ := runCmd(t, "acme"); !strings.Contains(out, "… 2 more") {
 		t.Fatal(out)
@@ -211,6 +211,36 @@ func TestBenchmarksApart(t *testing.T) {
 	gh = fake(t, `[{"full_name":"acme/re","default_branch":"main","license":{"spdx_id":"BSD-3-Clause"}}]`, map[string]string{"re": many})
 	if out, _ := runCmd(t, "acme"); !strings.Contains(out, "… 1 more") {
 		t.Fatal(out)
+	}
+}
+
+// cgo is a Go build's. A repository with no Go code at all (a Swift app such
+// as nano-container-linux's openpubkey-agent) links nothing into the
+// organisation's Go code: its sources are set apart and named as a separate
+// app. The same sources beside Go code are still a signal.
+func TestSeparateAppApart(t *testing.T) {
+	app := `{"tree":[{"path":"LICENSE","type":"blob"},{"path":"Package.swift","type":"blob"},
+	 {"path":"Sources/Agent/main.swift","type":"blob"},{"path":"Sources/Shim/shim.c","type":"blob"},
+	 {"path":"Sources/Shim/include/shim.h","type":"blob"}]}`
+	two := `[{"full_name":"acme/agent","default_branch":"main","license":{"spdx_id":"BSD-3-Clause"}},
+	 {"full_name":"acme/pure","default_branch":"main","license":{"spdx_id":"BSD-3-Clause"}}]`
+	gh = fake(t, two, map[string]string{"agent": app, "pure": trees["pure"]})
+	out, code := runCmd(t, "acme", "-v")
+	if code != 0 || !strings.Contains(out, "HOLDS                  2 repos, 0 with code not BSD-3-Clause, 0 with cgo signals") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	want := "apart    acme/agent                                       Package.swift, Sources/Agent/main.swift, Sources/Shim/include/shim.h, Sources/Shim/shim.c (no Go code in the repository: a separate app, not a cgo build)"
+	if !strings.Contains(out, want) {
+		t.Fatalf("lacks %q\n%s", want, out)
+	}
+	if strings.Contains(out, "cgo?") {
+		t.Fatalf("a separate app read as cgo\n%s", out)
+	}
+	// the planted positive: one Go file makes the same sources a signal again
+	withGo := strings.Replace(app, `{"path":"LICENSE","type":"blob"},`, `{"path":"LICENSE","type":"blob"},{"path":"bridge.go","type":"blob"},`, 1)
+	gh = fake(t, two, map[string]string{"agent": withGo, "pure": trees["pure"]})
+	if out, code := runCmd(t, "acme"); code != 1 || !strings.Contains(out, "cgo?     acme/agent") {
+		t.Fatalf("exit %d\n%s", code, out)
 	}
 }
 
