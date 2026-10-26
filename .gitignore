@@ -16,5 +16,6 @@
 !/*/
 !/.gitignore
 !/README.md
+!/LICENSE
 !/go.mod
 !/go.sum
