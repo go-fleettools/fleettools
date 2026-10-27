@@ -63,6 +63,24 @@ var (
 	runHugo = func(dir, hugo string, args ...string) ([]byte, error) { return run(dir, hugo, args...) }
 )
 
+// pageHistoryModule is the theme's page history generator, pinned.
+const pageHistoryModule = "github.com/tannevaled/hextra/cmd/pagehistory@v0.21.0"
+
+// runStdout is run with stderr kept apart: a program whose standard output is
+// data (JSON) must not get "go: downloading ..." lines mixed into it.
+func runStdout(dir, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdin = nil
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
+	}
+	return out.Bytes(), nil
+}
+
 func run(dir, name string, args ...string) ([]byte, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
@@ -280,9 +298,13 @@ func build(w io.Writer, o buildOptions) error {
 	if _, err := runGit(tree, "submodule", "update", "--init", "--recursive"); err != nil {
 		return failf("submodules of the default branch: %v", err)
 	}
-	// Creation dates and authors, when the theme provides the script.
-	if _, err := os.Stat(filepath.Join(tree, "themes", "hextra", "scripts", "page-history.sh")); err == nil {
-		if hist, err := run(tree, "sh", "themes/hextra/scripts/page-history.sh"); err == nil {
+	// Creation dates and authors, when the theme provides the generator: the
+	// Go program (v0.21.0 on), run from its pinned module whatever the
+	// theme's own version, or the older shell script it replaces.
+	_, errScript := os.Stat(filepath.Join(tree, "themes", "hextra", "scripts", "page-history.sh"))
+	_, errGo := os.Stat(filepath.Join(tree, "themes", "hextra", "cmd", "pagehistory"))
+	if errScript == nil || errGo == nil {
+		if hist, err := runStdout(tree, "go", "run", pageHistoryModule); err == nil {
 			if err := os.MkdirAll(filepath.Join(tree, "data"), 0o755); err == nil {
 				_ = os.WriteFile(filepath.Join(tree, "data", "pagehistory.json"), hist, 0o644)
 			}
