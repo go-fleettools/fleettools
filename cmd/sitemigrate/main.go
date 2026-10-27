@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
 )
 
@@ -155,6 +156,7 @@ func migrate(dir, tag string) ([]string, error) {
 }
 
 func main() {
+	fleet.WarnIfStale(os.Stderr)
 	if err := RootCmd().Execute(); err != nil {
 		osExit(1)
 	}
