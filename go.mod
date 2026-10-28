@@ -17,8 +17,9 @@ go 1.27.3
 retract v0.1.0 // tracked 8.4 MB of compiled executables; use v0.1.1 or later
 
 require (
-	github.com/go-kramdown/kramdown v0.3.0
-	github.com/go-pdfkit/html2pdf v0.1.0
+	github.com/go-kramdown/kramdown v0.3.1
+	github.com/go-pdfkit/extract v0.9.0
+	github.com/go-pdfkit/html2pdf v0.2.0
 	github.com/go-pdfkit/reader v0.9.0
 	github.com/spf13/cobra v1.10.2
 	github.com/ulikunitz/xz v0.5.17
@@ -45,9 +46,11 @@ require (
 	github.com/go-images/png v0.2.0 // indirect
 	github.com/go-opentype/fonts v0.14.0 // indirect
 	github.com/go-opentype/opentype v0.16.0 // indirect
+	github.com/go-pdfkit/pdffont v0.4.0 // indirect
 	github.com/go-pdfkit/pdfkit v0.20.0 // indirect
-	github.com/go-rouge/rouge v0.2.0 // indirect
-	github.com/go-ruby-regexp/regexp v0.0.0-20260701043846-fa3d6604e1ee // indirect
+	github.com/go-regexp/engine v0.3.2 // indirect
+	github.com/go-rouge/rouge v0.7.1 // indirect
+	github.com/go-ruby-regexp/regexp v0.1.1 // indirect
 	github.com/go-simd/highway v0.0.14 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
 	github.com/go-webengine/engine v0.17.3 // indirect

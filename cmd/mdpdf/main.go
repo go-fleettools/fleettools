@@ -5,6 +5,7 @@
 //
 //	mdpdf --in report.md --out report.pdf --title "Q3 report" --author "A. Writer"
 //	mdpdf --in report.md --paper letter --css house.css
+//	mdpdf --in report.md --toc --page-numbers=false
 //
 // Input is bounded (16 MiB of Markdown, 1 MiB of CSS). Raw HTML in the
 // Markdown is passed through to the layout engine like any HTML page.
@@ -58,6 +59,30 @@ var papers = map[string]string{"a4": "A4", "letter": "letter"}
 
 type options struct {
 	in, out, title, author, paper, css string
+	toc, pageNumbers                   bool
+}
+
+// tocCSS styles the table of contents insertTOC makes. The page number is
+// target-counter() (CSS Content 3), resolved by go-pdfkit/html2pdf.
+const tocCSS = `
+.toc { margin: 0 0 12pt 0; }
+.toc-title { font-family: serif; font-size: 13pt; font-weight: bold; margin: 12pt 0 4pt 0; }
+.toc table { width: 100%; margin: 0; font-size: 10pt; break-inside: auto; }
+.toc td { border: none; padding: 1.5pt 0; background: none; }
+.toc-l3 .toc-text { padding-left: 14pt; }
+.toc td.toc-num { text-align: right; width: 3em; }
+.toc a { color: #1a1a1a; }
+.toc-num a::after { content: target-counter(attr(href url), page); }
+`
+
+// pageNumberCSS is the "n / N" footer: a CSS Paged Media 3 margin box,
+// painted by go-pdfkit/html2pdf.
+func pageNumberCSS(on bool) string {
+	if !on {
+		return ""
+	}
+	return `@page { @bottom-center { content: counter(page) " / " counter(pages); font-family: sans-serif; font-size: 8.5pt; color: #555555; } }
+`
 }
 
 // withDefaults fills --out and --title from the input's name and trims the
@@ -104,6 +129,8 @@ to the input's name without extension.`,
 	f.StringVar(&o.author, "author", "", "PDF Author")
 	f.StringVar(&o.paper, "paper", "a4", "paper size: a4 or letter")
 	f.StringVar(&o.css, "css", "", "extra stylesheet file, applied after the built-in one")
+	f.BoolVar(&o.toc, "toc", false, "add a table of contents (h2 and h3, with page numbers) after the title block")
+	f.BoolVar(&o.pageNumbers, "page-numbers", true, `print "n / N" at the bottom centre of every page (--page-numbers=false to turn off)`)
 	_ = cmd.MarkFlagRequired("in")
 	return cmd
 }
@@ -127,12 +154,22 @@ func readBounded(path string, max int64) ([]byte, error) {
 
 // toBody turns Markdown into the HTML body fragment, with the workarounds of
 // workarounds.go applied.
-func toBody(md string) (string, error) {
-	return markLists(kramdown.ToHTML(separateTables(md), nil))
+func toBody(md string, toc bool) (string, error) {
+	// Input "GFM" turns "- [x]" items into task-list checkboxes.
+	ko := kramdown.DefaultOptions()
+	ko.Input = "GFM"
+	body := kramdown.ToHTML(md, &ko)
+	if toc {
+		var err error
+		if body, err = insertTOC(body); err != nil {
+			return "", err
+		}
+	}
+	return markLists(body)
 }
 
 // buildPage assembles the HTML document. extraCSS may be empty.
-func buildPage(body, title, paper, extraCSS string) (string, error) {
+func buildPage(body, title, paper, extraCSS string, pageNumbers bool) (string, error) {
 	size, ok := papers[strings.ToLower(paper)]
 	if !ok {
 		return "", fmt.Errorf("--paper %q: want a4 or letter", paper)
@@ -143,7 +180,7 @@ func buildPage(body, title, paper, extraCSS string) (string, error) {
 		return "", errors.New("--css: the stylesheet contains \"</style\"")
 	}
 	return "<!doctype html><html><head><meta charset=\"utf-8\"><title>" +
-		html.EscapeString(title) + "</title><style>" + fmt.Sprintf(baseCSS, size) +
+		html.EscapeString(title) + "</title><style>" + fmt.Sprintf(baseCSS, size) + tocCSS + pageNumberCSS(pageNumbers) +
 		"</style><style>" + extraCSS + "</style></head><body>" + body + "</body></html>", nil
 }
 
@@ -163,11 +200,11 @@ func run(o options) error {
 			return err
 		}
 	}
-	body, err := toBody(string(src))
+	body, err := toBody(string(src), o.toc)
 	if err != nil {
 		return err
 	}
-	page, err := buildPage(body, title, o.paper, string(extra))
+	page, err := buildPage(body, title, o.paper, string(extra), o.pageNumbers)
 	if err != nil {
 		return err
 	}
