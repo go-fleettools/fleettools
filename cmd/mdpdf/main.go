@@ -62,7 +62,7 @@ var papers = map[string]string{"a4": "A4", "letter": "letter"}
 type options struct {
 	in, out, title, author, paper, css string
 	toc, pageNumbers                   bool
-	tocTitle, lang                     string
+	tocTitle, lang, tocAfter           string
 }
 
 // tocTitles is the default table-of-contents title per primary language
@@ -165,7 +165,8 @@ to the input's name without extension.`,
 	f.StringVar(&o.css, "css", "", "extra stylesheet file, applied after the built-in one")
 	f.StringVar(&o.lang, "lang", "", "document language, a tag such as fr or en-GB: sets <html lang> and the default --toc-title (fr, en, de, es, it)")
 	f.StringVar(&o.tocTitle, "toc-title", "", `title of the table of contents (default: by --lang, "Contents" for en or no language)`)
-	f.BoolVar(&o.toc, "toc", false, "add a table of contents (h2 and h3, with page numbers) after the title block")
+	f.BoolVar(&o.toc, "toc", false, "add a table of contents (h2 and h3, with page numbers); it goes where `<!-- toc -->` stands in the Markdown, else after the title block")
+	f.StringVar(&o.tocAfter, "toc-after", "", "place the table of contents at the end of the section with this heading (exact text, NFC, case-sensitive; else a slug or id match); implies --toc and wins over a `<!-- toc -->` marker")
 	f.BoolVar(&o.pageNumbers, "page-numbers", true, `print "n / N" at the bottom centre of every page (--page-numbers=false to turn off)`)
 	_ = cmd.MarkFlagRequired("in")
 	return cmd
@@ -191,13 +192,19 @@ func readBounded(path string, max int64) ([]byte, error) {
 // toBody turns Markdown into the HTML body fragment, with the workarounds of
 // workarounds.go applied.
 func toBody(md string, toc bool, tocTitle string) (string, error) {
+	return toBodyAfter(md, toc, tocTitle, "")
+}
+
+// toBodyAfter is toBody with the table of contents placed at the end of the
+// section headed tocAfter (see insertTOC for the precedence).
+func toBodyAfter(md string, toc bool, tocTitle, tocAfter string) (string, error) {
 	// Input "GFM" turns "- [x]" items into task-list checkboxes.
 	ko := kramdown.DefaultOptions()
 	ko.Input = "GFM"
 	body := kramdown.ToHTML(md, &ko)
 	if toc {
 		var err error
-		if body, err = insertTOC(body, tocTitle); err != nil {
+		if body, err = insertTOC(body, tocTitle, tocAfter); err != nil {
 			return "", err
 		}
 	}
@@ -243,7 +250,7 @@ func run(o options) error {
 	if err := checkLang(o.lang); err != nil {
 		return err
 	}
-	body, err := toBody(string(src), o.toc, tocTitleFor(o.tocTitle, o.lang))
+	body, err := toBodyAfter(string(src), o.toc || o.tocAfter != "", tocTitleFor(o.tocTitle, o.lang), o.tocAfter)
 	if err != nil {
 		return err
 	}
