@@ -20,7 +20,7 @@ func TestMarkLists(t *testing.T) {
 // TestTaskItems: kramdown's GFM output (v0.3.1) is a disabled checkbox; the
 // engine paints none, so it becomes a ballot box and the item gets no bullet.
 func TestTaskItems(t *testing.T) {
-	body, err := toBody("- plain\n- [x] done\n- [ ] todo\n", false)
+	body, err := toBody("- plain\n- [x] done\n- [ ] todo\n", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,9 +35,9 @@ func TestTaskItems(t *testing.T) {
 }
 
 // TestTableAfterListIsATable: go-kramdown/kramdown#12, fixed in v0.3.1 — no
-// workaround any more, and this keeps it that way.
+// workaround any more (PR #14), and this keeps it that way.
 func TestTableAfterListIsATable(t *testing.T) {
-	body, err := toBody("- item\n\n| a | b |\n| - | - |\n| 1 | 2 |\n", false)
+	body, err := toBody("- item\n\n| a | b |\n| - | - |\n| 1 | 2 |\n", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestDeepNestingIsBounded(t *testing.T) {
 
 func TestInsertTOC(t *testing.T) {
 	src := "<h1 id=\"t\">Title</h1>\n<p>By me.</p>\n<h2 id=\"a\">Alpha</h2>\n<h3 id=\"b\">Beta <em>x</em></h3>\n<h2>No id &amp; more</h2>\n"
-	got, err := insertTOC(src)
+	got, err := insertTOC(src, "Contents")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,13 +95,13 @@ func TestInsertTOC(t *testing.T) {
 
 func TestInsertTOCNoHeadings(t *testing.T) {
 	src := "<h1>T</h1><p>x</p>"
-	if got, err := insertTOC(src); err != nil || got != src {
+	if got, err := insertTOC(src, "Contents"); err != nil || got != src {
 		t.Errorf("insertTOC = %q, %v; want the input unchanged", got, err)
 	}
 }
 
 func TestInsertTOCFirstHeadingNested(t *testing.T) {
-	got, err := insertTOC(`<div><h2 id="a">A</h2></div>`)
+	got, err := insertTOC(`<div><h2 id="a">A</h2></div>`, "Contents")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func FuzzPreprocess(f *testing.F) {
 		if len(md) > 1<<16 {
 			t.Skip()
 		}
-		_, _ = toBody(md, false)
-		_, _ = toBody(md, true)
+		_, _ = toBody(md, false, "")
+		_, _ = toBody(md, true, "Contents")
 	})
 }

@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/go-fleettools/fleettools/internal/fleet"
@@ -60,6 +61,38 @@ var papers = map[string]string{"a4": "A4", "letter": "letter"}
 type options struct {
 	in, out, title, author, paper, css string
 	toc, pageNumbers                   bool
+	tocTitle, lang                     string
+}
+
+// tocTitles is the default table-of-contents title per primary language
+// subtag.
+var tocTitles = map[string]string{
+	"en": "Contents", "fr": "Table des matières", "de": "Inhaltsverzeichnis",
+	"es": "Índice", "it": "Indice",
+}
+
+// langRE is a BCP 47 tag's shape: a primary subtag and subtags of 1-8
+// letters or digits. It keeps the value safe inside an HTML attribute.
+var langRE = regexp.MustCompile(`^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8}){0,4}$`)
+
+func checkLang(lang string) error {
+	if lang != "" && !langRE.MatchString(lang) {
+		return fmt.Errorf("--lang %q: not a language tag such as fr or en-GB", lang)
+	}
+	return nil
+}
+
+// tocTitleFor returns the explicit title, else the default for lang's
+// primary subtag, else "Contents".
+func tocTitleFor(explicit, lang string) string {
+	if explicit = strings.TrimSpace(explicit); explicit != "" {
+		return explicit
+	}
+	primary, _, _ := strings.Cut(strings.ToLower(lang), "-")
+	if t, ok := tocTitles[primary]; ok {
+		return t
+	}
+	return tocTitles["en"]
 }
 
 // tocCSS styles the table of contents insertTOC makes. The page number is
@@ -129,6 +162,8 @@ to the input's name without extension.`,
 	f.StringVar(&o.author, "author", "", "PDF Author")
 	f.StringVar(&o.paper, "paper", "a4", "paper size: a4 or letter")
 	f.StringVar(&o.css, "css", "", "extra stylesheet file, applied after the built-in one")
+	f.StringVar(&o.lang, "lang", "", "document language, a tag such as fr or en-GB: sets <html lang> and the default --toc-title (fr, en, de, es, it)")
+	f.StringVar(&o.tocTitle, "toc-title", "", `title of the table of contents (default: by --lang, "Contents" for en or no language)`)
 	f.BoolVar(&o.toc, "toc", false, "add a table of contents (h2 and h3, with page numbers) after the title block")
 	f.BoolVar(&o.pageNumbers, "page-numbers", true, `print "n / N" at the bottom centre of every page (--page-numbers=false to turn off)`)
 	_ = cmd.MarkFlagRequired("in")
@@ -154,14 +189,14 @@ func readBounded(path string, max int64) ([]byte, error) {
 
 // toBody turns Markdown into the HTML body fragment, with the workarounds of
 // workarounds.go applied.
-func toBody(md string, toc bool) (string, error) {
+func toBody(md string, toc bool, tocTitle string) (string, error) {
 	// Input "GFM" turns "- [x]" items into task-list checkboxes.
 	ko := kramdown.DefaultOptions()
 	ko.Input = "GFM"
 	body := kramdown.ToHTML(md, &ko)
 	if toc {
 		var err error
-		if body, err = insertTOC(body); err != nil {
+		if body, err = insertTOC(body, tocTitle); err != nil {
 			return "", err
 		}
 	}
@@ -169,7 +204,7 @@ func toBody(md string, toc bool) (string, error) {
 }
 
 // buildPage assembles the HTML document. extraCSS may be empty.
-func buildPage(body, title, paper, extraCSS string, pageNumbers bool) (string, error) {
+func buildPage(body, title, paper, extraCSS string, pageNumbers bool, lang string) (string, error) {
 	size, ok := papers[strings.ToLower(paper)]
 	if !ok {
 		return "", fmt.Errorf("--paper %q: want a4 or letter", paper)
@@ -179,7 +214,11 @@ func buildPage(body, title, paper, extraCSS string, pageNumbers bool) (string, e
 	if strings.Contains(strings.ToLower(extraCSS), "</style") {
 		return "", errors.New("--css: the stylesheet contains \"</style\"")
 	}
-	return "<!doctype html><html><head><meta charset=\"utf-8\"><title>" +
+	langAttr := ""
+	if lang != "" {
+		langAttr = ` lang="` + lang + `"` // validated by checkLang
+	}
+	return "<!doctype html><html" + langAttr + "><head><meta charset=\"utf-8\"><title>" +
 		html.EscapeString(title) + "</title><style>" + fmt.Sprintf(baseCSS, size) + tocCSS + pageNumberCSS(pageNumbers) +
 		"</style><style>" + extraCSS + "</style></head><body>" + body + "</body></html>", nil
 }
@@ -200,11 +239,14 @@ func run(o options) error {
 			return err
 		}
 	}
-	body, err := toBody(string(src), o.toc)
+	if err := checkLang(o.lang); err != nil {
+		return err
+	}
+	body, err := toBody(string(src), o.toc, tocTitleFor(o.tocTitle, o.lang))
 	if err != nil {
 		return err
 	}
-	page, err := buildPage(body, title, o.paper, string(extra), o.pageNumbers)
+	page, err := buildPage(body, title, o.paper, string(extra), o.pageNumbers, o.lang)
 	if err != nil {
 		return err
 	}

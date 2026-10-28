@@ -19,7 +19,7 @@ const maxTOCEntries = 2000
 // page number through CSS: `a::after { content: target-counter(attr(href
 // url), page) }`, which go-pdfkit/html2pdf resolves (see css).
 // A fragment with no h2/h3 comes back unchanged.
-func insertTOC(fragment string) (string, error) {
+func insertTOC(fragment, title string) (string, error) {
 	nodes, err := parseFragment(fragment)
 	if err != nil {
 		return "", err
@@ -73,7 +73,7 @@ func insertTOC(fragment string) (string, error) {
 	// A two-column table: the title, and an empty link whose ::after is the
 	// page number (CSS), right-aligned by the cell. The layout engine does not
 	// float an inline's generated content, and a cell aligns it for free.
-	b.WriteString(`<div class="toc"><p class="toc-title">Contents</p><table>`)
+	b.WriteString(`<div class="toc"><p class="toc-title">` + htmlpkg.EscapeString(title) + `</p><table>`)
 	for _, e := range entries {
 		id := htmlpkg.EscapeString(e.id)
 		fmt.Fprintf(&b, `<tr class="toc-item toc-l%d"><td class="toc-text"><a href="#%s">%s</a></td><td class="toc-num"><a href="#%s"></a></td></tr>`,

@@ -10,9 +10,10 @@ package main
 //	task boxes go-webengine/engine#322  a disabled <input type=checkbox> paints
 //	           nothing
 //
-// Fixed upstream and no longer worked around: a pipe table after a list
-// (go-kramdown/kramdown#12, fixed in v0.3.1) and "[x]" / "[ ]" task items
-// (go-kramdown/kramdown#13: v0.3.1 renders them under Options.Input = "GFM").
+// No longer worked around: a pipe table after a list (go-kramdown/kramdown#12,
+// fixed by PR #14 in v0.3.1) and "[x]" / "[ ]" task items (go-kramdown/
+// kramdown#13, closed as not a bug: task lists are GFM syntax, which kramdown
+// renders under Options.Input = "GFM", byte-identical to kramdown-parser-gfm).
 
 import (
 	"bytes"
