@@ -5,15 +5,27 @@ import (
 	"testing"
 )
 
-func TestMarkLists(t *testing.T) {
-	got, err := markLists("<ol start=\"3\"><li><p>a</p></li><li>b</li></ol><ul><li>c</li><li>\n<p>d</p></li></ul>")
+func TestSwapCheckboxes(t *testing.T) {
+	got, err := swapCheckboxes(`<ul><li><input type="checkbox" disabled="disabled" checked="checked" />a</li><li><p><input type="checkbox" disabled="disabled" />b</p></li><li><input type="text">c</li></ul>`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"<p>3. a</p>", "<li>4. b</li>", "<li>•  c</li>", "<p>•  d</p>"} {
+	for _, want := range []string{"<li>☑ a</li>", "<p>☐ b</p>", `<input type="text"/>c`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in %s", want, got)
 		}
+	}
+}
+
+// TestNoListMarkersInTheHTML: since html2pdf v0.3.0 the engine paints the
+// markers, so the HTML must carry none of its own (they would print twice).
+func TestNoListMarkersInTheHTML(t *testing.T) {
+	body, err := toBody("- a\n- b\n\n1. one\n2. two\n", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body, "•") || strings.Contains(body, "1. one") {
+		t.Errorf("the HTML carries its own list markers:\n%s", body)
 	}
 }
 
@@ -24,7 +36,7 @@ func TestTaskItems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"•  plain", "☑ done", "☐ todo"} {
+	for _, want := range []string{"plain", "☑ done", "☐ todo"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in %s", want, body)
 		}
@@ -47,24 +59,11 @@ func TestTableAfterListIsATable(t *testing.T) {
 	}
 }
 
-// TestMarkListsNested: markers reach items of a list nested in an item.
-func TestMarkListsNested(t *testing.T) {
-	got, err := markLists("<ul><li>a<ol><li>b</li></ol></li></ul>")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"•  a", "1. b"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing %q in %s", want, got)
-		}
-	}
-}
-
 // TestDeepNestingIsBounded: a pathological nesting is refused with an error
 // (the HTML parser's own 512-element wall) rather than recursed into.
 func TestDeepNestingIsBounded(t *testing.T) {
 	deep := strings.Repeat("<ul><li>", 5000) + "x" + strings.Repeat("</li></ul>", 5000)
-	if _, err := markLists(deep); err == nil {
+	if _, err := swapCheckboxes(deep); err == nil {
 		t.Fatal("5000 nested lists were accepted")
 	}
 }

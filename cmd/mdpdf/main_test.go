@@ -325,6 +325,29 @@ func TestTOCListsHeadingsWithTheirPages(t *testing.T) {
 	}
 }
 
+// TestListMarkersPaintedExactlyOnce: the engine paints the markers
+// (go-webengine v0.18.0); none of ours may double them.
+func TestListMarkersPaintedExactlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	in := write(t, dir, "l.md", "- alpha\n- beta\n\ntext between\n\n- [x] gamma\n\n1. one\n2. two\n3. three\n")
+	out := filepath.Join(dir, "l.pdf")
+	if err, msg := exec(t, "--in", in, "--out", out, "--page-numbers=false"); err != nil {
+		t.Fatalf("%v\n%s", err, msg)
+	}
+	got := pageText(t, open(t, out), 1)
+	if n := strings.Count(got, "•"); n != 2 {
+		t.Errorf("%d bullets in %q, want 2 (the task item has a box instead)", n, got)
+	}
+	for _, m := range []string{"1.one", "2.two", "3.three"} {
+		if strings.Count(got, m) != 1 {
+			t.Errorf("%q appears %d times in %q, want once", m, strings.Count(got, m), got)
+		}
+	}
+	if strings.Count(got, "☑") != 1 {
+		t.Errorf("task box count in %q, want 1", got)
+	}
+}
+
 func TestTOCTitleAndLanguage(t *testing.T) {
 	dir := t.TempDir()
 	in := write(t, dir, "r.md", "# T\n\n## Un\n\ntexte\n\n## Deux\n\ntexte\n")

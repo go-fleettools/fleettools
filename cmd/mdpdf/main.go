@@ -48,6 +48,7 @@ h3 { font-family: serif; font-size: 12pt; margin: 12pt 0 4pt 0; break-after: avo
 p { margin: 0 0 6pt 0; orphans: 2; widows: 2; }
 ul, ol { margin: 0 0 6pt 0; padding-left: 16pt; }
 li { margin: 0 0 3pt 0; }
+ul.task-list, li.task-list-item { list-style: none; }
 code { font-family: monospace; font-size: 9pt; background: #f2f2f2; }
 table { border-collapse: collapse; width: 100%%; margin: 4pt 0 8pt 0; font-size: 8.5pt; break-inside: avoid; }
 th, td { border: 0.5pt solid #9a9a9a; padding: 3pt 4pt; vertical-align: top; text-align: left; }
@@ -200,7 +201,7 @@ func toBody(md string, toc bool, tocTitle string) (string, error) {
 			return "", err
 		}
 	}
-	return markLists(body)
+	return swapCheckboxes(body)
 }
 
 // buildPage assembles the HTML document. extraCSS may be empty.
