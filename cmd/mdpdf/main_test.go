@@ -348,6 +348,99 @@ func TestListMarkersPaintedExactlyOnce(t *testing.T) {
 	}
 }
 
+// headingPage returns the first page that has a line made of exactly h (a
+// table of contents line also carries its number, so it does not match).
+func headingPage(t *testing.T, doc *reader.Document, h string) int {
+	t.Helper()
+	for p := 1; p <= doc.PageCount(); p++ {
+		s, err := extract.Text(doc, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(s, "\n") {
+			if strings.Join(strings.Fields(line), "") == h {
+				return p
+			}
+		}
+	}
+	return 0
+}
+
+// TestTOCAfterSectionHasRightPageNumbers: the table of contents sits after a
+// long Summary section and takes room itself, so the headings after it move
+// down; the numbers it prints must be those of the final layout.
+func TestTOCAfterSectionHasRightPageNumbers(t *testing.T) {
+	dir := t.TempDir()
+	fill := strings.Repeat("A paragraph of the report, long enough to fill some of the page width and then wrap.\n\n", 45)
+	md := "# Report\n\nBy me.\n\n## Summary\n\n" + fill + "## Alpha\n\n" + fill + "## Beta\n\n" + fill + "## Gamma\n\nend\n"
+	in := write(t, dir, "r.md", md)
+	out := filepath.Join(dir, "r.pdf")
+	if err, msg := exec(t, "--in", in, "--out", out, "--toc-after", "Summary"); err != nil {
+		t.Fatalf("%v\n%s", err, msg)
+	}
+	doc := open(t, out)
+	tocPage := 0
+	for p := 1; p <= doc.PageCount(); p++ {
+		if strings.Contains(pageText(t, doc, p), "Contents") {
+			tocPage = p
+			break
+		}
+	}
+	if tocPage < 2 {
+		t.Fatalf("the table of contents is on page %d: it should follow the long Summary section", tocPage)
+	}
+	if s := headingPage(t, doc, "Summary"); s != 1 {
+		t.Errorf("Summary on page %d, want 1", s)
+	}
+	text := pageText(t, doc, tocPage)
+	for _, h := range []string{"Summary", "Alpha", "Beta", "Gamma"} {
+		p := headingPage(t, doc, h)
+		if p == 0 {
+			t.Fatalf("heading %q not found", h)
+		}
+		if want := h + strconv.Itoa(p); !strings.Contains(text, want) {
+			t.Errorf("the table of contents lacks %q (heading is on page %d): %q", want, p, text)
+		}
+	}
+	if headingPage(t, doc, "Alpha") < tocPage {
+		t.Errorf("Alpha is before the table of contents")
+	}
+}
+
+func TestTOCAfterUnknownHeading(t *testing.T) {
+	dir := t.TempDir()
+	in := write(t, dir, "r.md", "# T\n\n## One\n\nx\n\n## Two\n\ny\n")
+	err, _ := exec(t, "--in", in, "--out", filepath.Join(dir, "o.pdf"), "--toc-after", "Three")
+	if err == nil || !strings.Contains(err.Error(), `"One"`) || !strings.Contains(err.Error(), `"Two"`) {
+		t.Errorf("err = %v, want one naming the headings", err)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, "o.pdf")); serr == nil {
+		t.Error("an output was written for an unknown heading")
+	}
+}
+
+func TestTOCMarkerInMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	fill := strings.Repeat("A paragraph of the report, long enough to fill some of the page width and then wrap.\n\n", 45)
+	md := "# R\n\n## Summary\n\n" + fill + "<!-- toc -->\n\n## Alpha\n\n" + fill + "## Beta\n\nend\n"
+	in := write(t, dir, "m.md", md)
+	out := filepath.Join(dir, "m.pdf")
+	if err, msg := exec(t, "--in", in, "--out", out, "--toc"); err != nil {
+		t.Fatalf("%v\n%s", err, msg)
+	}
+	doc := open(t, out)
+	tocPage := 0
+	for p := 1; p <= doc.PageCount(); p++ {
+		if strings.Contains(pageText(t, doc, p), "Contents") {
+			tocPage = p
+			break
+		}
+	}
+	if tocPage < 2 {
+		t.Errorf("the marker was ignored: the table of contents is on page %d", tocPage)
+	}
+}
+
 func TestTOCTitleAndLanguage(t *testing.T) {
 	dir := t.TempDir()
 	in := write(t, dir, "r.md", "# T\n\n## Un\n\ntexte\n\n## Deux\n\ntexte\n")
