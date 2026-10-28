@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/go-pdfkit/extract"
 	"github.com/go-pdfkit/reader"
 )
 
@@ -227,12 +229,99 @@ func TestInputIsBounded(t *testing.T) {
 }
 
 func TestBuildPageEscapesTitle(t *testing.T) {
-	page, err := buildPage("<p>x</p>", `</title><script>alert(1)</script>`, "a4", "")
+	page, err := buildPage("<p>x</p>", `</title><script>alert(1)</script>`, "a4", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(page, "<script>") {
 		t.Errorf("title not escaped: %s", page)
+	}
+}
+
+// pageText returns the text of page n with all whitespace removed.
+func pageText(t *testing.T, doc *reader.Document, n int) string {
+	t.Helper()
+	s, err := extract.Text(doc, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(strings.Fields(s), "")
+}
+
+func TestPageNumbersDefaultOnAndOptOut(t *testing.T) {
+	dir := t.TempDir()
+	long := "# T\n\n" + strings.Repeat("A paragraph of the report, long enough to fill some of the page width and then wrap.\n\n", 150)
+	in := write(t, dir, "p.md", long)
+	out := filepath.Join(dir, "p.pdf")
+	if err, msg := exec(t, "--in", in, "--out", out); err != nil {
+		t.Fatalf("%v\n%s", err, msg)
+	}
+	doc := open(t, out)
+	n := doc.PageCount()
+	if n < 2 {
+		t.Fatalf("PageCount = %d, want at least 2", n)
+	}
+	for p := 1; p <= n; p++ {
+		want := strconv.Itoa(p) + "/" + strconv.Itoa(n)
+		if got := pageText(t, doc, p); !strings.HasSuffix(got, want) {
+			t.Errorf("page %d text ends %q, want the footer %q", p, got[max(0, len(got)-12):], want)
+		}
+	}
+
+	off := filepath.Join(dir, "off.pdf")
+	if err, msg := exec(t, "--in", in, "--out", off, "--page-numbers=false"); err != nil {
+		t.Fatalf("%v\n%s", err, msg)
+	}
+	if got := pageText(t, open(t, off), 1); strings.HasSuffix(got, "1/"+strconv.Itoa(n)) {
+		t.Errorf("--page-numbers=false still printed a footer: %q", got)
+	}
+}
+
+func TestTOCListsHeadingsWithTheirPages(t *testing.T) {
+	dir := t.TempDir()
+	fill := strings.Repeat("A paragraph of the report, long enough to fill some of the page width and then wrap.\n\n", 70)
+	md := "# Report\n\nBy me.\n\n## Alpha\n\n" + fill + "## Beta\n\n### Beta sub\n\n" + fill + "## Gamma\n\nend\n"
+	in := write(t, dir, "r.md", md)
+	out := filepath.Join(dir, "r.pdf")
+	if err, msg := exec(t, "--in", in, "--out", out, "--toc"); err != nil {
+		t.Fatalf("%v\n%s", err, msg)
+	}
+	doc := open(t, out)
+	if doc.PageCount() < 3 {
+		t.Fatalf("PageCount = %d, want at least 3", doc.PageCount())
+	}
+	first := pageText(t, doc, 1)
+	if !strings.Contains(first, "Contents") {
+		t.Fatalf("page 1 has no table of contents: %q", first)
+	}
+	// A heading's own line is exactly its text (a table of contents line also
+	// carries its number); the page it is on must be the number printed on
+	// page 1 after its entry.
+	pageOf := func(h string) int {
+		for p := 1; p <= doc.PageCount(); p++ {
+			s, err := extract.Text(doc, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, line := range strings.Split(s, "\n") {
+				if strings.Join(strings.Fields(line), "") == h {
+					return p
+				}
+			}
+		}
+		return 0
+	}
+	for _, h := range []string{"Alpha", "Beta", "Betasub", "Gamma"} {
+		p := pageOf(h)
+		if p == 0 {
+			t.Fatalf("heading %q not found on any page", h)
+		}
+		if want := h + strconv.Itoa(p); !strings.Contains(first, want) {
+			t.Errorf("the table of contents lacks %q (heading is on page %d): %q", want, p, first)
+		}
+	}
+	if pageOf("Gamma") < 2 {
+		t.Errorf("the fixture does not spread the headings over pages")
 	}
 }
 

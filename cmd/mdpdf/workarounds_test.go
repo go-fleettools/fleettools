@@ -5,29 +5,45 @@ import (
 	"testing"
 )
 
-func TestSeparateTables(t *testing.T) {
-	for in, want := range map[string]string{
-		"- item\n\n| a |\n| --- |\n": "- item\n\n^\n\n| a |\n| --- |\n",
-		"- item\n| a |\n| --- |\n":   "- item\n\n^\n\n| a |\n| --- |\n",
-		"text\n| a |\n| --- |\n":     "text\n\n| a |\n| --- |\n",
-		"text\n\n| a |\n| --- |\n":   "text\n\n| a |\n| --- |\n",
-		"| a |\n| --- |\n| 1 |\n":    "| a |\n| --- |\n| 1 |\n",
-	} {
-		if got := separateTables(in); got != want {
-			t.Errorf("separateTables(%q) = %q, want %q", in, got, want)
+func TestMarkLists(t *testing.T) {
+	got, err := markLists("<ol start=\"3\"><li><p>a</p></li><li>b</li></ol><ul><li>c</li><li>\n<p>d</p></li></ul>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"<p>3. a</p>", "<li>4. b</li>", "<li>•  c</li>", "<p>•  d</p>"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %s", want, got)
 		}
 	}
 }
 
-func TestMarkLists(t *testing.T) {
-	got, err := markLists("<ol start=\"3\"><li><p>a</p></li><li>b</li></ol><ul><li>c</li><li>\n<p>d</p></li><li>[x] e</li><li>[ ] f</li></ul>")
+// TestTaskItems: kramdown's GFM output (v0.3.1) is a disabled checkbox; the
+// engine paints none, so it becomes a ballot box and the item gets no bullet.
+func TestTaskItems(t *testing.T) {
+	body, err := toBody("- plain\n- [x] done\n- [ ] todo\n", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"<p>3. a</p>", "<li>4. b</li>", "<li>•  c</li>", "<p>•  d</p>", "<li>☑ e</li>", "<li>☐ f</li>"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing %q in %s", want, got)
+	for _, want := range []string{"•  plain", "☑ done", "☐ todo"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in %s", want, body)
 		}
+	}
+	if strings.Contains(body, "<input") || strings.Contains(body, "[x]") {
+		t.Errorf("checkbox or literal task marker left in %s", body)
+	}
+}
+
+// TestTableAfterListIsATable: go-kramdown/kramdown#12, fixed in v0.3.1 — no
+// workaround any more, and this keeps it that way.
+func TestTableAfterListIsATable(t *testing.T) {
+	body, err := toBody("- item\n\n| a | b |\n| - | - |\n| 1 | 2 |\n", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i, j := strings.Index(body, "</ul>"), strings.Index(body, "<table")
+	if i < 0 || j < i {
+		t.Errorf("the table is not after the list:\n%s", body)
 	}
 }
 
@@ -53,15 +69,55 @@ func TestDeepNestingIsBounded(t *testing.T) {
 	}
 }
 
-// FuzzPreprocess feeds arbitrary Markdown through the pre-processing
-// (separateTables) and the whole Markdown-to-HTML step (toBody: kramdown, then
-// markLists). Properties: no panic; separateTables only ever adds
-// blank lines and "^" lines, never touches or reorders a line of the input,
-// and is idempotent.
+func TestInsertTOC(t *testing.T) {
+	src := "<h1 id=\"t\">Title</h1>\n<p>By me.</p>\n<h2 id=\"a\">Alpha</h2>\n<h3 id=\"b\">Beta <em>x</em></h3>\n<h2>No id &amp; more</h2>\n"
+	got, err := insertTOC(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`<p class="toc-title">Contents</p>`,
+		`<a href="#a">Alpha</a>`, `<tr class="toc-item toc-l3"><td class="toc-text"><a href="#b">Beta x</a></td><td class="toc-num"><a href="#b"></a>`,
+		`<a href="#toc-1">No id &amp; more</a>`, `<h2 id="toc-1">`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in\n%s", want, got)
+		}
+	}
+	// After the title block (h1 and its paragraph), before the first section.
+	if !(strings.Index(got, "By me.") < strings.Index(got, `class="toc"`) && strings.Index(got, `class="toc"`) < strings.Index(got, `<h2 id="a">`)) {
+		t.Errorf("the table of contents is not between the title block and the first section:\n%s", got)
+	}
+	if strings.Contains(got, `href="#t"`) {
+		t.Errorf("the h1 is listed:\n%s", got)
+	}
+}
+
+func TestInsertTOCNoHeadings(t *testing.T) {
+	src := "<h1>T</h1><p>x</p>"
+	if got, err := insertTOC(src); err != nil || got != src {
+		t.Errorf("insertTOC = %q, %v; want the input unchanged", got, err)
+	}
+}
+
+func TestInsertTOCFirstHeadingNested(t *testing.T) {
+	got, err := insertTOC(`<div><h2 id="a">A</h2></div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Index(got, `class="toc"`) > strings.Index(got, `<h2 id="a">`) || !strings.Contains(got, `<div><div class="toc">`) {
+		t.Errorf("nested heading: %s", got)
+	}
+}
+
+// FuzzPreprocess feeds arbitrary Markdown through the whole Markdown-to-HTML
+// step (kramdown, TOC, list markers). It must not panic or hang; an error
+// (nesting past the HTML parser's wall) is a clean refusal.
 func FuzzPreprocess(f *testing.F) {
 	for _, s := range []string{
 		"", "- a\n\n| x |\n| - |\n", "1. a\n2. b\n| t |\n", "text\n| a |\n| --- |\n| 1 |\n",
 		"- [x] done\n- [ ] todo\n", "* a\n  * b\n\n| c |\n", "|\n", "\n\n\n", "^\n- a\n|",
+		"# T\n\n## A\n\n### B\n\n## C {#c}\n",
 	} {
 		f.Add(s)
 	}
@@ -69,27 +125,7 @@ func FuzzPreprocess(f *testing.F) {
 		if len(md) > 1<<16 {
 			t.Skip()
 		}
-		sep := separateTables(md)
-		if got := separateTables(sep); got != sep {
-			t.Fatalf("not idempotent:\n in  %q\n 1st %q\n 2nd %q", md, sep, got)
-		}
-		// Dropping the added lines must give the original back.
-		orig := strings.Split(md, "\n")
-		i := 0
-		for _, l := range strings.Split(sep, "\n") {
-			if i < len(orig) && l == orig[i] {
-				i++
-				continue
-			}
-			if l != "" && l != "^" {
-				t.Fatalf("separateTables inserted %q into %q", l, md)
-			}
-		}
-		if i != len(orig) {
-			t.Fatalf("separateTables lost or reordered lines of %q: %q", md, sep)
-		}
-		// An error (nesting past the HTML parser's wall) is a clean refusal;
-		// only a panic or a hang is a finding.
-		_, _ = toBody(md)
+		_, _ = toBody(md, false)
+		_, _ = toBody(md, true)
 	})
 }
