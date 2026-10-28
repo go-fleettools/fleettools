@@ -229,7 +229,7 @@ func TestInputIsBounded(t *testing.T) {
 }
 
 func TestBuildPageEscapesTitle(t *testing.T) {
-	page, err := buildPage("<p>x</p>", `</title><script>alert(1)</script>`, "a4", "", true)
+	page, err := buildPage("<p>x</p>", `</title><script>alert(1)</script>`, "a4", "", true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,6 +322,78 @@ func TestTOCListsHeadingsWithTheirPages(t *testing.T) {
 	}
 	if pageOf("Gamma") < 2 {
 		t.Errorf("the fixture does not spread the headings over pages")
+	}
+}
+
+// TestListMarkersPaintedExactlyOnce: the engine paints the markers
+// (go-webengine v0.18.0); none of ours may double them.
+func TestListMarkersPaintedExactlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	in := write(t, dir, "l.md", "- alpha\n- beta\n\ntext between\n\n- [x] gamma\n\n1. one\n2. two\n3. three\n")
+	out := filepath.Join(dir, "l.pdf")
+	if err, msg := exec(t, "--in", in, "--out", out, "--page-numbers=false"); err != nil {
+		t.Fatalf("%v\n%s", err, msg)
+	}
+	got := pageText(t, open(t, out), 1)
+	if n := strings.Count(got, "•"); n != 2 {
+		t.Errorf("%d bullets in %q, want 2 (the task item has a box instead)", n, got)
+	}
+	for _, m := range []string{"1.one", "2.two", "3.three"} {
+		if strings.Count(got, m) != 1 {
+			t.Errorf("%q appears %d times in %q, want once", m, strings.Count(got, m), got)
+		}
+	}
+	if strings.Count(got, "☑") != 1 {
+		t.Errorf("task box count in %q, want 1", got)
+	}
+}
+
+func TestTOCTitleAndLanguage(t *testing.T) {
+	dir := t.TempDir()
+	in := write(t, dir, "r.md", "# T\n\n## Un\n\ntexte\n\n## Deux\n\ntexte\n")
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"fr default":       {[]string{"--lang", "fr"}, "Tabledesmatières"},
+		"fr-CA default":    {[]string{"--lang", "fr-CA"}, "Tabledesmatières"},
+		"en default":       {[]string{"--lang", "en"}, "Contents"},
+		"no lang":          {nil, "Contents"},
+		"de":               {[]string{"--lang", "de"}, "Inhaltsverzeichnis"},
+		"explicit wins":    {[]string{"--lang", "fr", "--toc-title", "Sommaire"}, "Sommaire"},
+		"unknown lang":     {[]string{"--lang", "ja"}, "Contents"},
+		"explicit no lang": {[]string{"--toc-title", "Plan"}, "Plan"},
+	} {
+		out := filepath.Join(dir, "o.pdf")
+		args := append([]string{"--in", in, "--out", out, "--toc"}, tc.args...)
+		if err, msg := exec(t, args...); err != nil {
+			t.Fatalf("%s: %v\n%s", name, err, msg)
+		}
+		if got := pageText(t, open(t, out), 1); !strings.Contains(got, tc.want) {
+			t.Errorf("%s: page 1 text %q lacks %q", name, got, tc.want)
+		}
+	}
+}
+
+func TestLangIsValidatedAndSetOnHTML(t *testing.T) {
+	for _, bad := range []string{`fr"><script>`, "f", "fr_FR", "x y"} {
+		if checkLang(bad) == nil {
+			t.Errorf("checkLang(%q) accepted", bad)
+		}
+	}
+	for _, good := range []string{"", "fr", "en-GB", "zh-Hant-TW"} {
+		if err := checkLang(good); err != nil {
+			t.Errorf("checkLang(%q) = %v", good, err)
+		}
+	}
+	page, err := buildPage("<p>x</p>", "t", "a4", "", false, "fr")
+	if err != nil || !strings.Contains(page, `<html lang="fr">`) {
+		t.Errorf("page = %q, %v; want <html lang=\"fr\">", page, err)
+	}
+	dir := t.TempDir()
+	in := write(t, dir, "r.md", "x")
+	if err, _ := exec(t, "--in", in, "--out", filepath.Join(dir, "o.pdf"), "--lang", `fr"><x`); err == nil {
+		t.Error("an invalid --lang was accepted")
 	}
 }
 

@@ -5,26 +5,38 @@ import (
 	"testing"
 )
 
-func TestMarkLists(t *testing.T) {
-	got, err := markLists("<ol start=\"3\"><li><p>a</p></li><li>b</li></ol><ul><li>c</li><li>\n<p>d</p></li></ul>")
+func TestSwapCheckboxes(t *testing.T) {
+	got, err := swapCheckboxes(`<ul><li><input type="checkbox" disabled="disabled" checked="checked" />a</li><li><p><input type="checkbox" disabled="disabled" />b</p></li><li><input type="text">c</li></ul>`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"<p>3. a</p>", "<li>4. b</li>", "<li>•  c</li>", "<p>•  d</p>"} {
+	for _, want := range []string{"<li>☑ a</li>", "<p>☐ b</p>", `<input type="text"/>c`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in %s", want, got)
 		}
 	}
 }
 
-// TestTaskItems: kramdown's GFM output (v0.3.1) is a disabled checkbox; the
-// engine paints none, so it becomes a ballot box and the item gets no bullet.
-func TestTaskItems(t *testing.T) {
-	body, err := toBody("- plain\n- [x] done\n- [ ] todo\n", false)
+// TestNoListMarkersInTheHTML: since html2pdf v0.3.0 the engine paints the
+// markers, so the HTML must carry none of its own (they would print twice).
+func TestNoListMarkersInTheHTML(t *testing.T) {
+	body, err := toBody("- a\n- b\n\n1. one\n2. two\n", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"•  plain", "☑ done", "☐ todo"} {
+	if strings.Contains(body, "•") || strings.Contains(body, "1. one") {
+		t.Errorf("the HTML carries its own list markers:\n%s", body)
+	}
+}
+
+// TestTaskItems: kramdown's GFM output (v0.3.1) is a disabled checkbox; the
+// engine paints none, so it becomes a ballot box and the item gets no bullet.
+func TestTaskItems(t *testing.T) {
+	body, err := toBody("- plain\n- [x] done\n- [ ] todo\n", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"plain", "☑ done", "☐ todo"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q in %s", want, body)
 		}
@@ -35,9 +47,9 @@ func TestTaskItems(t *testing.T) {
 }
 
 // TestTableAfterListIsATable: go-kramdown/kramdown#12, fixed in v0.3.1 — no
-// workaround any more, and this keeps it that way.
+// workaround any more (PR #14), and this keeps it that way.
 func TestTableAfterListIsATable(t *testing.T) {
-	body, err := toBody("- item\n\n| a | b |\n| - | - |\n| 1 | 2 |\n", false)
+	body, err := toBody("- item\n\n| a | b |\n| - | - |\n| 1 | 2 |\n", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,31 +59,18 @@ func TestTableAfterListIsATable(t *testing.T) {
 	}
 }
 
-// TestMarkListsNested: markers reach items of a list nested in an item.
-func TestMarkListsNested(t *testing.T) {
-	got, err := markLists("<ul><li>a<ol><li>b</li></ol></li></ul>")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"•  a", "1. b"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing %q in %s", want, got)
-		}
-	}
-}
-
 // TestDeepNestingIsBounded: a pathological nesting is refused with an error
 // (the HTML parser's own 512-element wall) rather than recursed into.
 func TestDeepNestingIsBounded(t *testing.T) {
 	deep := strings.Repeat("<ul><li>", 5000) + "x" + strings.Repeat("</li></ul>", 5000)
-	if _, err := markLists(deep); err == nil {
+	if _, err := swapCheckboxes(deep); err == nil {
 		t.Fatal("5000 nested lists were accepted")
 	}
 }
 
 func TestInsertTOC(t *testing.T) {
 	src := "<h1 id=\"t\">Title</h1>\n<p>By me.</p>\n<h2 id=\"a\">Alpha</h2>\n<h3 id=\"b\">Beta <em>x</em></h3>\n<h2>No id &amp; more</h2>\n"
-	got, err := insertTOC(src)
+	got, err := insertTOC(src, "Contents")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,13 +94,13 @@ func TestInsertTOC(t *testing.T) {
 
 func TestInsertTOCNoHeadings(t *testing.T) {
 	src := "<h1>T</h1><p>x</p>"
-	if got, err := insertTOC(src); err != nil || got != src {
+	if got, err := insertTOC(src, "Contents"); err != nil || got != src {
 		t.Errorf("insertTOC = %q, %v; want the input unchanged", got, err)
 	}
 }
 
 func TestInsertTOCFirstHeadingNested(t *testing.T) {
-	got, err := insertTOC(`<div><h2 id="a">A</h2></div>`)
+	got, err := insertTOC(`<div><h2 id="a">A</h2></div>`, "Contents")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +124,7 @@ func FuzzPreprocess(f *testing.F) {
 		if len(md) > 1<<16 {
 			t.Skip()
 		}
-		_, _ = toBody(md, false)
-		_, _ = toBody(md, true)
+		_, _ = toBody(md, false, "")
+		_, _ = toBody(md, true, "Contents")
 	})
 }
