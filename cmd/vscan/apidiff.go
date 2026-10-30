@@ -40,8 +40,20 @@ import (
 
 // graphUnreadable reports whether gorelease refused because it could not load
 // the module graph, the one refusal apidiff can stand in for.
+//
+// Two forms are seen. With the go command's own error, the line starts
+// `go: ` and says `invalid version`. When gorelease loads an older BASE, the
+// line starts with gorelease's `preparing to load packages for M@vX:` and the
+// cause ends a `requires` chain with `unknown revision` -- as on 2026-10-18 for
+// go-images/jpeg2000@v0.13.3, go-gfx/gfx@v0.35.0 and go-pdfkit/render@v0.67.2,
+// whose tags still required ajroetker/go-highway. Requiring the chain matters:
+// a base tag that does not exist is also an unknown revision, and apidiff
+// cannot read that one either.
 func graphUnreadable(err string) bool {
-	return strings.HasPrefix(err, "go: ") && strings.Contains(err, "invalid version")
+	if strings.HasPrefix(err, "go: ") && strings.Contains(err, "invalid version") {
+		return true
+	}
+	return strings.Contains(err, " requires ") && strings.Contains(err, "unknown revision")
 }
 
 // askAPIDiff is the exec seam for the fallback; a test replaces it.

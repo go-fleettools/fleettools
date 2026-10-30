@@ -21,6 +21,40 @@ func TestOnlyAGraphRefusalIsHandedToAPIDiff(t *testing.T) {
 	}
 }
 
+// oldBaseOut is gorelease's whole output for go-images/jpeg2000 against base
+// v0.13.3, recorded 2026-10-18 (go1.27.2, gorelease x/exp 20260908). The first
+// line is a harmless deprecation warning; the cause is the last line.
+const oldBaseOut = "gorelease: preparing to load packages for github.com/go-images/jpeg2000@v0.13.3: looking for missing dependencies: go: -d flag is deprecated. -d=true is a no-op\n" +
+	"go: github.com/go-images/jpeg2000@v0.13.3 requires\n" +
+	"\tgithub.com/ajroetker/go-highway@v0.0.12 requires\n" +
+	"\tgithub.com/ajroetker/go-highway/hwy/goat@v0.0.0: reading github.com/ajroetker/go-highway/hwy/goat/go.mod at revision hwy/goat/v0.0.0: unknown revision hwy/goat/v0.0.0\n"
+
+func TestAnOldBaseThatRequiresTheBrokenGoatIsAGraphRefusal(t *testing.T) {
+	r := parseGorelease(oldBaseOut, "linux")
+	if !strings.Contains(r.err, "unknown revision hwy/goat/v0.0.0") {
+		t.Fatalf("the cause on the last line was dropped: %q", r.err)
+	}
+	if !graphUnreadable(r.err) {
+		t.Fatalf("not recognised as a graph refusal, so apidiff is never asked: %q", r.err)
+	}
+}
+
+func TestABaseTagThatDoesNotExistIsNotAGraphRefusal(t *testing.T) {
+	// Also an unknown revision, but no requirement chain: the base itself is
+	// missing, and apidiff could not materialise it either.
+	r := parseGorelease("gorelease: could not find base version v9.9.9: unknown revision v9.9.9\n", "linux")
+	if graphUnreadable(r.err) {
+		t.Fatalf("a missing base was handed to apidiff: %q", r.err)
+	}
+}
+
+func TestLinesAfterAnErrorThatAreNotItsChainAreNotSwallowed(t *testing.T) {
+	r := parseGorelease("gorelease: something went wrong\n\nSuggested version: v1.2.3\n", "linux")
+	if r.err != "something went wrong" {
+		t.Fatalf("err %q", r.err)
+	}
+}
+
 func withSeams(t *testing.T, gr func(dir, base, goos string) reading, ad func(gitDir, tree, base, goos string) reading) {
 	t.Helper()
 	g, a := askGorelease, askAPIDiff
