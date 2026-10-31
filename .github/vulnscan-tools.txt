@@ -16,6 +16,22 @@
 # ADDING A LINE is the whole procedure. A repository with no go.mod is reported
 # NO-GO rather than failing the lane, so a non-Go repository here is noise, not
 # a break.
+#
+# ⛔ A HAND-KEPT LIST DRIFTS, and this one already did: written on 2026-10-22
+# from the organisations as they then were, it was missing `fuzzrun` and
+# `buildstamp` -- two Go repositories -- by 2026-10-31. Nine days, two misses,
+# and a list that silently omits a repository reports a clean fleet for it.
+# Found by re-listing the organisations before shipping the lane, not by the
+# lane telling anybody.
+#
+# ⛔ AND IT IS STILL A LIST, DELIBERATELY. Deriving it from `gh repo list` would
+# remove the drift and cost the property this job is built on: vulnscan needs NO
+# credential, because it clones and makes no REST call per repository, so it
+# cannot starve the hourly budget the Renovate runners spend from. Enumerating
+# the organisations needs a token and spends from that budget on every run. So
+# this file is a POLICY -- which tools are worth a clone a day -- and not an
+# inventory, and the drift is paid for by re-reading the organisations whenever
+# it is edited. `fleetfind` is the tool for the inventory question.
 
 # the token and the push guard
 go-gitsafe/gitsafe
@@ -33,3 +49,8 @@ go-fleettools/landingkit
 go-fleettools/unbounded
 go-fleettools/fleetfind
 go-fleettools/landingdiff
+
+# added 2026-10-31, after re-listing the organisations: both are Go, both were
+# created since this file was first written, and neither was being watched
+go-fleettools/fuzzrun
+go-fleettools/buildstamp
