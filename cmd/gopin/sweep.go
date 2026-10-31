@@ -60,7 +60,7 @@ var ghJSON = func(args ...string) ([]byte, error) { return callWithQuota(ghRaw, 
 // and secondary limits and abuse detection.
 func isQuota(s string) bool {
 	l := strings.ToLower(s)
-	return strings.Contains(l, "rate limit") || strings.Contains(l, "abuse detection")
+	return strings.Contains(l, "rate limit") || strings.Contains(l, "rate_limited") || strings.Contains(l, "abuse detection")
 }
 
 // callWithQuota is gh with the one rule the 2026-10-10 campaign lacked.
