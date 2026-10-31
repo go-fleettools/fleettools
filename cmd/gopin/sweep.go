@@ -60,7 +60,28 @@ var ghJSON = func(args ...string) ([]byte, error) { return callWithQuota(ghRaw, 
 // and secondary limits and abuse detection.
 func isQuota(s string) bool {
 	l := strings.ToLower(s)
-	return strings.Contains(l, "rate limit") || strings.Contains(l, "rate_limited") || strings.Contains(l, "abuse detection")
+	return strings.Contains(l, "rate limit") || strings.Contains(l, "rate_limited") || strings.Contains(l, "abuse detection") ||
+		strings.Contains(l, "budget is spent")
+}
+
+// toolWithQuota runs prwait or ghmerge and waits out a quota refusal in what
+// they print, exactly as callWithQuota does for gh itself.
+//
+// ⛔ MEASURED on the Go 1.27.3 campaign: ghmerge answered "GitHub's hourly
+// budget is spent (403): it resets at 23:53:50" and the sweep recorded the
+// pull request RED -- seven of them in two minutes -- so a budget refusal read
+// as a verdict on the pull request. Same rule as for the API: a quota refusal
+// is "wait", never a result.
+func toolWithQuota(name string, args ...string) (string, int) {
+	for try := 0; ; try++ {
+		out, code := tool(name, args...)
+		if code == 0 || !isQuota(out) || try >= quotaRetries {
+			return out, code
+		}
+		d := quotaDelay()
+		fmt.Fprintf(logw, "gopin: %s hit the GitHub quota; sleeping %s (retry %d/%d)\n", name, d.Round(time.Second), try+1, quotaRetries)
+		sleep(d)
+	}
 }
 
 // callWithQuota is gh with the one rule the 2026-10-10 campaign lacked.
@@ -389,7 +410,7 @@ func (s *sweeper) follow(repo, pr string) (status, note string) {
 	if num == "" {
 		return stUnread, "no pull request number in " + pr
 	}
-	out, code := tool("prwait", "-timeout", s.cfg.ciTimeout.String(), repo+"#"+num)
+	out, code := toolWithQuota("prwait", "-timeout", s.cfg.ciTimeout.String(), repo+"#"+num)
 	switch code {
 	case 0:
 	case 1:
@@ -397,7 +418,7 @@ func (s *sweeper) follow(repo, pr string) (status, note string) {
 	default:
 		return stUnread, "checks unreadable: " + lastLine(out)
 	}
-	out, code = tool("ghmerge", repo, num)
+	out, code = toolWithQuota("ghmerge", repo, num)
 	if code != 0 {
 		return stRed, "merge refused: " + lastLine(out)
 	}
