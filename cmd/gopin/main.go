@@ -181,6 +181,16 @@ func inspectWith(repo, want, from string, gomod bool) finding {
 			continue
 		}
 		body, err := getFile(repo, p)
+		// A go-version-file naming a path that is not in THIS repository is
+		// not an error to report: the workflow checks another repository out
+		// under that path (go-fleettools/fleettools reads `scanner/go.mod`
+		// from the scanner it clones), so there is nothing here to raise.
+		// Measured on the Go 1.27.3 campaign: three repositories were
+		// reported unreadable for that reason. Anything but a 404 (a quota
+		// refusal, a 5xx) is still an error.
+		if err != nil && (strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "Not Found")) {
+			continue
+		}
 		if err != nil {
 			f.Err = err.Error()
 			return f

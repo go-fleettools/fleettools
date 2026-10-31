@@ -48,6 +48,30 @@ func TestMergesOfResumedPullRequestsArePaced(t *testing.T) {
 	}
 }
 
+// A go-version-file naming a path that is not in this repository (the workflow
+// checks another repository out there) is nothing to raise, not an error row;
+// go-fleettools/fleettools reads `scanner/go.mod` from a scanner it clones.
+func TestAVersionFileOutsideThisRepositoryIsNotAnError(t *testing.T) {
+	w := newWorld(t)
+	w.repo("o/a", "          go-version-file: scanner/go.mod\n          go-version-file: go.mod\n", "module x\n\ngo 1.27.2\n")
+	code, out, _ := w.run("-from", "1.27.2", "-version", "1.27.3", "-gomod", "-list", w.list("o/a"))
+	if code != 0 || strings.Contains(out, "ERROR") || !strings.Contains(out, "REPIN   o/a: go-version-file go.mod ") {
+		t.Fatalf("code=%d\n%s", code, out)
+	}
+	// ... but a refusal that is not a 404 still is one
+	base := ghRaw
+	ghRaw = func(args ...string) ([]byte, error) {
+		if strings.Contains(strings.Join(args, " "), "contents/scanner/go.mod") {
+			return nil, errors.New("HTTP 502")
+		}
+		return base(args...)
+	}
+	code, out, _ = w.run("-from", "1.27.2", "-version", "1.27.3", "-gomod", "-list", w.list("o/a"))
+	if code != 1 || !strings.Contains(out, "ERROR   o/a: HTTP 502") {
+		t.Fatalf("code=%d\n%s", code, out)
+	}
+}
+
 func TestStateWriteFailuresAreSurfaced(t *testing.T) {
 	dir := t.TempDir()
 	// the rename target is a directory
