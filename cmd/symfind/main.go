@@ -31,34 +31,62 @@ package main
 
 import (
 	"debug/elf"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Says, for each symbol named, whether a shared object exports it as a dynamic
+symbol.
+
+⛔ IT REFUSES AN ANSWER IT CANNOT STAND BEHIND. An object that exports no
+dynamic symbol at all is a broken read, not a library with nothing in it, and
+--must names a symbol that MUST be there: without a positive control, an absence
+below means nothing. A grep over the binary would turn the question into
+"something here mentions this", which is true of almost any library.
+
+Exit status: 0 the object was read and the answers are below, 1 it could not be
+read or the positive control failed, 2 a usage error.`
 
 var osExit = os.Exit
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	osExit(run(os.Args[1:], os.Stdout, os.Stderr))
+	// This command's own osExit, kept: its tests replace it to observe the
+	// status without ending the test binary, and cli.Drive gives the status
+	// back rather than exiting, so the two fit together.
+	osExit(cli.Drive(RootCmd(), os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("symfind", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	must := fs.String("must", "", "a symbol that must be exported, as the positive control")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var must string
+	c := cli.New("symfind [flags] <file.so> <symbol>...",
+		"Whether a shared object exports each symbol named", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(find(cli.Out(cmd), cli.Err(cmd), must, args))
 	}
-	if fs.NArg() < 2 {
-		fmt.Fprintln(stderr, "usage: symfind [-must sym] <file.so> <symbol>...")
+	c.Flags().StringVar(&must, "must", "",
+		"a symbol that must be exported, as the positive control")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), args, stdout, stderr)
+}
+
+func find(stdout, stderr io.Writer, must string, args []string) int {
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, "usage: symfind [--must sym] <file.so> <symbol>...")
 		return 2
 	}
-	path, wanted := fs.Arg(0), fs.Args()[1:]
+	path, wanted := args[0], args[1:]
 
 	exported, err := exportsOf(path)
 	if err != nil {
@@ -73,14 +101,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "symfind: %s exports no dynamic symbol at all — a broken read, not an answer\n", path)
 		return 1
 	}
-	if *must != "" && !exported[*must] {
-		fmt.Fprintf(stderr, "symfind: positive control FAILED: %s does not export %q, so an absence below means nothing\n", path, *must)
+	if must != "" && !exported[must] {
+		fmt.Fprintf(stderr, "symfind: positive control FAILED: %s does not export %q, so an absence below means nothing\n", path, must)
 		return 1
 	}
 
 	fmt.Fprintf(stdout, "%s: %d exported dynamic symbol(s)\n", path, len(exported))
-	if *must != "" {
-		fmt.Fprintf(stdout, "positive control: it does export %s, so an absence below is an absence\n", *must)
+	if must != "" {
+		fmt.Fprintf(stdout, "positive control: it does export %s, so an absence below is an absence\n", must)
 	}
 	for _, w := range wanted {
 		fmt.Fprintf(stdout, "  %-24s %v\n", w, exported[w])

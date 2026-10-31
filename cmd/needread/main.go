@@ -31,7 +31,6 @@ package main
 
 import (
 	"debug/elf"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -40,14 +39,54 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Reads the DT_NEEDED entries of every ELF file under the roots given, so that
+what a binary actually links against is read from the binary rather than from a
+build file.
+
+⛔ IT REFUSES AN ANSWER IT CANNOT STAND BEHIND, twice over. Reading no ELF file
+at all is a broken measurement and not an empty answer. And --must names a
+soname that something under the roots MUST need: without that positive control,
+an absence above has not been shown to mean anything.
+
+Exit status: 0 the files were read and the control held, 1 nothing was read or
+the control failed, 2 a usage error.`
 
 var osExit = os.Exit
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	osExit(run(os.Args[1:], os.Stdout, os.Stderr))
+	// This command's own osExit, kept: its tests replace it to observe the
+	// status without ending the test binary, and cli.Drive returns the status
+	// rather than exiting, so the two fit together.
+	osExit(cli.Drive(RootCmd(), os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		must  string
+		quiet bool
+	)
+	c := cli.New("needread [flags] <dir|file>...",
+		"What every ELF file under the roots actually NEEDs", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(read(cli.Out(cmd), cli.Err(cmd), must, quiet, args))
+	}
+	f := c.Flags()
+	f.StringVar(&must, "must", "",
+		"fail unless some file under the roots NEEDs this soname (the positive control)")
+	f.BoolVar(&quiet, "quiet", false, "print only the totals and the control's verdict")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), args, stdout, stderr)
 }
 
 type found struct {
@@ -55,17 +94,9 @@ type found struct {
 	needed []string
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
-	fs_ := flag.NewFlagSet("needread", flag.ContinueOnError)
-	fs_.SetOutput(stderr)
-	must := fs_.String("must", "", "fail unless some file under the roots NEEDs this soname (the positive control)")
-	quiet := fs_.Bool("quiet", false, "print only the totals and the control's verdict")
-	if code, ok := fleet.ParseFlags(fs_, args); !ok {
-		return code
-	}
-	roots := fs_.Args()
+func read(stdout, stderr io.Writer, must string, quiet bool, roots []string) int {
 	if len(roots) == 0 {
-		fmt.Fprintln(stderr, "usage: needread [-must soname] [-quiet] <dir|file>...")
+		fmt.Fprintln(stderr, "usage: needread [--must soname] [--quiet] <dir|file>...")
 		return 2
 	}
 
@@ -83,7 +114,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 			elves++
 			for _, n := range needed {
-				if *must != "" && n == *must {
+				if must != "" && n == must {
 					controlSeen = true
 				}
 			}
@@ -97,7 +128,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	sort.Slice(all, func(i, j int) bool { return all[i].path < all[j].path })
-	if !*quiet {
+	if !quiet {
 		for _, f := range all {
 			fmt.Fprintf(stdout, "%s\n    NEEDED %s\n", f.path, strings.Join(f.needed, " "))
 		}
@@ -112,12 +143,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "needread: no ELF file was read at all — a broken measurement, not an empty answer")
 		return 1
 	}
-	if *must != "" && !controlSeen {
-		fmt.Fprintf(stderr, "needread: positive control FAILED: nothing under the roots NEEDs %q, so this run has not shown it can see one\n", *must)
+	if must != "" && !controlSeen {
+		fmt.Fprintf(stderr, "needread: positive control FAILED: nothing under the roots NEEDs %q, so this run has not shown it can see one\n", must)
 		return 1
 	}
-	if *must != "" {
-		fmt.Fprintf(stdout, "positive control: some file here does NEED %s, so an absence above is an absence\n", *must)
+	if must != "" {
+		fmt.Fprintf(stdout, "positive control: some file here does NEED %s, so an absence above is an absence\n", must)
 	}
 	return 0
 }

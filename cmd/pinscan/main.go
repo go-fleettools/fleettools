@@ -38,7 +38,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -53,8 +52,22 @@ import (
 	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Reports every require of a fleet module pinned at an untagged commit that is
+OLDER than a release the consumer therefore cannot reach.
+
+⛔ "BEHIND" IS NOT "DIFFERENT". A sibling tool here once reported 52 stale pins
+by testing inequality, and 35 of them were NEWER than the tag: raising those
+would have been a downgrade. So the pin's own timestamp is compared against the
+tag's publication time, and a pin that is ahead is reported separately rather
+than counted as a problem.
+
+Exit status: 0 nothing is behind, 1 something is, 2 nothing was read — no go.mod
+under the roots given means the roots are wrong, not the fleet.`
 
 // ours decides whether a module path belongs to this fleet.
 //
@@ -102,18 +115,31 @@ func (p Pin) Behind() bool {
 	return p.Latest != "" && !p.PinAt.IsZero() && !p.TagAt.IsZero() && p.PinAt.Before(p.TagAt)
 }
 
-func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+func main() { cli.Run(RootCmd()) }
 
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var verbose bool
+	c := cli.New("pinscan [flags] DIR...",
+		"Pins of a fleet module older than a release the consumer cannot reach", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(scan(cli.Out(cmd), cli.Err(cmd), verbose, args))
+	}
+	c.Flags().BoolVarP(&verbose, "verbose", "v", false,
+		"name every pair rather than only counting")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
 func run(args []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), args, stdout, stderr)
+}
+
+func scan(stdout, stderr io.Writer, verbose bool, roots []string) int {
+	// On stderr and inside the work, as it was: the staleness note is not part
+	// of the answer, and a reader of the table must not have to filter it out.
 	fleet.WarnIfStale(stderr)
 
-	flags := flag.NewFlagSet("pinscan", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	verbose := flags.Bool("v", false, "name every pair rather than only counting")
-	if code, ok := fleet.ParseFlags(flags, args); !ok {
-		return code
-	}
-	roots := flags.Args()
 	if len(roots) == 0 {
 		fmt.Fprintln(stderr, "pinscan: name the directories to walk, e.g. ~/src")
 		return 2
@@ -171,7 +197,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	byModule(stdout, behind)
-	if *verbose {
+	if verbose {
 		sort.Slice(behind, func(i, j int) bool { return behind[i].Repo < behind[j].Repo })
 		for _, p := range behind {
 			fmt.Fprintf(stdout, "    %-34s %-44s %s -> %s\n", p.Repo, p.Module,
