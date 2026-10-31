@@ -21,8 +21,15 @@ var osWriteFile = os.WriteFile
 // cannot tell which to believe. The test now reads all three.
 func moveBody(f finding, want, from string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "This repository pins Go **%s** in `%s` — **%d** occurrence(s). "+
-		"This moves them to **%s**.\n\n", from, strings.Join(f.MoveFiles, "`, `"), f.Moves, want)
+	if len(f.MoveFiles) > 0 {
+		fmt.Fprintf(&b, "This repository pins Go **%s** in `%s` — **%d** occurrence(s). "+
+			"This moves them to **%s**.\n\n", from, strings.Join(f.MoveFiles, "`, `"), f.Moves, want)
+	}
+	if len(f.GoModFiles) > 0 {
+		fmt.Fprintf(&b, "CI reads its Go version from `%s` (`go-version-file`), whose `go` directive is **%s**. "+
+			"This raises it to **%s** and runs `go mod tidy`; only `go.mod` and `go.sum` are committed.\n\n",
+			strings.Join(f.GoModFiles, "`, `"), from, want)
+	}
 	b.WriteString("## Why move a pin that is already explicit\n\n")
 	b.WriteString("Pinning was the right thing: an alias has no version to review. " +
 		"But a pinned fleet cannot move, and a Go patch release is usually a " +
@@ -34,8 +41,10 @@ func moveBody(f finding, want, from string) string {
 	fmt.Fprintf(&b, "`-from %s` names the version to move. \"Anything older\" cannot tell a stale "+
 		"pin from a deliberate one, so a job held back on purpose at some other version is "+
 		"not a candidate here and is left exactly as it is.\n\n", from)
-	b.WriteString("`go.mod` is **not** raised. The directive is a minimum for consumers; " +
-		"the workflow pin is what builds the artefacts.\n\n")
+	if len(f.GoModFiles) == 0 {
+		b.WriteString("`go.mod` is **not** raised. The directive is a minimum for consumers; " +
+			"the workflow pin is what builds the artefacts.\n\n")
+	}
 	b.WriteString("🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
 	return b.String()
 }
@@ -45,6 +54,10 @@ func moveCommitMessage(f finding, want, from string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "ci: move the Go pin from %s to %s\n\n", from, want)
 	fmt.Fprintf(&b, "%d occurrence(s) in %s.\n\n", f.Moves, strings.Join(f.MoveFiles, ", "))
+	if len(f.GoModFiles) > 0 {
+		fmt.Fprintf(&b, "go-version-file: raises the go directive of %s to %s and tidies.\n\n",
+			strings.Join(f.GoModFiles, ", "), want)
+	}
 	b.WriteString("Pinning was right: an alias has no version to review. But a pinned\n" +
 		"fleet cannot move, and a Go patch release is usually a SECURITY\n" +
 		"release -- the standard library is compiled into every binary, so the\n" +
@@ -52,8 +65,10 @@ func moveCommitMessage(f finding, want, from string) string {
 	fmt.Fprintf(&b, "An EXACT move: -from %s names the version to change, so a job held\n"+
 		"back on purpose at some other version is not a candidate and is left\n"+
 		"as it is.\n\n", from)
-	b.WriteString("go.mod is not raised: the directive is a minimum for consumers, and\n" +
-		"the workflow pin is what builds the artefacts.\n\n")
+	if len(f.GoModFiles) == 0 {
+		b.WriteString("go.mod is not raised: the directive is a minimum for consumers, and\n" +
+			"the workflow pin is what builds the artefacts.\n\n")
+	}
 	b.WriteString("Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>\n")
 	return b.String()
 }
@@ -61,7 +76,7 @@ func moveCommitMessage(f finding, want, from string) string {
 // prBody explains the change in the pull request, with this repository's own
 // numbers rather than a generic paragraph.
 func prBody(f finding, want, from string) string {
-	if f.Aliases == 0 && f.Moves > 0 {
+	if f.Aliases == 0 && f.moveCount() > 0 {
 		return moveBody(f, want, from)
 	}
 	var b strings.Builder
@@ -131,7 +146,7 @@ func writeFile(path, body string) error { return osWriteFile(path, []byte(body),
 // commitMessage is what lands in the repository's own history, which outlives
 // the pull request description.
 func commitMessage(f finding, want, from string) string {
-	if f.Aliases == 0 && f.Moves > 0 {
+	if f.Aliases == 0 && f.moveCount() > 0 {
 		return moveCommitMessage(f, want, from)
 	}
 	var b strings.Builder
