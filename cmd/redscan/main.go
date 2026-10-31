@@ -12,7 +12,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -21,7 +20,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 type repo struct {
@@ -33,45 +34,60 @@ type repo struct {
 
 type red struct{ repo, wf, when string }
 
+const longHelp = `Reports every workflow whose latest run on its repository's default branch
+failed, across every organisation the token can see.
+
+It takes NO arguments, and costs one REST call per organisation plus one per
+repository, against the hourly budget the fleet's Renovate runners share.
+
+⛔ ARGUMENTS ARE READ FIRST, before the staleness check and long before the
+sweep. This command's main() once read no arguments at all, so ` + "`redscan -h`" + `
+— a request for help — was a sweep of every organisation: hundreds of REST calls
+against that shared budget. Run on 2026-10-11 to read the flags, it had to be
+killed. cobra answers -h, and refuses an argument, before RunE is reached.
+
+⛔ AND ANYTHING ELSE IS REFUSED rather than read as permission to sweep the
+fleet: a typo, or an organisation name this tool cannot scope by, exits 2.
+
+Exit status: 0 the whole fleet was read, 1 it could not be — a half-swept fleet
+reads as a clean one, so the pass says what it did not reach.`
+
 func main() {
-	// ⛔ Arguments first, before the staleness check and long before the
-	// sweep. This main read no arguments at all, so `redscan -h` -- a request
-	// for help -- was a sweep of every organisation: hundreds of REST calls
-	// against the hourly budget Renovate shares. Run on 2026-10-11 to read the
-	// flags, it had to be killed.
-	if code, proceed := parseArgs(os.Args[1:], os.Stderr); !proceed {
-		os.Exit(code)
-	}
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
-// parseArgs decides whether to sweep at all. It sweeps only when given nothing:
-// -h prints the usage and exits 0, and anything else -- a typo, an organisation
-// name this tool cannot scope by -- is refused with status 2 rather than read
-// as permission to sweep the whole fleet.
+// RootCmd builds the command. It takes no flags and no arguments, and
+// cobra.NoArgs is what refuses the second: the refusal happens before RunE, so
+// there is no path on which a typo starts a sweep.
+func RootCmd() *cobra.Command {
+	c := cli.New("redscan", "Every default branch whose latest run failed", longHelp)
+	// Not cobra.NoArgs: its message is `unknown command "x" for "redscan"`,
+	// which describes the parser's model and not the risk. This one says what
+	// the refusal is FOR, which is the sentence an operator reads at 03:00.
+	c.Args = func(_ *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return fmt.Errorf("takes no arguments, got %q; refusing rather than sweeping the fleet", args)
+		}
+		return nil
+	}
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(run(cli.Out(cmd), cli.Err(cmd)))
+	}
+	return c
+}
+
+// parseArgs keeps the signature this command's test was written against. It
+// parses and decides, and deliberately does NOT sweep: that separation is the
+// whole point of the test, since `redscan -h` once was a sweep.
 func parseArgs(args []string, stderr io.Writer) (code int, proceed bool) {
-	fs := flag.NewFlagSet("redscan", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: redscan")
-		fmt.Fprintln(stderr)
-		fmt.Fprintln(stderr, "Reports every workflow whose latest run on its repository's default")
-		fmt.Fprintln(stderr, "branch failed, across every organisation the token can see. It takes")
-		fmt.Fprintln(stderr, "no arguments, and costs one REST call per organisation plus one per")
-		fmt.Fprintln(stderr, "repository, against the hourly budget Renovate shares.")
-	}
-	switch err := fs.Parse(args); {
-	case errors.Is(err, flag.ErrHelp):
-		return 0, false
-	case err != nil:
-		return 2, false
-	}
-	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "redscan: takes no arguments, got %q; refusing rather than sweeping the fleet\n", fs.Args())
-		return 2, false
-	}
-	return 0, true
+	c := RootCmd()
+	c.RunE = func(*cobra.Command, []string) error { return nil }
+	code = cli.Drive(c, args, stderr, stderr)
+	// --help exits 0 and is not a reason to proceed: cobra prints the help and
+	// returns nil, so a caller reading the status alone would print the help
+	// and then sweep the fleet.
+	return code, code == 0 && !cli.HelpRequested(c)
 }
 
 // budgetFloor is what this pass needs to mean anything, plus what it leaves

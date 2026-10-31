@@ -23,7 +23,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,7 +33,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 // headBytes is how much of a page to read. A generator meta is in the head,
@@ -71,32 +72,60 @@ var api = func(args ...string) ([]byte, error) { return fleet.GH(args...) }
 // repos is the repository-listing seam.
 var repos = fleet.Repos
 
+const longHelp = `Reports, per organisation, every published page that is not the one its
+repository builds.
+
+--fail-on-drift is for the per-organisation check that must stop a merge; the
+fleet-wide report deliberately does not fail.
+
+Exit status: 0 the pages match, 1 with --fail-on-drift when one does not, 2 the
+check could not be made.`
+
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
-func run(args []string, out, errOut io.Writer) int {
-	fs := flag.NewFlagSet("pagescheck", flag.ContinueOnError)
-	fs.SetOutput(errOut)
-	only := fs.String("orgs", "", "comma-separated organisations instead of the whole fleet")
-	failOnDrift := fs.Bool("fail-on-drift", false, "exit non-zero when a page is not the one its repository builds")
-	workers := fs.Int("workers", 6, "concurrent organisations")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		only        string
+		failOnDrift bool
+		workers     int
+	)
+	c := cli.New("pagescheck [flags]",
+		"Published pages that are not the one their repository builds", longHelp)
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(checkPages(cli.Out(cmd), cli.Err(cmd), only, failOnDrift, workers))
 	}
-	orgs, err := organisations(*only)
+	f := c.Flags()
+	f.StringVar(&only, "orgs", "", "comma-separated organisations instead of the whole fleet")
+	f.BoolVar(&failOnDrift, "fail-on-drift", false,
+		"exit non-zero when a page is not the one its repository builds")
+	f.IntVar(&workers, "workers", 6, "concurrent organisations")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, out, errOut io.Writer) int {
+	return cli.Drive(RootCmd(), args, out, errOut)
+}
+
+// checkPages is the command's work. The name avoids `sweep`, which this
+// package already uses for one organisation's pass.
+func checkPages(out, errOut io.Writer, only string, failOnDrift bool, workers int) int {
+	orgs, err := organisations(only)
 	if err != nil {
 		fmt.Fprintln(errOut, "pagescheck:", err)
 		return 2
 	}
-	if *only != "" {
+	if only != "" {
 		fmt.Fprintln(out, "NARROWED to the organisations named: this says nothing about the others.")
 	}
 	fmt.Fprintf(out, "orgs: %d\n\n", len(orgs))
 
-	found := sweep(orgs, *workers)
-	return report(found, out, *failOnDrift)
+	found := sweep(orgs, workers)
+	return report(found, out, failOnDrift)
 }
 
 // organisations is the list to sweep: the ones named, or every one the account

@@ -26,10 +26,15 @@ import (
 // repositories, and only one of those surfaces is under review.
 var trees = map[string]string{}
 
-// treeFlag collects repeated -tree owner/repo=path.
+// treeFlag collects repeated --tree owner/repo=path.
 type treeFlag struct{}
 
 func (treeFlag) String() string { return "" }
+
+// Type is what pflag asks for and the standard flag package did not: the word
+// it prints in the usage line after the flag's name. It is the only thing this
+// value needed to carry across the migration to cobra.
+func (treeFlag) Type() string { return "owner/repo=dir" }
 
 // Set REFUSES a tree it cannot read rather than falling back to the API.
 //
@@ -39,7 +44,7 @@ func (treeFlag) String() string { return "" }
 func (treeFlag) Set(v string) error {
 	repo, path, ok := strings.Cut(v, "=")
 	if !ok || repo == "" || path == "" {
-		return fmt.Errorf("-tree wants owner/repo=path, got %q", v)
+		return fmt.Errorf("--tree wants owner/repo=path, got %q", v)
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
