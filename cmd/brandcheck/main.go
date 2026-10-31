@@ -21,15 +21,27 @@ package main
 
 import (
 	"encoding/xml"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Checks the INVENTORY and the GRAMMAR of a brand repository, not the pixels:
+whether the 512 px variant exists, whether the three colourways are all there,
+and whether the mark follows the family grammar.
+
+With no directory it reads the current one, and takes the organisation's name
+from the directory's parent unless --org says otherwise — which is how CI says
+it, since there the checkout is the repository alone.
+
+Exit status: 0 everything the README promises is present and in the family,
+1 something is missing or out of grammar, 2 the check could not be made.`
 
 // sizes are the raster sizes every brand repository carries, and variants the
 // three colourways. Both are what logos/brandgen writes; this is the list a
@@ -44,21 +56,38 @@ func main() {
 	// built from, and a repository-wide test enumerates cmd/ on disk to make
 	// sure none forgets. It caught this one.
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var org string
+	c := cli.New("brandcheck [flags] [directory]",
+		"Whether a brand repository carries everything it claims to", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(checkBrand(cli.Out(cmd), cli.Err(cmd), org, args))
+	}
+	c.Flags().StringVar(&org, "org", "",
+		"the organisation the assets are for (default: the directory's name)")
+	return c
+}
+
+// run keeps the signature this command's tests were written against, and now
+// routes them through the real command: pflag parsing, the single-dash
+// compatibility shim and the exit-status mapping included. Before the migration
+// these tests drove a hand-rolled FlagSet that no user ever reached.
 func run(args []string, out, errOut io.Writer) int {
-	fs := flag.NewFlagSet("brandcheck", flag.ContinueOnError)
-	fs.SetOutput(errOut)
-	org := fs.String("org", "", "the organisation the assets are for (default: the directory's name)")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
+	return cli.Drive(RootCmd(), args, out, errOut)
+}
+
+// checkBrand is the command's work. The name avoids `check`, which this
+// package's tests already use for a helper of their own.
+func checkBrand(out, errOut io.Writer, org string, args []string) int {
 	dir := "."
-	if fs.NArg() > 0 {
-		dir = fs.Arg(0)
+	if len(args) > 0 {
+		dir = args[0]
 	}
-	name := *org
+	name := org
 	if name == "" {
 		abs, err := filepath.Abs(dir)
 		if err != nil {

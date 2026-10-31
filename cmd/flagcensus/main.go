@@ -31,7 +31,10 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"os"
+
 	"github.com/go-fleettools/fleettools/internal/cli"
+	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
 )
 
@@ -55,7 +58,14 @@ commands named, which is what a migration rewrites.
 Exit status: 0 the census was taken, 1 some command is UNREAD, 2 it could not
 be taken.`
 
-func main() { cli.Run(RootCmd()) }
+func main() {
+	// ⛔ FIRST, as every command here does: a census taken by a binary older
+	// than the tree it is reading answers for an older tree, and nothing in the
+	// table would say so. A repository-wide test enumerates cmd/ to make sure
+	// none forgets, and it caught this one.
+	fleet.WarnIfStale(os.Stderr)
+	cli.Run(RootCmd())
+}
 
 // RootCmd builds the command. Tests drive it with SetArgs, SetOut and SetErr.
 func RootCmd() *cobra.Command {

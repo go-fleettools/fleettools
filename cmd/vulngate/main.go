@@ -50,7 +50,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -58,15 +57,75 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Reads one govulncheck JSON stream and decides what to do about it.
+
+  reachable from this module ................. error
+  in a required module, with a RELEASED fix .. error: upgrade rather than carry it
+  anything else .............................. a notice, named in the log
+
+⛔ The EXIT STATUS of govulncheck is not the gate: it exits 0 over an advisory it
+has decided this module does not call. ⛔ An unread scan is not a clean one:
+govulncheck that cannot load the packages still prints its config with no
+finding, so a run is believed only when it carried a config AND an SBOM. ⛔ A
+scan is only as fresh as its database, so the database's timestamp and age are
+printed on every run and an age beyond --max-db-age is refused.
+
+⚠ MIGRATION NOTE. These flags took one dash before the move to cobra and now
+take two. Thirteen workflow lanes across the fleet call this command as
+` + "`vulngate -go`" + `; the old spelling is still accepted, with a warning on
+stderr, and that shim will not outlive the next major. A lane pinning an older
+version is unaffected.
+
+Exit status: 0 nothing needs a decision, 1 something does or the scan cannot be
+believed, 2 a usage error.`
 
 // The warning goes to stderr and the verdict to stdout, which matters here:
 // what this writes on stdout is read by a CI annotation parser, and a gate that
 // mixes its own housekeeping into that stream is a gate somebody filters.
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout))
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		maxAge time.Duration
+		wantGo string
+	)
+	c := cli.New("vulngate [flags] findings.json",
+		"Decide what one govulncheck stream means", longHelp)
+	c.Args = cobra.ExactArgs(1)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		out := cli.Out(cmd)
+		f, err := os.Open(args[0])
+		if err != nil {
+			// Status 1 and not 2, deliberately: a lane whose scan file is not
+			// there has not produced a believable scan, and this gate's whole
+			// point is that an unread scan must not pass as a clean one.
+			fmt.Fprintf(out, "::error::vulngate cannot read %s: %v\n", args[0], err)
+			return cli.FromStatus(1)
+		}
+		defer f.Close()
+		return cli.FromStatus(judge(f, out, maxAge, wantGo, time.Now()))
+	}
+	fl := c.Flags()
+	// Three weeks, not three days. The Go vulnerability database is updated on
+	// business days, so a tight bound fires on a quiet fortnight and teaches
+	// everybody to ignore it; three weeks still catches a mirror that has
+	// stopped. Measured 2026-10-11: the live database was three days old and
+	// that was simply the weekend.
+	fl.DurationVar(&maxAge, "max-db-age", 21*24*time.Hour,
+		"refuse a scan whose vulnerability database is older than this")
+	fl.StringVar(&wantGo, "go", "",
+		"the toolchain the scan must have judged the standard library as, e.g. go1.27.3;\n"+
+			"empty accepts whatever it reports, which is one question less than the lane asked")
+	return c
 }
 
 // govulncheck writes a stream of JSON objects; only these fields matter here.
@@ -94,31 +153,13 @@ type message struct {
 
 var released = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
 
+// run keeps the signature this command's tests were written against.
+//
+// Everything goes to one writer, as it did before: what this command writes on
+// stdout is read by a CI annotation parser, and the staleness note is the only
+// thing that belongs on stderr.
 func run(args []string, out io.Writer) int {
-	fs := flag.NewFlagSet("vulngate", flag.ContinueOnError)
-	fs.SetOutput(out)
-	// Three weeks, not three days. The Go vulnerability database is updated on
-	// business days, so a tight bound fires on a quiet fortnight and teaches
-	// everybody to ignore it; three weeks still catches a mirror that has
-	// stopped. Measured 2026-10-11: the live database was three days old and
-	// that was simply the weekend.
-	maxAge := fs.Duration("max-db-age", 21*24*time.Hour, "refuse a scan whose vulnerability database is older than this")
-	wantGo := fs.String("go", "", "the `toolchain` the scan must have judged the standard library as, e.g. go1.27.2;\n"+
-		"empty accepts whatever it reports, which is one question less than the lane asked")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(out, "usage: vulngate [-max-db-age 21d] [-go go1.27.2] findings.json")
-		return 2
-	}
-	f, err := os.Open(fs.Arg(0))
-	if err != nil {
-		fmt.Fprintf(out, "::error::vulngate cannot read %s: %v\n", fs.Arg(0), err)
-		return 1
-	}
-	defer f.Close()
-	return judge(f, out, *maxAge, *wantGo, time.Now())
+	return cli.Drive(RootCmd(), args, out, out)
 }
 
 func judge(r io.Reader, out io.Writer, maxAge time.Duration, wantGo string, now time.Time) int {
