@@ -9,6 +9,9 @@ import (
 	"testing"
 )
 
+// stubGoMods is the root go.mod text graphqlStub returns per repository.
+var stubGoMods = map[string]string{}
+
 var reAlias = regexp.MustCompile(`r(\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\)`)
 
 // graphqlStub answers a prefilter query from repo -> workflow files. A repo in
@@ -45,7 +48,11 @@ func graphqlStub(files map[string]map[string]string, bad map[string]bool, quota 
 			// a subtree entry has an object with no text
 			entries = append(entries, map[string]any{"name": "dir", "object": nil})
 			entries = append(entries, map[string]any{"name": "README.md", "object": map[string]any{"text": "go-version: stable"}})
-			data["r"+m[1]] = map[string]any{"object": map[string]any{"entries": entries}}
+			item := map[string]any{"object": map[string]any{"entries": entries}}
+			if mod, ok := stubGoMods[repo]; ok {
+				item["gomod"] = map[string]any{"text": mod}
+			}
+			data["r"+m[1]] = item
 		}
 		resp := map[string]any{"data": data}
 		if problem != "" {
@@ -178,6 +185,31 @@ func TestPrefilterQuotaDuringBisection(t *testing.T) {
 	code, _, errs = w.run("-version", "1.27.3", "-prefilter", "-list", w.list("o/a", "o/b"))
 	if code != 1 || !strings.Contains(errs, "prefilter stopped") {
 		t.Fatalf("code=%d %s", code, errs)
+	}
+}
+
+// A workflow reading its version from root go.mod is a candidate only when that
+// directive is exactly --from; anything GraphQL cannot settle is passed on.
+func TestPrefilterReadsTheGoModBehindGoVersionFile(t *testing.T) {
+	w := newWorld(t)
+	vf := "          go-version-file: go.mod\n"
+	files := map[string]map[string]string{
+		"o/exact":   {"ci.yml": vf},
+		"o/newer":   {"ci.yml": vf},
+		"o/nomod":   {"ci.yml": vf},
+		"o/nested":  {"ci.yml": "          go-version-file: tools/go.mod\n"},
+		"o/nodirec": {"ci.yml": vf},
+	}
+	stubGoMods = map[string]string{"o/exact": "module x\n\ngo 1.27.2\n", "o/newer": "module x\n\ngo 1.27.3\n",
+		"o/nested": "module x\n\ngo 1.21\n", "o/nodirec": "module x\n"}
+	t.Cleanup(func() { stubGoMods = map[string]string{} })
+	var calls int
+	ghRaw = graphqlStub(files, nil, false, &calls)
+	var o, e strings.Builder
+	code := run([]string{"-from", "1.27.2", "-version", "1.27.3", "-gomod", "-prefilter", "-list", w.list("o/exact", "o/newer", "o/nomod", "o/nested", "o/nodirec")}, strings.NewReader(""), &o, &e)
+	got := strings.Fields(o.String())
+	if code != 0 || strings.Join(got, " ") != "o/exact o/nomod o/nested o/nodirec" {
+		t.Fatalf("code=%d candidates=%v (o/newer is already past --from and must be dropped)\n%s", code, got, e.String())
 	}
 }
 
