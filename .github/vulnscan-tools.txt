@@ -1,0 +1,56 @@
+# The repositories swept daily by .github/workflows/vuln.yml.
+#
+# WHY THESE AND NOT ALL 1800: these are the tools that hold the GitHub token,
+# refuse a push, or produce the figures every other decision is taken from. An
+# advisory reachable from one of them is reachable from the thing that guards
+# everything else, so they are worth a clone a day. Sweeping the whole fleet
+# daily is a different job with a different cost, and is not this one.
+#
+# WHAT A SWEEP OF THIS LIST HAS ALREADY FOUND, by hand, 2026-10-22:
+# GO-2026-6809 (CVE-2026-111943, crypto/x509 Certificate.Verify, published the
+# day before, fixed in go1.26.10 and go1.27.3) was REACHABLE -- not merely
+# present -- in FOUR of them: gitsafe, fleettools, modfloor and landingkit.
+# Nothing would have reported it; a person happened to run a sweep. All four
+# are at go 1.27.3 now.
+#
+# ADDING A LINE is the whole procedure. A repository with no go.mod is reported
+# NO-GO rather than failing the lane, so a non-Go repository here is noise, not
+# a break.
+#
+# ⛔ A HAND-KEPT LIST DRIFTS, and this one already did: written on 2026-10-22
+# from the organisations as they then were, it was missing `fuzzrun` and
+# `buildstamp` -- two Go repositories -- by 2026-10-31. Nine days, two misses,
+# and a list that silently omits a repository reports a clean fleet for it.
+# Found by re-listing the organisations before shipping the lane, not by the
+# lane telling anybody.
+#
+# ⛔ AND IT IS STILL A LIST, DELIBERATELY. Deriving it from `gh repo list` would
+# remove the drift and cost the property this job is built on: vulnscan needs NO
+# credential, because it clones and makes no REST call per repository, so it
+# cannot starve the hourly budget the Renovate runners spend from. Enumerating
+# the organisations needs a token and spends from that budget on every run. So
+# this file is a POLICY -- which tools are worth a clone a day -- and not an
+# inventory, and the drift is paid for by re-reading the organisations whenever
+# it is edited. `fleetfind` is the tool for the inventory question.
+
+# the token and the push guard
+go-gitsafe/gitsafe
+
+# the lease and memory protocol every session coordinates through
+go-agentsync/agentsync
+
+# the sweeps, the gates and the judges
+go-fleettools/fleettools
+go-fleettools/staletools
+go-fleettools/prwait
+go-fleettools/mutate
+go-fleettools/modfloor
+go-fleettools/landingkit
+go-fleettools/unbounded
+go-fleettools/fleetfind
+go-fleettools/landingdiff
+
+# added 2026-10-31, after re-listing the organisations: both are Go, both were
+# created since this file was first written, and neither was being watched
+go-fleettools/fuzzrun
+go-fleettools/buildstamp

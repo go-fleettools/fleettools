@@ -1,0 +1,160 @@
+name: vuln
+
+# ⛔ A GATE THAT ONLY FIRES ON A PUSH HAS THE COVERAGE OF THE REPOSITORY'S
+# ACTIVITY, AND THE QUIETEST REPOSITORY NEEDS IT MOST. A security advisory does
+# not wait for anybody to push.
+#
+# Measured on go-pkgx, 2026-10-27 to 10-30: GO-2026-6860 and GO-2026-6866
+# (golang.org/x/net/html, fixed in v0.62.0) sat green for days in two
+# repositories and were found 2 and 4 days late -- in `bk` by a pull request
+# adding a subcommand that touched no dependency at all, and in `packages` by a
+# pull request editing one workflow file. Every run of the scan was right; the
+# defect was that it only ran `on: push, pull_request`.
+#
+# This repository had exactly that shape: ci.yml carried the only govulncheck
+# job in the organisation's tooling, and nothing in these three workflows
+# carried a schedule. The tools that find this defect across 1800 repositories
+# had it themselves.
+#
+# ⛔ DAILY, NOT WEEKLY. The vulnerability database is updated on business days;
+# a weekly cadence would have left those two advisories sitting for six days.
+#
+# ⛔ THE CRON TIME IS A REQUEST, NOT AN APPOINTMENT. GitHub runs scheduled
+# workflows late -- hours late on a busy hour -- so nothing here may depend on
+# the hour it names.
+#
+# ⛔ AND A DISABLED CRON REPORTS NOTHING; IT DOES NOT FAIL. GitHub disables a
+# scheduled workflow after 60 days without repository activity, and a workflow
+# that stops running looks exactly like a workflow finding nothing. Hence
+# workflow_dispatch, so a person can always ask, and this comment, so the next
+# reader knows that silence here is not green.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ⛔ MOVED HERE FROM ci.yml RATHER THAN COPIED. The obvious shape -- leave the
+  # job where it is and add a second workflow carrying its own copy of the step
+  # -- is the two-halves defect: one copy gets the next fix and the other keeps
+  # the old behaviour, and nothing says which one a given run used.
+  #
+  # ⛔ THE JOB NAME IS UNCHANGED. A branch protection rule names a CHECK, not a
+  # workflow, so "govulncheck, judged by vulngate" must keep matching after the
+  # move. Verified on the pull request before merging, not assumed.
+  gate:
+    name: govulncheck, judged by vulngate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      # ⛔ SAY WHICH TOOLCHAIN RAN. The standard library is judged by one
+      # version, and a lane that silently resolved another answered a different
+      # question.
+      - run: go version
+
+      # ⛔ NO `set -o pipefail` HERE, deliberately. govulncheck exits non-zero
+      # over findings it has decided this module does not call, and exits ZERO
+      # over some it has -- which is the whole reason vulngate exists. pipefail
+      # would hand the lane back to the status that cannot answer the question.
+      # An unread scan is caught instead by vulngate, which believes a run only
+      # when it carried a config AND an SBOM.
+      - name: govulncheck, judged by vulngate
+        run: |
+          set -eu
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" -format json ./... > /tmp/vuln.json || true
+          test -s /tmp/vuln.json || { echo "::error::govulncheck wrote nothing at all"; exit 1; }
+          # BUILT, not `go run`: a built binary carries the VCS stamp its own
+          # staleness check reads, so the gate can say whether it is current.
+          go build -o /tmp/vulngate ./cmd/vulngate
+          # ⛔ The stream is an ARGUMENT, not stdin. Written with `<` first, and
+          # actionlint passed it -- a workflow that parses is not a workflow
+          # that runs.
+          # ⛔ Its staleness note says "could not tell" here, and that is left
+          # alone: the check asks gh whether the binary matches the source, and
+          # in CI the binary IS this checkout, so the question has no content.
+          # Handing it GH_TOKEN would spend a call from the shared hourly budget
+          # per run to learn nothing.
+          /tmp/vulngate -go "$(go env GOVERSION)" /tmp/vuln.json
+
+  # The second half, and the one nothing did before: our own Go dependencies,
+  # across the repositories whose compromise would be worst, on a clock.
+  #
+  # ⛔ RENOVATE CANNOT DO THIS. An INDIRECT dependency is not a floor the module
+  # declares for itself, so there is no version string for a manager to compare
+  # or rewrite -- x/net reached both go-pkgx repositories that way. Nothing
+  # watched indirect dependencies anywhere in this fleet, although cmd/vulnscan
+  # was written for exactly that question and was scheduled nowhere.
+  #
+  # ⛔ IT NEEDS NO CREDENTIAL. vulnscan clones each repository at depth 1 and
+  # makes no REST call per repository, which is why it cannot starve the shared
+  # hourly budget the Renovate runners spend from. `contents: read` above is the
+  # whole permission.
+  sweep:
+    name: vulnscan over the tools that gate the fleet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go version
+
+      - name: build the scanner and the judge it drives
+        run: |
+          set -eu
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go build -o /tmp/vulnscan ./cmd/vulnscan
+
+      # ⛔ THE INSTRUMENT STATES ITS OWN COMPETENCE FIRST. -selftest judges
+      # three RECORDED govulncheck streams -- a known positive, an
+      # imported-but-not-called run, and a load failure -- and a binary that
+      # gets one of them wrong says not to trust the sweep that follows. A scan
+      # that cannot read reports zero findings, which is indistinguishable from
+      # a clean fleet.
+      - name: the scanner must see what it is looking for
+        run: /tmp/vulnscan -selftest
+
+      # ⛔ THE SMOKE LIST IS THIS REPOSITORY, AND THAT IS THE POINT. The full
+      # sweep below runs only on a schedule or by hand, because an advisory in
+      # ANOTHER repository must not redden an unrelated pull request here. But a
+      # command line exercised only at 06:17 is a command line nobody has seen
+      # work, which is the same defect this workflow exists to fix -- so every
+      # event runs the identical binary, flags and -list mechanism over a
+      # one-line list naming this repository, whose state the gate job above is
+      # already about.
+      - name: the sweep's command line must work on every event
+        run: /tmp/vulnscan -list .github/vulnscan-smoke.txt -go "$(go env GOVERSION)"
+
+      # ⛔ EXIT STATUS: 0 all read and clean, 1 something REACHABLE, 2 something
+      # UNREAD -- and 2 is not a lesser 1. A repository govulncheck could not
+      # load prints its config and no finding, then exits non-zero, which reads
+      # like a clean repository to anything judging the JSON alone. Both fail
+      # this lane, and the report says which.
+      #
+      # A red here names another repository, not this one. The job name says so,
+      # because "fleettools is red" and "a repository fleettools watches has a
+      # reachable advisory" call for different work.
+      - name: the fleet's own tools, swept on a clock
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: /tmp/vulnscan -list .github/vulnscan-tools.txt -go "$(go env GOVERSION)" -json /tmp/vulnscan.json
+
+      - name: keep the report even when the sweep failed
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@v7
+        with:
+          name: vulnscan-report
+          path: /tmp/vulnscan.json
+          if-no-files-found: warn
