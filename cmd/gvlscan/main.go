@@ -33,18 +33,20 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
+	"io"
 	"os"
 	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 // blocker names one call shape that can park the thread.
@@ -110,40 +112,82 @@ type finding struct {
 	pkg      string
 }
 
-func main() {
-	var (
-		wrappers = flag.String("wrappers", "ioBlock,threadBlock,threadPass",
-			"comma-separated function names that release the lock; a blocking call lexically inside one of these is not reported")
-		extra = flag.String("also", "",
-			"extra blocking calls, comma-separated, as Type.Method or pkg.Func (e.g. \"sql.DB.Query,os.Hostname\")")
-		kinds = flag.String("kinds", "net,file,proc,time",
-			"which kinds of waiting to report: net, file, proc, sync, time. sync is off by default -- a short internal mutex is not what a thread-parking audit is about, and a dozen of them bury the findings that are")
-		showCallers = flag.Bool("callers", false,
-			"for each function holding an unwrapped call, also print who calls it -- enclosure is lexical, so this is how a false positive is settled")
-		quiet = flag.Bool("q", false, "print only the counts")
-	)
-	flag.Usage = func() {
-		fmt.Fprint(os.Stderr, `gvlscan -- find blocking calls that do not release the interpreter lock.
+const longHelp = `Finds blocking calls that do not release the interpreter lock.
 
-usage: gvlscan [flags] <package pattern>...
-
-	gvlscan ./internal/vm
-	gvlscan -callers ./internal/...
+    gvlscan ./internal/vm
+    gvlscan --callers ./internal/...
 
 Exit status: 0 nothing unwrapped, 1 something unwrapped, 2 could not load.
-A load failure is a REFUSAL TO ANSWER, not a clean result.
+A LOAD FAILURE IS A REFUSAL TO ANSWER, not a clean result — a package that did
+not type-check resolves its selections to nothing, so every blocking call in it
+disappears and the tool would report a reassuring zero.
 
-flags:
-`)
-		flag.PrintDefaults()
-	}
-	flag.Parse()
+--kinds that selects nothing is refused for the same reason: an empty question
+is not a clean answer. sync is off by default, because a short internal mutex is
+not what a thread-parking audit is about and a dozen of them bury the findings
+that are.
+
+--callers prints who calls each function holding an unwrapped call. Enclosure is
+LEXICAL, so a call reached only from inside a wrapper is reported and is not a
+defect; those callers are how a false positive is settled.`
+
+// scanOptions are the flags, gathered so that the command can bind them and the
+// scan can read them.
+type scanOptions struct {
+	wrappers, extra, kinds string
+	showCallers, quiet     bool
+}
+
+func main() {
 	// A stale scanner is worse here than elsewhere: its answer is a list of
 	// places nobody has to look at, and an old binary's list is shorter.
 	fleet.WarnIfStale(os.Stderr)
-	if flag.NArg() == 0 {
-		flag.Usage()
-		os.Exit(2)
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command. Tests drive it through run, below.
+//
+// ⛔ THIS COMMAND HAD NO run() AT ALL: it parsed os.Args in place through the
+// package-level flag.Parse(), wrote to os.Stdout and os.Stderr from inside
+// main, and ended in eight separate os.Exit calls -- each one a different
+// answer, and none of them reachable from a test.
+func RootCmd() *cobra.Command {
+	var o scanOptions
+	c := cli.New("gvlscan [flags] <package pattern>...",
+		"Blocking calls that do not release the interpreter lock", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(scanPatterns(cli.Out(cmd), cli.Err(cmd), &o, args))
+	}
+	f := c.Flags()
+	f.StringVar(&o.wrappers, "wrappers", "ioBlock,threadBlock,threadPass",
+		"comma-separated function names that release the lock; a blocking call lexically inside one of these is not reported")
+	f.StringVar(&o.extra, "also", "",
+		"extra blocking calls, comma-separated, as Type.Method or pkg.Func (e.g. \"sql.DB.Query,os.Hostname\")")
+	f.StringVar(&o.kinds, "kinds", "net,file,proc,time",
+		"which kinds of waiting to report: net, file, proc, sync, time")
+	f.BoolVar(&o.showCallers, "callers", false,
+		"for each function holding an unwrapped call, also print who calls it")
+	// --quiet keeps the old -q as its shorthand.
+	f.BoolVarP(&o.quiet, "quiet", "q", false, "print only the counts")
+	return c
+}
+
+// ⛔ NO run() ADAPTER HERE, deliberately, and it is the one command in the
+// migration without one: this package's tests have their own `run`, which
+// BUILDS the binary and executes it. That is an integration test, so it
+// exercises the real cobra surface -- argument parsing, the help, all eight
+// statuses -- without any adapter, and adding one would have shadowed the
+// helper the tests already use. Eighth name collision of this migration; the
+// first where the right answer was to write less rather than rename.
+func scanPatterns(stdout, stderr io.Writer, o *scanOptions, patterns []string) int {
+	// The scan below reads these through pointers, as it did when they came
+	// from the global flag set.
+	wrappers, extra, kinds := &o.wrappers, &o.extra, &o.kinds
+	showCallers, quiet := &o.showCallers, &o.quiet
+
+	if len(patterns) == 0 {
+		fmt.Fprintln(stderr, longHelp)
+		return 2
 	}
 
 	want := map[string]bool{}
@@ -159,14 +203,14 @@ flags:
 	// A -kinds that selects nothing would scan a whole tree and print a
 	// confident zero. Refuse: an empty question is not a clean answer.
 	if len(blockers) == 0 {
-		fmt.Fprintf(os.Stderr, "gvlscan: -kinds %q selects no blocking call at all; nothing would be reported\n", *kinds)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "gvlscan: --kinds %q selects no blocking call at all; nothing would be reported\n", *kinds)
+		return 2
 	}
 	for _, s := range splitList(*extra) {
 		b, err := parseBlocker(s)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "gvlscan: -also %q: %v\n", s, err)
-			os.Exit(2)
+			fmt.Fprintf(stderr, "gvlscan: --also %q: %v\n", s, err)
+			return 2
 		}
 		blockers = append(blockers, b)
 	}
@@ -181,10 +225,10 @@ flags:
 			packages.NeedImports,
 		Tests: false,
 	}
-	pkgs, err := packages.Load(cfg, flag.Args()...)
+	pkgs, err := packages.Load(cfg, patterns...)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gvlscan: load: %v\n", err)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "gvlscan: load: %v\n", err)
+		return 2
 	}
 	// A package that did not type-check gives wrong answers quietly: its
 	// selections resolve to nothing, so every blocking call in it simply
@@ -193,18 +237,18 @@ flags:
 	packages.Visit(pkgs, nil, func(p *packages.Package) {
 		for _, e := range p.Errors {
 			if nerr < 10 {
-				fmt.Fprintf(os.Stderr, "gvlscan: %v\n", e)
+				fmt.Fprintf(stderr, "gvlscan: %v\n", e)
 			}
 			nerr++
 		}
 	})
 	if nerr > 0 {
-		fmt.Fprintf(os.Stderr, "gvlscan: %d type error(s); refusing to report, because an unparsed file yields no findings and looks like a clean one\n", nerr)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "gvlscan: %d type error(s); refusing to report, because an unparsed file yields no findings and looks like a clean one\n", nerr)
+		return 2
 	}
 	if len(pkgs) == 0 {
-		fmt.Fprintln(os.Stderr, "gvlscan: no packages matched")
-		os.Exit(2)
+		fmt.Fprintln(stderr, "gvlscan: no packages matched")
+		return 2
 	}
 
 	var found, wrapped []finding
@@ -228,37 +272,37 @@ flags:
 
 	// "N of M", never N alone: a count of findings with no population behind it
 	// cannot be told apart from a scan that read nothing.
-	fmt.Printf("%d package(s) scanned, %d blocking call(s) found, %d wrapped, %d NOT wrapped\n",
+	fmt.Fprintf(stdout, "%d package(s) scanned, %d blocking call(s) found, %d wrapped, %d NOT wrapped\n",
 		scanned, len(found)+len(wrapped), len(wrapped), len(found))
 	if *quiet {
 		if len(found) > 0 {
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 	if len(found) == 0 {
-		return
+		return 0
 	}
 
-	fmt.Println()
+	fmt.Fprintln(stdout)
 	byFunc := map[string][]finding{}
 	for _, f := range found {
-		fmt.Printf("%s:%d: %s waits on %s\n", f.pos.Filename, f.pos.Line, f.call, f.why)
-		fmt.Printf("    in %s\n", f.enclFunc)
+		fmt.Fprintf(stdout, "%s:%d: %s waits on %s\n", f.pos.Filename, f.pos.Line, f.call, f.why)
+		fmt.Fprintf(stdout, "    in %s\n", f.enclFunc)
 		byFunc[f.pkg+"."+f.enclFunc] = append(byFunc[f.pkg+"."+f.enclFunc], f)
 	}
 
 	if *showCallers {
-		fmt.Println("\n-- who calls the functions holding an unwrapped call --")
-		fmt.Println("   (enclosure is lexical: a call reached only from inside a wrapper is")
-		fmt.Println("    reported above but is not a defect. These callers settle which.)")
+		fmt.Fprintln(stdout, "\n-- who calls the functions holding an unwrapped call --")
+		fmt.Fprintln(stdout, "   (enclosure is lexical: a call reached only from inside a wrapper is")
+		fmt.Fprintln(stdout, "    reported above but is not a defect. These callers settle which.)")
 		names := map[string]bool{}
 		for _, f := range found {
 			names[f.enclFunc] = true
 		}
-		printCallers(pkgs, names)
+		printCallers(stdout, pkgs, names)
 	}
-	os.Exit(1)
+	return 1
 }
 
 // scanPackage walks every function body and classifies each blocking call by
@@ -416,7 +460,7 @@ func exprString(e ast.Expr) string {
 // needs SSA and whole-program analysis, and the question here -- "is this
 // helper only ever used from inside a wrapper?" -- is answered by reading the
 // handful of sites it prints.
-func printCallers(pkgs []*packages.Package, names map[string]bool) {
+func printCallers(w io.Writer, pkgs []*packages.Package, names map[string]bool) {
 	bare := map[string]bool{}
 	for n := range names {
 		if i := strings.LastIndex(n, "."); i >= 0 {
@@ -463,16 +507,16 @@ func printCallers(pkgs []*packages.Package, names map[string]bool) {
 		return sites[i].pos.String() < sites[j].pos.String()
 	})
 	if len(sites) == 0 {
-		fmt.Println("   (no call sites found by name)")
+		fmt.Fprintln(w, "   (no call sites found by name)")
 		return
 	}
 	last := ""
 	for _, s := range sites {
 		if s.callee != last {
-			fmt.Printf("  %s:\n", s.callee)
+			fmt.Fprintf(w, "  %s:\n", s.callee)
 			last = s.callee
 		}
-		fmt.Printf("    %s:%d  in %s\n", s.pos.Filename, s.pos.Line, s.in)
+		fmt.Fprintf(w, "    %s:%d  in %s\n", s.pos.Filename, s.pos.Line, s.in)
 	}
 }
 

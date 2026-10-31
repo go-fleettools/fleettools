@@ -20,8 +20,8 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -30,7 +30,9 @@ import (
 
 	"github.com/go-fleettools/fleettools/quiet"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 // readOnly refuses anything that is not a plain GET.
@@ -130,19 +132,41 @@ func counted(args ...string) ([]byte, error) {
 	return out, err
 }
 
+// The flags, as POINTERS still.
+//
+// ⛔ They are read as *slack, *all, *only and so on from thirty places across
+// this file, so they stay pointers: pflag's DurationVar and friends take a
+// *time.Duration directly, which means RootCmd can bind these very variables
+// and not one line of the eight hundred below has to change. The alternative
+// was rewriting thirty dereferences in the largest file here, to no end.
+//
+// A full pass is ~1300 calls, a quarter of an hour's budget, and this fleet
+// routinely has eight sessions on it, which is why --orgs exists: checking one
+// organisation should not cost the same as checking all of them.
+// ⛔ EACH ONE CARRIES ITS DEFAULT HERE, not only in RootCmd. A first version of
+// this used new(string) and let pflag set the defaults at registration, which
+// is correct for the binary and WRONG for everything else: six of this
+// package's tests call read() directly, without building a command, and they
+// saw *wfFile == "" and *repoNames == "" -- so no workflow was ever found and a
+// rate-limited probe came back "no_runner" instead of "unreadable", which is
+// precisely the confusion this tool exists to prevent. The tests caught it.
+//
+// Moving a default from a declaration to a registration moves it in TIME, and
+// anything that reads the variable before the registration reads a zero.
 var (
-	slack     = flag.Duration("slack", quiet.DefaultSlack, "how far behind its own cron a run may be before the runner counts as stopped")
-	pushWarn  = flag.Int("push-warn", int(quiet.DefaultPushWarn/(24*time.Hour)), "warn when the runner repository has had no push for this many days")
-	repoNames = flag.String("repos", ".github,renovate-runner", "comma-separated repositories, in each organisation, that may hold a runner")
-	wfFile    = flag.String("workflow", "renovate.yml", "runner workflow file name")
-	all       = flag.Bool("all", false, "list every runner, not only the findings")
-	fixture   = flag.String("fixture", "", "read runners from a JSON file instead of the API; makes no network call at all")
-	workers   = flag.Int("workers", 6, "concurrent API readers")
-	// A full pass is ~1300 calls, a quarter of an hour's budget, and this fleet
-	// routinely has eight sessions on it. Checking one organisation should not
-	// cost the same as checking all of them.
-	only = flag.String("orgs", "", "comma-separated organisations to check instead of the whole fleet")
+	slack     = initial(quiet.DefaultSlack)
+	pushWarn  = initial(int(quiet.DefaultPushWarn / (24 * time.Hour)))
+	repoNames = initial(".github,renovate-runner")
+	wfFile    = initial("renovate.yml")
+	all       = initial(false)
+	fixture   = initial("")
+	workers   = initial(6)
+	only      = initial("")
 )
+
+// initial returns a pointer to v, so that a flag variable holds its default
+// from package initialisation and not only from the moment a command binds it.
+func initial[T any](v T) *T { return &v }
 
 type wfEntry struct {
 	ID        int64  `json:"id"`
@@ -525,9 +549,61 @@ func stamp(t time.Time) string {
 // a guard somebody will go around.
 func init() { fleet.Guard = readOnly }
 
+const longHelp = `Reports every Renovate runner in the fleet that has gone quiet: a schedule
+behind its own cron, a repository GitHub is about to disable for inactivity, or
+a coverage gap no runner answers for.
+
+⛔ IT IS DRIVEN FROM THE ORGANISATION LIST, not the runner list. A recency check
+over runners structurally cannot see an organisation that has no runner to be
+quiet.
+
+⛔ A coverage map is a SNAPSHOT, so it carries the window it was read in: a
+runner can be retired between two calls of one pass, and the report says when
+the snapshot closed and whether it moved.
+
+A full pass is about 1300 API calls — a quarter of the hourly budget this fleet
+shares — so --orgs narrows it, and --fixture reads a recorded JSON instead and
+makes no network call at all.
+
+Exit status: 0 nothing to report, 1 something is quiet, 2 the pass could not be
+made.`
+
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	flag.Parse()
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command.
+//
+// ⛔ It binds the package-level flag POINTERS directly, which is why eight
+// hundred lines below are untouched: pflag's DurationVar and friends take a
+// *time.Duration, so the variables thirty call sites already dereference are
+// the ones the parser fills.
+func RootCmd() *cobra.Command {
+	c := cli.New("quietscan [flags]",
+		"Renovate runners that have gone quiet, and the coverage gaps nobody answers for", longHelp)
+	c.Args = cobra.NoArgs
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(sweep(cli.Out(cmd), cli.Err(cmd)))
+	}
+	f := c.Flags()
+	f.DurationVar(slack, "slack", quiet.DefaultSlack,
+		"how far behind its own cron a run may be before the runner counts as stopped")
+	f.IntVar(pushWarn, "push-warn", int(quiet.DefaultPushWarn/(24*time.Hour)),
+		"warn when the runner repository has had no push for this many days")
+	f.StringVar(repoNames, "repos", ".github,renovate-runner",
+		"comma-separated repositories, in each organisation, that may hold a runner")
+	f.StringVar(wfFile, "workflow", "renovate.yml", "runner workflow file name")
+	f.BoolVar(all, "all", false, "list every runner, not only the findings")
+	f.StringVar(fixture, "fixture", "",
+		"read runners from a JSON file instead of the API; makes no network call at all")
+	f.IntVar(workers, "workers", 6, "concurrent API readers")
+	f.StringVar(only, "orgs", "",
+		"comma-separated organisations to check instead of the whole fleet")
+	return c
+}
+
+func sweep(stdout, stderr io.Writer) int {
 	started := time.Now().UTC()
 	now := started
 	var runners []quiet.Runner
@@ -537,11 +613,11 @@ func main() {
 		var err error
 		runners, now, app, err = loadFixture(*fixture)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "fixture:", err)
-			os.Exit(2)
+			fmt.Fprintln(stderr, "fixture:", err)
+			return 2
 		}
 		started = now
-		fmt.Printf("fixture: %s   as of %s\n", *fixture, stamp(now))
+		fmt.Fprintf(stdout, "fixture: %s   as of %s\n", *fixture, stamp(now))
 	} else {
 		var list []string
 		if *only != "" {
@@ -551,12 +627,12 @@ func main() {
 				}
 			}
 			sort.Strings(list)
-			fmt.Printf("NARROWED to %d organisations: filters and Apps outside this list are NOT read, so no gap can be established here.\n", len(list))
+			fmt.Fprintf(stdout, "NARROWED to %d organisations: filters and Apps outside this list are NOT read, so no gap can be established here.\n", len(list))
 		} else {
 			var err error
 			if list, err = orgs(); err != nil {
-				fmt.Fprintln(os.Stderr, "orgs:", err)
-				os.Exit(2)
+				fmt.Fprintln(stderr, "orgs:", err)
+				return 2
 			}
 		}
 		// Driven from the ORGANISATION list, not the runner list. A recency
@@ -564,7 +640,7 @@ func main() {
 		// no runner to be quiet.
 		// A coverage map is a snapshot, so it carries the window it was read
 		// in. A runner can be retired between two calls of one pass.
-		fmt.Printf("orgs: %d   reading from %s\n", len(list), stamp(started))
+		fmt.Fprintf(stdout, "orgs: %d   reading from %s\n", len(list), stamp(started))
 		per := make([][]quiet.Runner, len(list))
 		sem := make(chan struct{}, *workers)
 		var wg sync.WaitGroup
@@ -643,11 +719,11 @@ func main() {
 		}
 	}
 	if *fixture == "" {
-		fmt.Printf("runners: %d (%d shared)   API calls: %d   snapshot closed %s\n",
+		fmt.Fprintf(stdout, "runners: %d (%d shared)   API calls: %d   snapshot closed %s\n",
 			withRunner, shared, calls.n, stamp(time.Now().UTC()))
 	}
 	for _, m := range moved {
-		fmt.Printf("  COVERAGE SNAPSHOT MOVED: %s -- coverage re-resolved\n", m)
+		fmt.Fprintf(stdout, "  COVERAGE SNAPSHOT MOVED: %s -- coverage re-resolved\n", m)
 	}
 
 	// The observed lag, every pass. The threshold below is a measurement that
@@ -655,23 +731,23 @@ func main() {
 	// behind when this was written and still growing, and a slack that stops
 	// covering it pages on a fleet that is working perfectly.
 	if msg := budgetExhausted(); msg != "" {
-		fmt.Printf("\n! RATE LIMITED DURING THIS PASS -- the verdicts below are INCOMPLETE.\n"+
+		fmt.Fprintf(stdout, "\n! RATE LIMITED DURING THIS PASS -- the verdicts below are INCOMPLETE.\n"+
 			"  %s\n"+
 			"  Every refused call reads as `unreadable`, never as a stopped runner. Re-run when the budget refills.\n", msg)
 	}
 
 	l := quiet.Lags(results)
 	if l.N > 0 {
-		fmt.Printf("scheduler lag behind cron (n=%d): min %s  median %s  p90 %s  max %s   [slack %s]\n",
+		fmt.Fprintf(stdout, "scheduler lag behind cron (n=%d): min %s  median %s  p90 %s  max %s   [slack %s]\n",
 			l.N, hm(l.Min), hm(l.Median), hm(l.P90), hm(l.Max), hm(*slack))
 		if l.Max > *slack*3/4 {
-			fmt.Printf("  NOTE: the worst observed lag is past three quarters of the slack; raise -slack before it pages on healthy runners.\n")
+			fmt.Fprintf(stdout, "  NOTE: the worst observed lag is past three quarters of the slack; raise --slack before it pages on healthy runners.\n")
 		}
 	}
 
 	// Never a bare total: four verdicts are four different fixes, and one
 	// number hides all four.
-	fmt.Printf("\nPAGES: %d\n", pages)
+	fmt.Fprintf(stdout, "\nPAGES: %d\n", pages)
 	order := []struct {
 		v   quiet.Verdict
 		fix string
@@ -701,11 +777,11 @@ func main() {
 		if o.v.Pages() {
 			mark = "!"
 		}
-		fmt.Printf("\n%s %-20s %d", mark, string(o.v), len(rs))
+		fmt.Fprintf(stdout, "\n%s %-20s %d", mark, string(o.v), len(rs))
 		if o.fix != "" {
-			fmt.Printf("   -- %s", o.fix)
+			fmt.Fprintf(stdout, "   -- %s", o.fix)
 		}
-		fmt.Println()
+		fmt.Fprintln(stdout)
 		// Healthy and covered are counts, not lists, unless asked for. Two
 		// hundred lines saying "this is fine" is how the one line that is not
 		// gets scrolled past.
@@ -713,7 +789,7 @@ func main() {
 			continue
 		}
 		for _, r := range rs {
-			fmt.Println(strings.TrimRight(fmt.Sprintf("    %-42s %s", label(r), detail(r)), " "))
+			fmt.Fprintln(stdout, strings.TrimRight(fmt.Sprintf("    %-42s %s", label(r), detail(r)), " "))
 		}
 	}
 
@@ -735,7 +811,7 @@ func main() {
 	}
 	if len(idle) > 0 {
 		sort.Slice(idle, func(i, j int) bool { return idle[i].DaysIdle > idle[j].DaysIdle })
-		fmt.Printf("\n! runners going quiet (no push for %d+ days; GitHub disables the schedule at %d): %d\n",
+		fmt.Fprintf(stdout, "\n! runners going quiet (no push for %d+ days; GitHub disables the schedule at %d): %d\n",
 			*pushWarn, int(quiet.InactivityLimit/(24*time.Hour)), len(idle))
 		for _, r := range idle {
 			line := fmt.Sprintf("    %-42s %.0f days idle, latches %s", label(r), r.DaysIdle,
@@ -743,7 +819,7 @@ func main() {
 			if n := coveredCount(results, r); n > 0 {
 				line += fmt.Sprintf("   -- would silence %d organisations", n)
 			}
-			fmt.Println(line)
+			fmt.Fprintln(stdout, line)
 		}
 	}
 
@@ -756,15 +832,16 @@ func main() {
 		}
 	}
 	if len(opaque) > 0 {
-		fmt.Printf("\n  runners whose coverage could not be read: %d\n", len(opaque))
+		fmt.Fprintf(stdout, "\n  runners whose coverage could not be read: %d\n", len(opaque))
 		for _, r := range opaque {
-			fmt.Printf("    %-42s %s\n", label(r), r.FilterNote)
+			fmt.Fprintf(stdout, "    %-42s %s\n", label(r), r.FilterNote)
 		}
 	}
 
 	if pages > 0 {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 // label names the runner, not the organisation -- but only when there IS one.
