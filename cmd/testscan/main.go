@@ -43,9 +43,8 @@
 package main
 
 import (
-	"flag"
 	"fmt"
-	"github.com/go-fleettools/fleettools/internal/checkout"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -54,7 +53,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-fleettools/fleettools/internal/checkout"
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 // goTestRE finds a `go test` invocation and captures the rest of its line.
@@ -130,19 +132,72 @@ type finding struct {
 // covered reports whether CI runs the tests of every package that has them.
 func (f finding) covered() bool { return f.catchAll || f.testedPkgs >= f.withTests }
 
+const longHelp = `Reports every repository whose CI does not run all of its tests: packages with
+tests that no workflow reaches.
+
+⛔ A FINDING IS CONFIRMED TO BE OURS before it is printed. Six of nineteen were
+not, on 2026-09-27: four forks, one checkout GitHub does not have, and
+upstream's own project in upstream's own account.
+
+⛔ And a finding is re-derived against the remote default when the checkout is
+behind, because a finding about code that no longer exists is not a finding.
+With --fetch=false the report says, per repository, that it may describe code
+that is gone.
+
+--remote reads origin/HEAD instead of the working tree.
+
+Exit status: 0 the scan ran, 1 there was nothing to scan.`
+
+// scanOptions are the flags, gathered so that the command can bind them and the
+// survey can read them.
+type scanOptions struct {
+	root, only           string
+	doFetch, all, remote bool
+}
+
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	root := flag.String("root", defaultRoot(), "directory holding org/repo checkouts")
-	doFetch := flag.Bool("fetch", true, "git fetch each repository about to be reported, so its distance is measured and not remembered")
-	only := flag.String("repo", "", "scan a single org/repo, verbosely")
-	all := flag.Bool("all", false, "also list repositories whose CI covers everything")
-	remote := flag.Bool("remote", false, "read origin/HEAD instead of the working tree (fetch first)")
-	flag.Parse()
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command. Tests drive it through run, below.
+//
+// ⛔ THIS COMMAND HAD NO run() AT ALL: it parsed os.Args in place through the
+// package-level flag.Parse() and wrote to os.Stdout and os.Stderr from inside
+// main, so nothing in it could be driven by a test.
+func RootCmd() *cobra.Command {
+	var o scanOptions
+	c := cli.New("testscan [flags]",
+		"Repositories whose CI does not run all of their tests", longHelp)
+	c.Args = cobra.NoArgs
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(survey(cli.Out(cmd), cli.Err(cmd), &o))
+	}
+	f := c.Flags()
+	f.StringVar(&o.root, "root", defaultRoot(), "directory holding org/repo checkouts")
+	f.BoolVar(&o.doFetch, "fetch", true,
+		"git fetch each repository about to be reported, so its distance is measured and not remembered")
+	f.StringVar(&o.only, "repo", "", "scan a single org/repo, verbosely")
+	f.BoolVar(&o.all, "all", false, "also list repositories whose CI covers everything")
+	f.BoolVar(&o.remote, "remote", false, "read origin/HEAD instead of the working tree (fetch first)")
+	return c
+}
+
+// run drives the command and returns its status, for a test.
+func run(args []string, out, errOut io.Writer) int {
+	return cli.Drive(RootCmd(), args, out, errOut)
+}
+
+func survey(stdout, stderr io.Writer, o *scanOptions) int {
+	// The scan below reads these through pointers, as it did when they came
+	// from the global flag set. Rebinding the names leaves it unchanged.
+	root, only := &o.root, &o.only
+	doFetch, all, remote := &o.doFetch, &o.all, &o.remote
 
 	repos, err := findRepos(*root, *only)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "testscan:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "testscan:", err)
+		return 1
 	}
 
 	var found []finding
@@ -224,13 +279,13 @@ func main() {
 	}
 	found = survived
 	if vanished > 0 {
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintf(stderr,
 			"\n%d finding(s) dropped: fetched and re-derived, and no longer true\n"+
 				"  (%d checkout(s) were re-scanned against their remote default).\n", vanished, rederived)
 	}
 
 	for _, f := range found {
-		fmt.Print(render(f))
+		fmt.Fprint(stdout, render(f))
 		// ⛔ Per FINDING, not as an aggregate at the bottom. The aggregate was
 		// there and it said nothing useful: it counted clones that had not
 		// FETCHED in a week, and every one of the five wrong findings on
@@ -243,31 +298,32 @@ func main() {
 			// the finding had already been re-derived and still held. A reader
 			// who follows the first does work the tool has done.
 			if *doFetch {
-				fmt.Printf("    this checkout is %d commit(s) behind — re-derived against the remote "+
+				fmt.Fprintf(stdout, "    this checkout is %d commit(s) behind — re-derived against the remote "+
 					"default, and it still holds.\n", f.behind)
 			} else {
-				fmt.Printf("    ⚠ this checkout is %d commit(s) behind its remote and -fetch=false, so "+
+				fmt.Fprintf(stdout, "    ⚠ this checkout is %d commit(s) behind its remote and --fetch=false, so "+
 					"the finding above describes code that may no longer exist.\n", f.behind)
 			}
 		}
 		if *only != "" {
-			fmt.Printf("    read %d workflow file(s), %d bytes\n", f.workflows, f.bytesRead)
+			fmt.Fprintf(stdout, "    read %d workflow file(s), %d bytes\n", f.workflows, f.bytesRead)
 			if f.tagged > 0 {
-				fmt.Printf("    NOTE: %d test file(s) behind a build tag; go test ./... does not compile those\n", f.tagged)
+				fmt.Fprintf(stdout, "    NOTE: %d test file(s) behind a build tag; go test ./... does not compile those\n", f.tagged)
 			}
 			if f.viaScript {
-				fmt.Println("    NOTE: a workflow calls a script; what it runs is not visible here")
+				fmt.Fprintln(stdout, "    NOTE: a workflow calls a script; what it runs is not visible here")
 			}
 		}
 	}
 
-	reportDropped(dropped)
+	reportDropped(stderr, dropped)
 
-	fmt.Fprint(os.Stderr, checkout.StalenessWarning(ages, *doFetch))
+	fmt.Fprint(stderr, checkout.StalenessWarning(ages, *doFetch))
 
 	// A scan that cannot read reports zero, and zero reads as good news.
-	fmt.Fprintf(os.Stderr, "\n%d repositories scanned, %d have tests, %d run them all in CI, %d do not\n",
+	fmt.Fprintf(stderr, "\n%d repositories scanned, %d have tests, %d run them all in CI, %d do not\n",
 		scanned, withTests, ok, len(found)-boolCount(*all, ok))
+	return 0
 }
 
 func boolCount(listed bool, n int) int {
