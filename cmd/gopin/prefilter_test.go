@@ -180,3 +180,35 @@ func TestPrefilterQuotaDuringBisection(t *testing.T) {
 		t.Fatalf("code=%d %s", code, errs)
 	}
 }
+
+func TestNoAliasAndTheElsewhereReport(t *testing.T) {
+	w := newWorld(t)
+	files := map[string]map[string]string{
+		"o/alias":  {"ci.yml": "          go-version: stable\n"},
+		"o/both":   {"ci.yml": "          go-version: stable\n          go-version: '1.27.2'\n"},
+		"o/matrix": {"ci.yml": "        go: ['1.26.4', '1.27.2']\n"},
+		"o/env":    {"ci.yml": "env:\n  GO_VERSION: 1.27.2\n"},
+	}
+	var calls int
+	ghRaw = graphqlStub(files, nil, false, &calls)
+	list := w.list("o/alias", "o/both", "o/matrix", "o/env")
+	var o, e strings.Builder
+	if code := run([]string{"-from", "1.27.2", "-version", "1.27.3", "-no-alias", "-prefilter", "-list", list}, strings.NewReader(""), &o, &e); code != 0 {
+		t.Fatalf("code=%d %s", code, e.String())
+	}
+	if strings.Fields(o.String())[0] != "o/both" || len(strings.Fields(o.String())) != 1 {
+		t.Errorf("candidates = %q; want only o/both (an alias alone is not moved)", o.String())
+	}
+	for _, want := range []string{"elsewhere o/matrix", "elsewhere o/env", "2 naming 1.27.2 elsewhere"} {
+		if !strings.Contains(e.String(), want) {
+			t.Errorf("missing %q in %s", want, e.String())
+		}
+	}
+	// the sweep side: o/both is moved but its alias is left as it is
+	w.files["o/both"] = map[string]string{".github/workflows/ci.yml": "          go-version: stable\n          go-version: '1.27.2'\n"}
+	ghRaw = w.gh
+	code, out, _ := w.run("-from", "1.27.2", "-version", "1.27.3", "-no-alias", "-list", w.list("o/both"), "-apply", "-pause", "0s")
+	if code != 0 || !strings.Contains(out, "REPIN   o/both") || strings.Contains(out, "ALIAS") {
+		t.Fatalf("code=%d\n%s", code, out)
+	}
+}
