@@ -1,0 +1,100 @@
+# The decoders of LOCAL bytes: compressed streams, filesystem images, image
+# formats. Swept by .github/workflows/vuln.yml on `workflow_dispatch` ONLY --
+# there is no cron over this list, and that is a measured decision rather than
+# an omission.
+#
+# ⛔ WHY NOT NIGHTLY: GitHub rate limits the git transport. Measured 2026-10-31,
+# same binary, same toolchain, runs an hour apart:
+#
+#   13 repositories (vulnscan-tools.txt)     read clean, twice
+#   22 repositories (tools + exposed)        22 scanned, 0 UNREAD
+#   58 repositories (tools' population + all of these)
+#                                            14 of 58 UNREAD, every failure a
+#                                            `git clone … 403` -- and my own
+#                                            push was refused the same way
+#
+# UNREAD is not clean: vulnscan exits 2, so a nightly sweep of this list would
+# make the lane RED for a reason that is the sweep's own and not any
+# repository's -- the exact shape of alarm this workflow was written to refuse.
+#
+# ⛔ AND SLICING IT ACROSS THE WEEK WAS THE WRONG ANSWER. It keeps everything in
+# view and reintroduces the latency the clock exists to remove: an advisory
+# published on Monday would reach Friday's slice on Friday, and the founding
+# case here is two advisories found 2 and 4 days late.
+#
+# So the nightly budget goes to EXPOSURE (see vulnscan-exposed.txt), which is
+# where reachability actually was: both repositories that reached an advisory
+# among all 58 were network-facing. These decode a byte slice somebody already
+# has, which is a smaller surface and no transport dependency.
+#
+# ⛔ WHAT WOULD MAKE THEM NIGHTLY, so the next reader does not re-derive it:
+# authenticated clones (which gives up the no-credential property this job is
+# built on -- it makes no REST call per repository, so it cannot starve the
+# budget the Renovate runners spend from), or a run that stays under roughly
+# two dozen clones. `-state` with `-retry-unread` belongs INSIDE whichever is
+# chosen -- it makes one run resumable, 14 retries instead of 58 -- but it must
+# NOT be carried between nights: a repository that was CLEAN yesterday is not
+# clean today if an advisory was published since. The code does not change; the
+# database does, which is the whole reason this runs on a clock.
+#
+# ⛔ RUN IT BY HAND after any x/net, x/crypto or stdlib advisory lands, and
+# before trusting a silence from it. A dispatch-only lane reports nothing when
+# nobody asks, and nothing is not green.
+#
+# Last full pass: 2026-10-31, 58 scanned, 56 clean, 2 reaching GO-2026-6860 --
+# both network-facing, both now fixed, and both now in vulnscan-exposed.txt.
+
+# compressed streams
+go-compressions/adc
+go-compressions/appleoracle
+go-compressions/b3sum
+go-compressions/bzip2
+go-compressions/compress
+go-compressions/deflate
+go-compressions/lz4
+go-compressions/lz4c
+go-compressions/lzfse
+go-compressions/lzfsec
+go-compressions/lzip
+go-compressions/lzo
+
+# filesystem images and archives, read from a file
+go-filesystems/apfs
+go-filesystems/btrfs
+go-filesystems/cab
+go-filesystems/cpio
+go-filesystems/detect
+go-filesystems/exfat
+go-filesystems/ext4
+go-filesystems/fat32
+go-filesystems/ffs
+go-filesystems/hfsplus
+go-filesystems/hostcopy
+go-filesystems/interface
+go-filesystems/iso9660
+go-filesystems/ntfs
+go-filesystems/oci
+go-filesystems/osfs
+go-filesystems/overlay
+go-filesystems/playground
+go-filesystems/rar
+go-filesystems/rpm
+go-filesystems/sevenzip
+go-filesystems/squashfs
+go-filesystems/ufs
+go-filesystems/uefi
+go-filesystems/unarchive
+go-filesystems/warc
+go-filesystems/xar
+go-filesystems/xfs
+go-filesystems/zfs
+
+# image decoders
+go-images/depth
+go-images/gif
+go-images/images
+go-images/jpeg
+go-images/jpeg2000
+go-images/png
+go-images/psd
+go-images/webp

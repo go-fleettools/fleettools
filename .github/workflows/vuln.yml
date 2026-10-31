@@ -158,3 +158,104 @@ jobs:
           name: vulnscan-report
           path: /tmp/vulnscan.json
           if-no-files-found: warn
+
+  # ⛔ A JOB OF ITS OWN, AND THAT IS THE WHOLE REASON FOR IT. A second list in
+  # the job above would be a second STEP, and a step after a failing one is
+  # SKIPPED -- so every night the tools sweep went red, the decoders would go
+  # unswept and silently. Two jobs fail independently, and each name says what
+  # it swept. The duplicated setup is four lines; what must not diverge is the
+  # judging, and that is `vulnscan` itself, one built binary.
+  #
+  # ⛔ A DIFFERENT QUESTION FROM THE LIST ABOVE. That one is about BLAST RADIUS
+  # -- what holds the token or gates a push. This is about EXPOSURE: a network
+  # surface, and untrusted bytes arriving over it. Keeping them apart means
+  # either can be dropped without touching the other.
+  #
+  # WHAT CHOOSING THIS POPULATION FOUND on 2026-10-31, the first sweep anyone
+  # had run over the 58 Go repositories of go-webengine, go-compressions,
+  # go-filesystems and go-images: 56 clean and 2 REACHING GO-2026-6860
+  # (golang.org/x/net, fixed in v0.62.0) -- in go-webengine/browserproxy
+  # through `engineRender -> Engine.RenderWithLinks -> html.Parse`, the actual
+  # job of the program. x/net was `// indirect` there, so no dependency manager
+  # had a version string to compare and nothing was watching it at all. BOTH
+  # were network-facing, which is why this list is the network-facing ones.
+  #
+  # ⛔ AND WHY NOT ALL 58 NIGHTLY: the git transport is rate limited too.
+  # Measured the same evening -- 13 repositories read clean twice, these 22
+  # (tools + exposed) scanned with 0 UNREAD, and 58 came back with 14 UNREAD,
+  # every failure a `git clone … 403`. UNREAD is not clean, so the 58 would
+  # have made this lane red for a reason that is the sweep's own. The local-byte
+  # decoders live in vulnscan-decoders.txt and run on request; slicing them
+  # across the week was rejected because it reintroduces exactly the latency a
+  # clock exists to remove.
+  exposed:
+    name: vulnscan over the repositories with a network surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go version
+
+      - name: build the scanner and the judge it drives
+        run: |
+          set -eu
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go build -o /tmp/vulnscan ./cmd/vulnscan
+
+      # ⛔ THE INSTRUMENT STATES ITS OWN COMPETENCE FIRST, here too. A scan that
+      # cannot read reports zero findings, which is indistinguishable from a
+      # clean fleet -- so a binary that gets one of the three recorded streams
+      # wrong must stop the sweep rather than report on 50 repositories.
+      - name: the scanner must see what it is looking for
+        run: /tmp/vulnscan -selftest
+
+      # ⛔ THE ONE THING BELOW THAT NO OTHER EVENT EXERCISES IS THE PATH. The
+      # binary is proven by -selftest above and the -list mechanism by the smoke
+      # step in the job beside this one, so what is left to get wrong here is
+      # the file's name -- and a typo in it would surface at 06:41 and nowhere
+      # else. This costs nothing and fails loudly on every event.
+      - name: both lists this job names must exist and not be empty
+        run: |
+          set -eu
+          test -s .github/vulnscan-exposed.txt
+          test -s .github/vulnscan-decoders.txt
+
+      # ⛔ ONE RUN, NO RETRY, AND THAT IS DELIBERATE. The obvious shape --
+      # `vulnscan … || vulnscan … -retry-unread` -- is a hole I wrote and then
+      # removed: vulnscan exits 1 for a REACHABLE advisory and 2 for UNREAD, so
+      # a `||` retries on both, and the second run (which only reclones the
+      # UNREAD ones, of which there are none) exits 0 and turns a real finding
+      # GREEN. Distinguishing the two in shell is exactly the kind of logic that
+      # does not belong in a lane; a clone refused with 403 should be retried
+      # inside cmd/vulnscan, which is a follow-up and not this change.
+      #
+      # -state is still passed, so a person reading a red run can finish it with
+      # `-retry-unread` by hand. It lives under /tmp and is NOT carried between
+      # runs on purpose: a repository that was CLEAN yesterday is not clean today
+      # if an advisory was published since. The code does not change, the
+      # database does, which is the whole reason this runs on a clock.
+      - name: the network-facing repositories, swept on a clock
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: /tmp/vulnscan -list .github/vulnscan-exposed.txt -go "$(go env GOVERSION)" -state /tmp/exposed.state -json /tmp/vulnscan-exposed.json
+
+      # ⛔ THE LOCAL-BYTE DECODERS RUN ON REQUEST ONLY, never on the cron: 58
+      # clones a night trips the git transport limit (14 of 58 UNREAD, measured
+      # 2026-10-31), and UNREAD is not clean. Run it by hand after an x/net,
+      # x/crypto or standard-library advisory lands -- and remember that a lane
+      # nobody dispatches reports nothing, which is not green.
+      - name: the local-byte decoders, on request
+        if: github.event_name == 'workflow_dispatch'
+        run: /tmp/vulnscan -list .github/vulnscan-decoders.txt -go "$(go env GOVERSION)" -state /tmp/decoders.state -json /tmp/vulnscan-decoders.json
+
+      - name: keep the reports even when a sweep failed
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@v7
+        with:
+          name: vulnscan-exposed-report
+          path: |
+            /tmp/vulnscan-exposed.json
+            /tmp/vulnscan-decoders.json
+          if-no-files-found: warn
