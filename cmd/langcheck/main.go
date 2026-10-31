@@ -58,7 +58,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"go/parser"
 	"go/token"
@@ -70,8 +69,23 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Reports the blocks of prose in a repository that read as French, so that
+GitHub-facing text stays English.
+
+A block is reported when at least --min French signals appear in it: one signal
+is a coincidence, two is a sentence.
+
+⛔ Asking for help is not a usage error. A command that answered 2 to -h would be
+reported as broken by whatever checks exit statuses, and a fleet tool that RAN
+on -h has already cost a full sweep here. cobra answers -h before RunE.
+
+Exit status: 0 every block reads as English, 1 some read as French, 2 the check
+could not be made.`
 
 // french holds function words that are French and are NOT English words.
 //
@@ -151,26 +165,37 @@ func main() {
 	// ⛔ FIRST, because a binary built last week answers for last week's rules
 	// and nothing in its output would say so.
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("langcheck", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	min := flags.Int("min", 2, "how many French signals in one block before it is reported")
-	verbose := flags.Bool("v", false, "print the signals that matched and the first line of the block")
-	// ⛔ Asking for help is not a usage error, which is why this goes through
-	// fleet.ParseFlags: a command that answered 2 to -h would be reported as
-	// broken by whatever checks exit statuses, and a fleet tool that RAN on -h
-	// has already cost a full sweep here.
-	if code, ok := fleet.ParseFlags(flags, args); !ok {
-		return code
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		min     int
+		verbose bool
+	)
+	c := cli.New("langcheck [flags] [DIR...]",
+		"Blocks of prose that read as French rather than English", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(sweep(cli.Out(cmd), cli.Err(cmd), min, verbose, args))
 	}
-	if *min < 1 {
-		fmt.Fprintln(stderr, "langcheck: -min must be at least 1; a threshold of zero reports every block")
+	f := c.Flags()
+	f.IntVar(&min, "min", 2, "how many French signals in one block before it is reported")
+	f.BoolVarP(&verbose, "verbose", "v", false,
+		"print the signals that matched and the first line of the block")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), args, stdout, stderr)
+}
+
+func sweep(stdout, stderr io.Writer, min int, verbose bool, roots []string) int {
+	if min < 1 {
+		fmt.Fprintln(stderr, "langcheck: --min must be at least 1; a threshold of zero reports every block")
 		return 2
 	}
-	roots := flags.Args()
 	if len(roots) == 0 {
 		roots = []string{"."}
 	}
@@ -178,7 +203,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var found []Finding
 	files, blocks := 0, 0
 	for _, root := range roots {
-		f, b, got, err := walk(root, *min)
+		f, b, got, err := walk(root, min)
 		if err != nil {
 			fmt.Fprintf(stderr, "langcheck: %v\n", err)
 			return 2
@@ -202,7 +227,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return found[i].Line < found[j].Line
 	})
 	for _, f := range found {
-		if *verbose {
+		if verbose {
 			fmt.Fprintf(stdout, "%s:%d: %s — %s\n", f.File, f.Line,
 				strings.Join(f.Words, " "), firstLine(f.Text))
 		} else {

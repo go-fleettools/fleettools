@@ -29,7 +29,6 @@ import (
 	"compress/bzip2"
 	"compress/gzip"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -39,8 +38,20 @@ import (
 
 	"github.com/ulikunitz/xz"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Extracts every archive in a directory, each into its own subdirectory, and
+REFUSES an entry whose path would escape that subdirectory.
+
+An entry's declared size is a number the archive chose, so it is bounded: ten
+gigabytes is past anything in a downloads directory and still refuses a
+decompression bomb outright.
+
+Exit status: 0 everything extracted or was already there, 1 an archive was
+refused or failed, 2 the directory could not be read.`
 
 // maxEntrySize bounds one entry, because a declared size is a number the
 // archive chose. Ten gigabytes is past anything in a downloads directory and
@@ -49,24 +60,42 @@ const maxEntrySize = 10 << 30
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("unarc", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	root := fs.String("root", ".", "the directory to read archives from")
-	out := fs.String("out", "", "where to extract (default <root>/extracted)")
-	dry := fs.Bool("n", false, "say what would happen and extract nothing")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		root string
+		out  string
+		dry  bool
+	)
+	c := cli.New("unarc [flags]", "Extract every archive in a directory, safely", longHelp)
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(unpack(cli.Out(cmd), cli.Err(cmd), root, out, dry))
 	}
-	dest := *out
+	f := c.Flags()
+	f.StringVar(&root, "root", ".", "the directory to read archives from")
+	f.StringVar(&out, "out", "", "where to extract (default <root>/extracted)")
+	// --dry-run keeps the old -n as its shorthand, so every call site spelling
+	// -n reaches it unchanged: pflag accepts a one-letter flag with one dash,
+	// and only the longer names moved.
+	f.BoolVarP(&dry, "dry-run", "n", false, "say what would happen and extract nothing")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), args, stdout, stderr)
+}
+
+func unpack(stdout, stderr io.Writer, root, out string, dry bool) int {
+	dest := out
 	if dest == "" {
-		dest = filepath.Join(*root, "extracted")
+		dest = filepath.Join(root, "extracted")
 	}
 
-	entries, err := os.ReadDir(*root)
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		fmt.Fprintf(stderr, "unarc: %v\n", err)
 		return 1
@@ -82,7 +111,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if kind == kindNone {
 			continue
 		}
-		src := filepath.Join(*root, name)
+		src := filepath.Join(root, name)
 		target := filepath.Join(dest, stem(name))
 
 		if kind == kindExternal {
@@ -95,7 +124,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			skipped++
 			continue
 		}
-		if *dry {
+		if dry {
 			fmt.Fprintf(stdout, "WOULD    %s -> %s\n", name, target)
 			continue
 		}

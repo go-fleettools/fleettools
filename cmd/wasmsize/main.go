@@ -19,78 +19,96 @@ package main
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
-func main() {
-	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
-}
+const longHelp = `Prints the size of each section of a WebAssembly module, then the code of each
+package (or module) of a Go build, largest first, from the function bodies of
+the code section and the function names of the "name" section.
 
-func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("wasmsize", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	deps := fs.String("deps", "", "file with the build's package paths, one per line (`go list -deps`); required")
-	by := fs.String("by", "package", "group by package or module")
-	top := fs.Int("top", 30, "print the N largest groups (0: all)")
-	match := fs.String("match", "", "print only groups whose name contains this")
-	fs.Usage = func() {
-		fmt.Fprint(stderr, `usage: wasmsize -deps FILE [-by package|module] [-top N] [-match S] file.wasm
-
-Prints the size of each section of a WebAssembly module, then the code of
-each package (or module) of a Go build, largest first, from the function
-bodies of the code section and the function names of the "name" section.
-
-Build the module WITHOUT -ldflags=-s, which drops the names, and list the
-same build's packages:
+Build the module WITHOUT -ldflags=-s, which drops the names, and list the same
+build's packages:
 
     GOOS=js GOARCH=wasm go build -o app.wasm ./cmd/app
     GOOS=js GOARCH=wasm go list -deps \
         -f '{{.ImportPath}} {{with .Module}}{{.Path}}{{end}}' ./cmd/app > deps.txt
-    wasmsize -deps deps.txt -by module app.wasm
+    wasmsize --deps deps.txt --by module app.wasm
 
-The module column is optional; without it -by module guesses modules from
-the first three path elements (wrong for google.golang.org/protobuf).
-Use the same GOOS, GOARCH and -tags for go list as for the build.
+The module column is optional; without it --by module guesses modules from the
+first three path elements (wrong for google.golang.org/protobuf). Use the same
+GOOS, GOARCH and -tags for go list as for the build.
 
-Exits 2 on an error.
-`)
+Exit status: 0 the module was measured, 2 it could not be — a module built with
+-ldflags=-s carries no names, and attributing its code would be a guess.`
+
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		deps  string
+		by    string
+		top   int
+		match string
+	)
+	c := cli.New("wasmsize --deps FILE [flags] file.wasm",
+		"Where a WebAssembly module's bytes went, by package or module", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(measure(cli.Out(cmd), cli.Err(cmd), deps, by, top, match, args))
 	}
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
-	if fs.NArg() != 1 || *deps == "" || (*by != "package" && *by != "module") {
-		fs.Usage()
+	f := c.Flags()
+	f.StringVar(&deps, "deps", "", "file with the build's package paths, one per line (`go list -deps`); required")
+	f.StringVar(&by, "by", "package", "group by package or module")
+	f.IntVar(&top, "top", 30, "print the N largest groups (0: all)")
+	f.StringVar(&match, "match", "", "print only groups whose name contains this")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), args, stdout, stderr)
+}
+
+func measure(stdout, stderr io.Writer, deps, by string, top int, match string, args []string) int {
+	if len(args) != 1 || deps == "" || (by != "package" && by != "module") {
+		fmt.Fprintln(stderr, "usage: wasmsize --deps FILE [--by package|module] "+
+			"[--top N] [--match S] file.wasm")
 		return 2
 	}
-	b, err := os.ReadFile(fs.Arg(0))
+	b, err := os.ReadFile(args[0])
 	if err != nil {
 		fmt.Fprintln(stderr, "wasmsize:", err)
 		return 2
 	}
 	m, err := parse(b)
 	if err != nil {
-		fmt.Fprintf(stderr, "wasmsize: %s: %v\n", fs.Arg(0), err)
+		fmt.Fprintf(stderr, "wasmsize: %s: %v\n", args[0], err)
 		return 2
 	}
+	// ⛔ No names means no attribution. Printing the section sizes with a
+	// silent zero per package would read as "every package is tiny".
 	if len(m.names) == 0 {
-		fmt.Fprintf(stderr, "wasmsize: %s has no function names: it was built with -ldflags=-s; build it without -s to measure it\n", fs.Arg(0))
+		fmt.Fprintf(stderr, "wasmsize: %s has no function names: it was built with -ldflags=-s; build it without -s to measure it\n", args[0])
 		return 2
 	}
-	paths, err := readLines(*deps)
+	paths, err := readLines(deps)
 	if err != nil {
 		fmt.Fprintln(stderr, "wasmsize:", err)
 		return 2
 	}
 	a := newAttributor(paths)
-	report(stdout, len(b), m, a, *by == "module", *top, *match)
+	report(stdout, len(b), m, a, by == "module", top, match)
 	return 0
 }
 

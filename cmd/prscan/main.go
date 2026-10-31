@@ -6,7 +6,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -14,8 +13,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Counts open pull requests across every organisation the account owns.
+
+Organisations are batched into one search query each, so the search API sees
+about twenty calls rather than three hundred and twenty: search is rate-limited
+far more tightly than the REST API, and a per-organisation sweep spends eleven
+minutes to learn one number.
+
+Exit status: 0 the whole fleet was searched, 1 some batches could not be — the
+count printed is then a FLOOR and not a total, and the output says so.`
 
 type item struct {
 	Title  string `json:"title"`
@@ -26,24 +37,34 @@ type item struct {
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Stdout, os.Stderr, os.Args[1:]))
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var all bool
+	c := cli.New("prscan [flags]", "Open pull requests across every organisation", longHelp)
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(sweep(cli.Out(cmd), cli.Err(cmd), all))
+	}
+	c.Flags().BoolVar(&all, "all", false, "list every repository, not the busiest 25")
+	return c
+}
+
+// run keeps the signature this command's tests were written against. The
+// argument order is the test's, not Drive's, which is why the adapter exists.
+func run(stdout, stderr io.Writer, args []string) int {
+	return cli.Drive(RootCmd(), args, stdout, stderr)
 }
 
 // betweenBatches is the pause the search API wants between queries. A test
 // drives many batches and must not wait for any of them.
 var betweenBatches = 2500 * time.Millisecond
 
-// run is the whole program, so a test can drive it and read what it says.
+// sweep is the whole program, so a test can drive it and read what it says.
 // Non-zero when the sweep could not search the whole fleet: a count missing
 // whole organisations is not a count of the fleet.
-func run(stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("prscan", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	all := fs.Bool("all", false, "list every repository, not the busiest 25")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
-
+func sweep(stdout, stderr io.Writer, all bool) int {
 	orgs, err := fleet.Orgs()
 	if err != nil {
 		fmt.Fprintln(stderr, "orgs:", err)
@@ -141,8 +162,8 @@ func run(stdout, stderr io.Writer, args []string) int {
 	// that fall off the end are invisible rather than absent. -all prints
 	// them, so a sweep can be driven from this output instead of guessed at.
 	for i, e := range list {
-		if !*all && i >= 25 {
-			fmt.Fprintf(stdout, "  ... and %d more repos (-all to list them)\n", len(list)-25)
+		if !all && i >= 25 {
+			fmt.Fprintf(stdout, "  ... and %d more repos (--all to list them)\n", len(list)-25)
 			break
 		}
 		fmt.Fprintf(stdout, "  %-46s %d\n", e.repo, e.n)
