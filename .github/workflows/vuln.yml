@@ -158,3 +158,65 @@ jobs:
           name: vulnscan-report
           path: /tmp/vulnscan.json
           if-no-files-found: warn
+
+  # ⛔ A JOB OF ITS OWN, AND THAT IS THE WHOLE REASON FOR IT. A second list in
+  # the job above would be a second STEP, and a step after a failing one is
+  # SKIPPED -- so every night the tools sweep went red, the decoders would go
+  # unswept and silently. Two jobs fail independently, and each name says what
+  # it swept. The duplicated setup is four lines; what must not diverge is the
+  # judging, and that is `vulnscan` itself, one built binary.
+  #
+  # ⛔ A DIFFERENT QUESTION FROM THE LIST ABOVE. That one is about BLAST RADIUS
+  # -- what holds the token or gates a push. This is about EXPOSURE: the
+  # repositories whose job is to read bytes they did not write. Keeping them
+  # apart means either can be dropped without touching the other.
+  #
+  # WHAT CHOOSING THIS POPULATION FOUND on 2026-10-31, the first sweep anyone
+  # had run over it: 58 scanned, 0 unread, 56 clean, 2 REACHING GO-2026-6860
+  # (golang.org/x/net, fixed in v0.62.0) -- and in go-webengine/browserproxy
+  # through `engineRender -> Engine.RenderWithLinks -> html.Parse`, the actual
+  # job of the program. x/net was `// indirect` there, so no dependency manager
+  # had a version string to compare and nothing was watching it at all.
+  decoders:
+    name: vulnscan over the repositories that read untrusted bytes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go version
+
+      - name: build the scanner and the judge it drives
+        run: |
+          set -eu
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go build -o /tmp/vulnscan ./cmd/vulnscan
+
+      # ⛔ THE INSTRUMENT STATES ITS OWN COMPETENCE FIRST, here too. A scan that
+      # cannot read reports zero findings, which is indistinguishable from a
+      # clean fleet -- so a binary that gets one of the three recorded streams
+      # wrong must stop the sweep rather than report on 50 repositories.
+      - name: the scanner must see what it is looking for
+        run: /tmp/vulnscan -selftest
+
+      # ⛔ THE ONE THING BELOW THAT NO OTHER EVENT EXERCISES IS THE PATH. The
+      # binary is proven by -selftest above and the -list mechanism by the smoke
+      # step in the job beside this one, so what is left to get wrong here is
+      # the file's name -- and a typo in it would surface at 06:41 and nowhere
+      # else. This costs nothing and fails loudly on every event.
+      - name: the list this job names must exist and not be empty
+        run: test -s .github/vulnscan-decoders.txt
+
+      - name: the decoders, swept on a clock
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: /tmp/vulnscan -list .github/vulnscan-decoders.txt -go "$(go env GOVERSION)" -json /tmp/vulnscan-decoders.json
+
+      - name: keep the report even when the sweep failed
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@v7
+        with:
+          name: vulnscan-decoders-report
+          path: /tmp/vulnscan-decoders.json
+          if-no-files-found: warn
