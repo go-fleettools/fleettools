@@ -72,6 +72,50 @@ func TestAVersionFileOutsideThisRepositoryIsNotAnError(t *testing.T) {
 	}
 }
 
+// ⛔ MEASURED: ghmerge answered "GitHub's hourly budget is spent (403): it resets
+// at ..." and the sweep recorded seven pull requests RED in two minutes. A
+// budget refusal printed by prwait or ghmerge is "wait", like one from the API.
+func TestAQuotaRefusalFromGhmergeOrPrwaitIsWaitedOutNotRed(t *testing.T) {
+	w := newWorld(t)
+	w.repo("o/a", pinned272, "")
+	budget := "ghmerge: GitHub refused the merge: GitHub's hourly budget is spent (403): it resets at 23:53:50; the credential is fine"
+	replies := map[string][]struct {
+		out  string
+		code int
+	}{
+		"prwait":  {{"prwait: rate limit exceeded", 2}, {"", 0}},
+		"ghmerge": {{budget, 1}, {budget, 1}, {"", 0}},
+	}
+	base := tool
+	tool = func(name string, args ...string) (string, int) {
+		if q := replies[name]; len(q) > 0 {
+			replies[name] = q[1:]
+			return q[0].out, q[0].code
+		}
+		return base(name, args...)
+	}
+	code, out, _ := w.run("-from", "1.27.2", "-version", "1.27.3", "-list", w.list("o/a"), "-apply", "-follow", "-pause", "0s")
+	if code != 0 || !strings.Contains(out, "1 merged") || strings.Contains(out, "RED") {
+		t.Fatalf("code=%d\n%s", code, out)
+	}
+	if len(w.sleeps) < 3 {
+		t.Fatalf("sleeps = %v; want a wait per refusal", w.sleeps)
+	}
+	// ... but it gives up after the retries and says so instead of looping forever
+	replies["ghmerge"] = nil
+	tool = func(name string, args ...string) (string, int) {
+		if name == "ghmerge" {
+			return budget, 1
+		}
+		return "", 0
+	}
+	w.sleeps = nil
+	_, out, _ = w.run("-from", "1.27.2", "-version", "1.27.3", "-list", w.list("o/a"), "-apply", "-follow", "-pause", "0s", "-state", filepath.Join(t.TempDir(), "s.json"))
+	if len(w.sleeps) < quotaRetries || !strings.Contains(out, "merge refused") {
+		t.Fatalf("sleeps=%d\n%s", len(w.sleeps), out)
+	}
+}
+
 func TestStateWriteFailuresAreSurfaced(t *testing.T) {
 	dir := t.TempDir()
 	// the rename target is a directory
