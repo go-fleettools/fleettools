@@ -1,0 +1,14 @@
+# One repository, so that the sweep's command line is exercised on EVERY event
+# rather than only at 06:17.
+#
+# ⛔ It names THIS repository on purpose. The full list must not run on a pull
+# request -- an advisory in landingkit would redden a pull request that has
+# nothing to do with it -- but a command line nobody has seen work is the same
+# defect this workflow exists to fix. So every event runs the identical binary,
+# the identical flags and the identical -list mechanism over a repository whose
+# state the gate job in the same workflow is already about. A red here is about
+# this repository, which is legitimate on a pull request to it.
+#
+# ⛔ Keep it to one line. This is a smoke test of the invocation, not a second,
+# smaller policy about what gets watched.
+go-fleettools/fleettools

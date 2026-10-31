@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"go/build"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -52,17 +53,48 @@ func skipDir(name string) bool {
 	return name == "node_modules" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
 }
 
-// hasGoCode reports whether a module holds a non-test .go file of its own --
-// outside nested modules, testdata and ignored directories.
+// hasGoCode reports whether a module holds a non-test .go file THIS SCAN CAN
+// BUILD -- outside nested modules, testdata and ignored directories.
 //
 // ⛔ A go.mod IS NOT GO CODE. Hugo sites declare their theme as a Go module:
 // go-fft/docs, go-pdfkit/docs and pocketdesk/docs each have a go.mod and not
 // one .go file, and govulncheck answers "no packages matched" (exit 2). That is
 // neither a finding nor a failure to read, so such a module is not scanned, and
-// a repository made only of them is NO-GO. A module that DOES hold Go files
-// and still matches nothing (every file constrained to another GOOS) is
-// scanned, and stays UNREAD.
-func hasGoCode(modDir string) bool {
+// a repository made only of them is NO-GO.
+//
+// ⛔ AND A FILE THE BUILD EXCLUDES IS NOT CODE EITHER -- which counting .go
+// files could not tell. Measured 2026-10-31, deploying the scheduled sweep:
+// go-fleettools/landingkit came back UNREAD, and the whole reason was
+// example/kit.go and example-i18n/kit.go, which say
+//
+//	//go:build tools
+//	// This file never builds. It is here so that `go mod tidy` -- which
+//	// Renovate runs after every bump -- sees a use of the module and keeps
+//	// its requirement: a Hugo site has no Go code of its own.
+//
+// That idiom is deliberate, documented, and on every landing in this fleet, and
+// `tools` is a tag NO lane sets -- so unlike a GOOS constraint it can never be
+// satisfied by scanning something else. A repository permanently UNREAD for a
+// file that never builds is an alarm that gets read past, which is the one
+// failure a scanner may not have.
+//
+// So the question is asked of the go/build CONTEXT rather than of the filename,
+// under the scan's own GOOS and GOARCH and with no custom tags -- the context
+// govulncheck itself uses. This also settles the case the previous comment here
+// accepted and left: a module whose files are all constrained to another GOOS
+// is now named as not scanned, instead of being reported as unreadable.
+//
+// ⛔ It does NOT soften "UNREAD IS NOT CLEAN". Anything that holds a buildable
+// file and still fails to load is scanned and stays UNREAD; what changes is
+// only the case where this scan has nothing to compile at all, and the note
+// says which module and why.
+func hasGoCode(modDir, goos, goarch string) bool {
+	bc := build.Default
+	bc.GOOS, bc.GOARCH = goos, goarch
+	bc.UseAllFiles = false
+	bc.BuildTags = nil
+	bc.ToolTags = nil
+
 	found := false
 	filepath.WalkDir(modDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || found {
@@ -81,8 +113,16 @@ func hasGoCode(modDir string) bool {
 			return nil
 		}
 		if strings.HasSuffix(d.Name(), ".go") && !strings.HasSuffix(d.Name(), "_test.go") {
-			found = true
-			return filepath.SkipAll
+			// ⛔ MatchFile READS THE FILE: it applies //go:build and the
+			// _GOOS/_GOARCH name suffixes, so a file this scan cannot compile
+			// does not count. An error here means the file could not be read or
+			// its constraint could not be parsed -- which is NOT a reason to
+			// call the module empty, so it counts as code and the scan decides.
+			ok, err := bc.MatchFile(filepath.Dir(p), d.Name())
+			if err != nil || ok {
+				found = true
+				return filepath.SkipAll
+			}
 		}
 		return nil
 	})

@@ -484,3 +484,81 @@ func TestAGoModWithoutGoCodeIsNotScanned(t *testing.T) {
 		}
 	}
 }
+
+// TestAFileTheBuildExcludesIsNotCodeEither is the measured case from
+// 2026-10-31: deploying the scheduled sweep, go-fleettools/landingkit came back
+// UNREAD, and the whole reason was example/kit.go and example-i18n/kit.go,
+// each `//go:build tools` over a comment saying "This file never builds" -- the
+// idiom that keeps `go mod tidy` from dropping a Hugo site's theme requirement.
+// Counting .go files cannot tell that from code; the go/build context can.
+//
+// ⛔ BOTH DIRECTIONS, because the dangerous mistake here is the generous one. A
+// rule that called every unloadable module "empty" would silently turn UNREAD
+// into clean, which is the one thing this scanner may not do -- so acme/real is
+// in the table, and a module holding a file the scan CAN build must still be
+// scanned.
+func TestAFileTheBuildExcludesIsNotCodeEither(t *testing.T) {
+	const neverBuilds = "//go:build tools\n\n// This file never builds.\npackage site\n\nimport _ \"example.com/kit\"\n"
+	f := &fake{repos: map[string]map[string]string{
+		"acme/hugo": {"go.mod": gomod, "kit.go": neverBuilds, "hugo.toml": "title = 'x'\n", "!nocode": ""},
+		"acme/real": {"go.mod": gomod}, // the fake writes x.go: buildable, must be scanned
+	}}
+	_, rep, _ := sweep(t, f, "acme/hugo\nacme/real\n")
+	got := byRepo(rep)
+	if got["acme/hugo"].Status != NoGo {
+		t.Errorf("acme/hugo = %s (%s), want NO-GO: its only .go file is constrained to a tag no lane sets",
+			got["acme/hugo"].Status, got["acme/hugo"].Err)
+	}
+	if !strings.Contains(strings.Join(got["acme/hugo"].Notes, " "), "go.mod without Go code") {
+		t.Errorf("the skipped module was not named: %v", got["acme/hugo"].Notes)
+	}
+	if got["acme/real"].Status != Clean || len(got["acme/real"].Modules) != 1 {
+		t.Errorf("acme/real = %s, %d module scans; want CLEAN with 1 -- a buildable file must still be scanned",
+			got["acme/real"].Status, len(got["acme/real"].Modules))
+	}
+}
+
+// TestAModuleIsSkippedOnlyForTheGOOSThatCannotBuildIt: buildability belongs to
+// the pair (module, GOOS), not to the module. The previous rule asked once per
+// module, so a module whose files are all constrained to another GOOS was
+// scanned and came back UNREAD -- for a reason that was the sweep's choice of
+// GOOS, not anything about the repository.
+//
+// ⛔ The control is the SAME repository under the GOOS that can build it: a
+// rule that skipped it everywhere would pass the first half of this test and
+// stop scanning a real module.
+func TestAModuleIsSkippedOnlyForTheGOOSThatCannotBuildIt(t *testing.T) {
+	repos := func() map[string]map[string]string {
+		return map[string]map[string]string{
+			"acme/win": {"go.mod": gomod, "a_windows.go": "package a\n", "!nocode": ""},
+		}
+	}
+	f := &fake{repos: repos()}
+	_, rep, _ := sweep(t, f, "acme/win\n") // default -goos linux
+	if got := byRepo(rep)["acme/win"]; got.Status != NoGo {
+		t.Errorf("under linux acme/win = %s (%s), want NO-GO rather than unreadable", got.Status, got.Err)
+	}
+
+	f = &fake{repos: repos()}
+	_, rep, _ = sweep(t, f, "acme/win\n", "-goos", "windows")
+	if got := byRepo(rep)["acme/win"]; got.Status != Clean || len(got.Modules) != 1 {
+		t.Errorf("under windows acme/win = %s, %d module scans; want CLEAN with 1", got.Status, len(got.Modules))
+	}
+
+	// ⛔ THE ROW THAT ACTUALLY PINS THE PAIR, and it is here because `mutate`
+	// said so: with ONE GOOS the module is dropped before the scan loop is
+	// reached, so replacing the per-module GOOS list with the whole -goos list
+	// changed nothing and the suite passed. Two values, one of which can build
+	// it, is the only shape where the distinction exists -- and it is the shape
+	// a sweep with `-goos linux,windows` actually has.
+	f = &fake{repos: repos()}
+	_, rep, _ = sweep(t, f, "acme/win\n", "-goos", "linux,windows")
+	got := byRepo(rep)["acme/win"]
+	if got.Status != Clean {
+		t.Errorf("acme/win under linux,windows = %s (%s), want CLEAN: the GOOS that cannot build it must be skipped, not reported unreadable",
+			got.Status, got.Err)
+	}
+	if len(got.Modules) != 1 || got.Modules[0].GOOS != "windows" {
+		t.Errorf("module scans = %+v; want exactly one, under windows", got.Modules)
+	}
+}

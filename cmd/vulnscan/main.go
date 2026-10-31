@@ -372,13 +372,29 @@ func scanRepo(ctx context.Context, exe runner, cfg config, repo, jobDir string) 
 		res.Status, res.Err = Unread, "listing modules: "+err.Error()
 		return res
 	}
+	// ⛔ BUILDABILITY BELONGS TO THE PAIR (MODULE, GOOS), NOT TO THE MODULE.
+	// A module whose files are all constrained to another GOOS has nothing for
+	// THIS scan to compile, and one answer for the whole module would either
+	// scan it anyway -- UNREAD, for a reason that is the sweep's and not the
+	// repository's -- or skip it under every GOOS, including the one that can
+	// build it.
+	scanOS := map[string][]string{}
 	var withCode []string
 	for _, m := range mods {
-		if hasGoCode(filepath.Join(repoDir, m)) {
-			withCode = append(withCode, m)
-		} else {
-			res.Notes = append(res.Notes, m+": go.mod without Go code, not scanned")
+		var oses []string
+		for _, goos := range cfg.goos {
+			if hasGoCode(filepath.Join(repoDir, m), goos, cfg.goarch) {
+				oses = append(oses, goos)
+			} else {
+				res.Notes = append(res.Notes,
+					fmt.Sprintf("%s (%s): go.mod without Go code this scan can build, not scanned", m, goos))
+			}
 		}
+		if len(oses) == 0 {
+			continue
+		}
+		withCode = append(withCode, m)
+		scanOS[m] = oses
 	}
 	mods = withCode
 	if len(mods) == 0 {
@@ -396,7 +412,7 @@ func scanRepo(ctx context.Context, exe runner, cfg config, repo, jobDir string) 
 		wantGo = "" // the toolchain is chosen per module; nothing to hold the config to
 	}
 	for _, m := range mods {
-		for _, goos := range cfg.goos {
+		for _, goos := range scanOS[m] {
 			env := []string{"GOOS=" + goos, "GOARCH=" + cfg.goarch, "GOTOOLCHAIN=" + cfg.goTool}
 			cctx, cancel := context.WithTimeout(ctx, cfg.timeout)
 			out, errOut, err := exe(cctx, filepath.Join(repoDir, m), env, cfg.govulncheck, "-format", "json", "./...")

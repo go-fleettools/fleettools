@@ -415,6 +415,59 @@ case.
 **The fix is one command, and it is not automatable**: `gh auth refresh -s
 workflow` opens a browser. Until it is run, these pull requests wait.
 
+## The two vulnerability lanes, and why one of them runs on a clock
+
+`.github/workflows/vuln.yml` holds both, on `push`, `pull_request`, a **daily**
+`cron` and `workflow_dispatch`.
+
+| | |
+|---|---|
+| `govulncheck, judged by vulngate` | this module, judged by `cmd/vulngate` rather than by an exit status. **It moved here from `ci.yml`**, under the same job name, because a branch protection rule names a check and not a workflow. |
+| `vulnscan over the tools that gate the fleet` | `cmd/vulnscan` over `.github/vulnscan-tools.txt` — the repositories that hold the token, refuse a push, or produce the figures other decisions are taken from. |
+
+⛔ **A gate that only fires on a push has the coverage of the repository's
+activity, and the quietest repository needs it most.** Measured on go-pkgx,
+2026-10-27 to 10-30: `GO-2026-6860` and `GO-2026-6866` (`x/net/html`, fixed in
+v0.62.0) sat green for days in two repositories and were found **2 and 4 days
+late** — in one by a pull request adding a subcommand that touched no
+dependency, in the other by a pull request editing one workflow file. Every run
+of the scan was right; it simply only ran when somebody pushed. This repository
+had that exact shape, and it is where the tooling that finds the defect lives.
+
+Daily rather than weekly, because the database is updated on business days and a
+weekly cadence would have left those two sitting for six days. ⛔ And a
+**disabled** cron reports nothing rather than failing — GitHub switches a
+scheduled workflow off after 60 days without repository activity — so silence
+on this lane is not green, and `workflow_dispatch` is there for a person to ask.
+
+⛔ **Renovate cannot do the second half.** An *indirect* dependency is not a
+floor the module declares for itself, so there is no version string for a
+manager to compare or rewrite — which is how `x/net` reached both go-pkgx
+repositories. Nothing watched indirect dependencies anywhere in this fleet,
+although `cmd/vulnscan` was written for that question and was scheduled nowhere.
+It needs **no credential**: it clones at depth 1 and makes no REST call per
+repository, so it cannot starve the hourly budget the Renovate runners spend
+from, and the workflow runs with `contents: read`.
+
+What a sweep of that list has already found, by hand: on **2026-10-22**,
+`GO-2026-6809` (CVE-2026-111943, `crypto/x509` `Certificate.Verify`, published
+the day before, fixed in go1.26.10 and go1.27.3) was **reachable** — not merely
+present — in **four** of them: `gitsafe`, `fleettools`, `modfloor` and
+`landingkit`. Nothing would have reported it; a person happened to run a sweep.
+
+Two details that are easy to get wrong:
+
+- The full list runs only on the **schedule** and on **dispatch**, because an
+  advisory in `landingkit` must not redden an unrelated pull request here. But a
+  command line exercised only at 06:17 is one nobody has seen work, so every
+  event runs the identical binary, flags and `-list` mechanism over
+  `.github/vulnscan-smoke.txt`, which names **this** repository.
+- `vulnscan` exits 0 clean, **1 reachable, 2 unread**, and 2 is not a lesser 1:
+  a repository govulncheck could not load prints its config and no finding, which
+  reads like a clean one. Both fail the lane. `-selftest` runs first and judges
+  three recorded streams, so a binary that cannot see a known positive says not
+  to trust the sweep behind it.
+
 ## Layout and gates
 
     quiet/           the cron reader and the verdict, with its tests

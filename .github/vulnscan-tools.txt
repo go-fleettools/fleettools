@@ -1,0 +1,35 @@
+# The repositories swept daily by .github/workflows/vuln.yml.
+#
+# WHY THESE AND NOT ALL 1800: these are the tools that hold the GitHub token,
+# refuse a push, or produce the figures every other decision is taken from. An
+# advisory reachable from one of them is reachable from the thing that guards
+# everything else, so they are worth a clone a day. Sweeping the whole fleet
+# daily is a different job with a different cost, and is not this one.
+#
+# WHAT A SWEEP OF THIS LIST HAS ALREADY FOUND, by hand, 2026-10-22:
+# GO-2026-6809 (CVE-2026-111943, crypto/x509 Certificate.Verify, published the
+# day before, fixed in go1.26.10 and go1.27.3) was REACHABLE -- not merely
+# present -- in FOUR of them: gitsafe, fleettools, modfloor and landingkit.
+# Nothing would have reported it; a person happened to run a sweep. All four
+# are at go 1.27.3 now.
+#
+# ADDING A LINE is the whole procedure. A repository with no go.mod is reported
+# NO-GO rather than failing the lane, so a non-Go repository here is noise, not
+# a break.
+
+# the token and the push guard
+go-gitsafe/gitsafe
+
+# the lease and memory protocol every session coordinates through
+go-agentsync/agentsync
+
+# the sweeps, the gates and the judges
+go-fleettools/fleettools
+go-fleettools/staletools
+go-fleettools/prwait
+go-fleettools/mutate
+go-fleettools/modfloor
+go-fleettools/landingkit
+go-fleettools/unbounded
+go-fleettools/fleetfind
+go-fleettools/landingdiff
