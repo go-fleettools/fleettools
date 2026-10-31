@@ -18,6 +18,7 @@ var osExit = os.Exit
 type config struct {
 	version, from, list, state         string
 	apply, claim, follow, guard, gomod bool
+	prefilter                          bool
 	pause, quotaWait, ciTimeout        time.Duration
 	limit, passes                      int
 }
@@ -66,7 +67,7 @@ or failed, 2 on a usage error.`
 var longFlags = map[string]bool{
 	"version": true, "from": true, "list": true, "apply": true, "pause": true, "limit": true,
 	"claim": true, "follow": true, "guard": true, "gomod": true, "state": true,
-	"quota-wait": true, "ci-timeout": true, "passes": true, "quota-retries": true,
+	"prefilter": true, "quota-wait": true, "ci-timeout": true, "passes": true, "quota-retries": true,
 }
 
 // legacyArgs rewrites `-from x` to `--from x`. pflag would read `-claim` as the
@@ -112,6 +113,7 @@ func RootCmd() *cobra.Command {
 	fl.BoolVar(&cfg.follow, "follow", false, "after opening, wait for checks like prwait (no checks is not a pass) and merge with ghmerge when green")
 	fl.StringVar(&cfg.state, "state", "", "resumable state file (repository -> status); a rerun skips finished repositories")
 	fl.BoolVar(&cfg.gomod, "gomod", false, "with --from: also raise a go.mod read through go-version-file whose go directive is exactly --from, and tidy")
+	fl.BoolVar(&cfg.prefilter, "prefilter", false, "print only the listed repositories whose workflows name something to move, read through GraphQL (its own budget, 20 repositories a call) instead of ~6 REST calls each; a repository it cannot read is passed through, never dropped")
 	fl.DurationVar(&cfg.quotaWait, "quota-wait", 5*time.Minute, "longest sleep after a quota 403 before retrying")
 	fl.IntVar(&quotaRetries, "quota-retries", 12, "how many quota sleeps one API call may take before the repository is deferred (0: report the 403 as an error)")
 	fl.IntVar(&cfg.passes, "passes", 3, "how many passes over repositories deferred by the quota")
@@ -200,6 +202,13 @@ func runConfig(cfg config, stdin io.Reader, stdout, stderr io.Writer) error {
 	// that read everything.
 	if len(repos) == 0 {
 		return &exitErr{1, "the list is empty — that is a failure, not a clean fleet"}
+	}
+	if cfg.prefilter {
+		if cfg.apply || cfg.claim || cfg.follow {
+			return usage("--prefilter only reads: it cannot be combined with --apply, --claim or --follow")
+		}
+		quotaWaitMax = cfg.quotaWait
+		return prefilter(cfg, repos, stdout, stderr)
 	}
 	st, err := loadState(cfg.state, cfg.from, cfg.version)
 	if err != nil {
