@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 )
 
@@ -35,7 +36,7 @@ func prefilter(cfg config, repos []string, out, errw io.Writer) error {
 	var elsewhere []string
 	var read func(batch []string) error
 	read = func(batch []string) error {
-		got, err := graphqlWorkflows(batch)
+		got, mods, err := graphqlWorkflows(batch)
 		switch {
 		case err == nil:
 			for _, repo := range batch {
@@ -45,7 +46,7 @@ func prefilter(cfg config, repos []string, out, errw io.Writer) error {
 					continue
 				}
 				switch {
-				case wantsMove(texts, cfg):
+				case wantsMove(texts, mods[repo], cfg):
 					cand[repo] = true
 				case namesFromElsewhere(texts, cfg):
 					elsewhere = append(elsewhere, repo)
@@ -91,7 +92,7 @@ func prefilter(cfg config, repos []string, out, errw io.Writer) error {
 }
 
 // wantsMove says whether any workflow text names something this run would move.
-func wantsMove(texts []string, cfg config) bool {
+func wantsMove(texts []string, rootMod string, cfg config) bool {
 	for _, t := range texts {
 		if !cfg.noAlias && reStable.MatchString(t) {
 			return true
@@ -99,7 +100,23 @@ func wantsMove(texts []string, cfg config) bool {
 		if cfg.from != "" && reExplicit(cfg.from).MatchString(t) {
 			return true
 		}
-		if cfg.gomod && reVersionFile.MatchString(t) {
+		if cfg.gomod && versionFileWantsMove(t, rootMod, cfg.from) {
+			return true
+		}
+	}
+	return false
+}
+
+// versionFileWantsMove: a workflow reading its version from root go.mod needs
+// moving only when that directive is exactly --from. Any other path (a nested
+// go.mod, .go-version) or a root go.mod GraphQL did not return is passed on to
+// the REST read, which decides: saving calls must not cost a candidate.
+func versionFileWantsMove(workflow, rootMod, from string) bool {
+	for _, m := range reVersionFile.FindAllStringSubmatch(workflow, -1) {
+		if path.Clean(m[1]) != "go.mod" || rootMod == "" {
+			return true
+		}
+		if d := reGoDirective.FindStringSubmatch(rootMod); d == nil || d[1] == from {
 			return true
 		}
 	}
@@ -124,18 +141,19 @@ func namesFromElsewhere(texts []string, cfg config) bool {
 
 // graphqlWorkflows reads the workflow files of a batch of repositories in one
 // query. A repository with no workflows directory is absent from the result.
-func graphqlWorkflows(repos []string) (map[string][]string, error) {
+func graphqlWorkflows(repos []string) (texts map[string][]string, mods map[string]string, err error) {
 	var q strings.Builder
 	for i, repo := range repos {
 		owner, name, _ := strings.Cut(repo, "/")
-		fmt.Fprintf(&q, `r%d: repository(owner: %q, name: %q) { object(expression: "HEAD:.github/workflows") { ... on Tree { entries { name object { ... on Blob { text } } } } } } `, i, owner, name)
+		fmt.Fprintf(&q, `r%d: repository(owner: %q, name: %q) { gomod: object(expression: "HEAD:go.mod") { ... on Blob { text } } object(expression: "HEAD:.github/workflows") { ... on Tree { entries { name object { ... on Blob { text } } } } } } `, i, owner, name)
 	}
 	b, err := ghJSON("api", "graphql", "-f", "query="+fmt.Sprintf(prefilterQuery, q.String()))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var resp struct {
 		Data map[string]*struct {
+			GoMod  *struct{ Text string }
 			Object *struct {
 				Entries []struct {
 					Name   string
@@ -146,27 +164,30 @@ func graphqlWorkflows(repos []string) (map[string][]string, error) {
 		Errors []struct{ Message, Type string }
 	}
 	if err := json.Unmarshal(b, &resp); err != nil {
-		return nil, fmt.Errorf("graphql: %w", err)
+		return nil, nil, fmt.Errorf("graphql: %w", err)
 	}
 	if len(resp.Errors) > 0 {
-		return nil, fmt.Errorf("graphql: %s (%s)", resp.Errors[0].Message, resp.Errors[0].Type)
+		return nil, nil, fmt.Errorf("graphql: %s (%s)", resp.Errors[0].Message, resp.Errors[0].Type)
 	}
-	out := map[string][]string{}
+	texts, mods = map[string][]string{}, map[string]string{}
 	for i, repo := range repos {
 		r := resp.Data[fmt.Sprintf("r%d", i)]
 		if r == nil {
-			return nil, fmt.Errorf("graphql: no answer for %s", repo)
+			return nil, nil, fmt.Errorf("graphql: no answer for %s", repo)
+		}
+		if r.GoMod != nil {
+			mods[repo] = r.GoMod.Text
 		}
 		if r.Object == nil {
 			continue
 		}
-		texts := []string{}
+		files := []string{}
 		for _, e := range r.Object.Entries {
 			if e.Object != nil && (strings.HasSuffix(e.Name, ".yml") || strings.HasSuffix(e.Name, ".yaml")) {
-				texts = append(texts, e.Object.Text)
+				files = append(files, e.Object.Text)
 			}
 		}
-		out[repo] = texts
+		texts[repo] = files
 	}
-	return out, nil
+	return texts, mods, nil
 }
