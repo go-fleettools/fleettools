@@ -636,6 +636,15 @@ func TestGomodModeRaisesTheDirectiveReadThroughGoVersionFile(t *testing.T) {
 	if code != 1 || !strings.Contains(out, "go mod tidy in go.mod") || len(w.pushed) != 0 {
 		t.Fatalf("code=%d pushed=%v\n%s", code, w.pushed, out)
 	}
+	// --no-tidy raises the directive and does not run tidy at all, so a module
+	// with replace => ../sibling directives (which tidy cannot resolve alone) is moved.
+	goTidy = func(string) (string, error) { t.Fatal("go mod tidy ran under --no-tidy"); return "", nil }
+	w.pushed = nil
+	code, out, _ = w.run("-from", "1.27.2", "-version", "1.27.3", "-list", w.list("o/mod"), "--gomod", "--no-tidy", "--apply", "-pause", "0s")
+	noTidy = false
+	if code != 0 || len(w.pushed) != 1 {
+		t.Fatalf("code=%d pushed=%v\n%s", code, w.pushed, out)
+	}
 	// an unreadable go.mod is an error row
 	delete(w.files["o/mod"], "go.mod")
 	code, out, _ = w.run("-from", "1.27.2", "-version", "1.27.3", "-list", w.list("o/mod"), "--gomod")

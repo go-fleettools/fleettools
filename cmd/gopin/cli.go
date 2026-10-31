@@ -67,7 +67,7 @@ or failed, 2 on a usage error.`
 var longFlags = map[string]bool{
 	"version": true, "from": true, "list": true, "apply": true, "pause": true, "limit": true,
 	"claim": true, "follow": true, "guard": true, "gomod": true, "state": true,
-	"prefilter": true, "no-alias": true, "quota-wait": true, "ci-timeout": true, "passes": true, "quota-retries": true,
+	"prefilter": true, "no-alias": true, "no-tidy": true, "quota-wait": true, "ci-timeout": true, "passes": true, "quota-retries": true,
 }
 
 // legacyArgs rewrites `-from x` to `--from x`. pflag would read `-claim` as the
@@ -115,6 +115,7 @@ func RootCmd() *cobra.Command {
 	fl.BoolVar(&cfg.gomod, "gomod", false, "with --from: also raise a go.mod read through go-version-file whose go directive is exactly --from, and tidy")
 	fl.BoolVar(&cfg.prefilter, "prefilter", false, "print only the listed repositories whose workflows name something to move, read through GraphQL (its own budget, 20 repositories a call) instead of ~6 REST calls each; a repository it cannot read is passed through, never dropped")
 	fl.BoolVar(&cfg.noAlias, "no-alias", false, "leave `stable` aliases alone: a security-release campaign moves explicit pins, and pinning an alias is a different change with a different review")
+	fl.BoolVar(&noTidy, "no-tidy", false, "with --gomod: raise the directive without go mod tidy, for modules whose replace directives point at sibling directories a lone clone does not have")
 	fl.DurationVar(&cfg.quotaWait, "quota-wait", 5*time.Minute, "longest sleep after a quota 403 before retrying")
 	fl.IntVar(&quotaRetries, "quota-retries", 12, "how many quota sleeps one API call may take before the repository is deferred (0: report the 403 as an error)")
 	fl.IntVar(&cfg.passes, "passes", 3, "how many passes over repositories deferred by the quota")
