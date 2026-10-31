@@ -31,7 +31,6 @@ package main
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"go/build/constraint"
 	"go/parser"
@@ -40,33 +39,58 @@ import (
 	"os"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `ANDs a build constraint into each Go file given, leaving a file that already
+carries it alone.
+
+⛔ NOTHING IS WRITTEN IF ANY FILE FAILED. A partial rewrite of a build-tag
+campaign leaves a package that compiles under neither configuration, and the
+half that was written is not visible in the output.
+
+Exit status: 0 the files were rewritten (or listed, with -n), 2 a file could not
+be read or parsed — and then nothing at all was written.`
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		and string
+		dry bool
+	)
+	c := cli.New("buildtag --and EXPR [flags] file.go...",
+		"AND a build constraint into each Go file", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(retag(cli.Out(cmd), cli.Err(cmd), and, dry, args))
+	}
+	f := c.Flags()
+	f.StringVar(&and, "and", "",
+		"build constraint expression to AND into each file, e.g. '!rbgo_core'; required")
+	// --dry-run keeps the old -n as its shorthand.
+	f.BoolVarP(&dry, "dry-run", "n", false, "list the files that would change, write nothing")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
 func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("buildtag", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	and := fs.String("and", "", "build constraint expression to AND into each file, e.g. '!rbgo_core'; required")
-	dry := fs.Bool("n", false, "list the files that would change, write nothing")
-	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: buildtag -and EXPR [-n] file.go...")
-		fs.PrintDefaults()
-	}
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
-	if *and == "" || fs.NArg() == 0 {
-		fs.Usage()
+	return cli.Drive(RootCmd(), args, stdout, stderr)
+}
+
+func retag(stdout, stderr io.Writer, and string, dry bool, paths []string) int {
+	if and == "" || len(paths) == 0 {
+		fmt.Fprintln(stderr, "usage: buildtag --and EXPR [-n] file.go...")
 		return 2
 	}
-	add, err := constraint.Parse("//go:build " + *and)
+	add, err := constraint.Parse("//go:build " + and)
 	if err != nil {
-		fmt.Fprintf(stderr, "buildtag: -and %q: %v\n", *and, err)
+		fmt.Fprintf(stderr, "buildtag: --and %q: %v\n", and, err)
 		return 2
 	}
 
@@ -78,7 +102,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	var edits []edit
 	unchanged := 0
 	failed := false
-	for _, path := range fs.Args() {
+	for _, path := range paths {
 		fi, err := os.Stat(path)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildtag: %v\n", err)
@@ -108,7 +132,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	for _, e := range edits {
-		if *dry {
+		if dry {
 			fmt.Fprintln(stdout, e.path)
 			continue
 		}
@@ -118,7 +142,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	verb := "changed"
-	if *dry {
+	if dry {
 		verb = "would change"
 	}
 	fmt.Fprintf(stdout, "%d %s, %d already carried %s\n", len(edits), verb, unchanged, add)

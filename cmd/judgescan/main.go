@@ -40,9 +40,8 @@
 package main
 
 import (
-	"flag"
 	"fmt"
-	"github.com/go-fleettools/fleettools/internal/checkout"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -50,7 +49,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-fleettools/fleettools/internal/checkout"
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 // lookPathRE finds the tool name in `exec.LookPath("name")`.
@@ -174,22 +176,77 @@ type finding struct {
 	replay     []string // `go test` lines that could replay a cached result
 }
 
+const longHelp = `Reports every repository that names an external tool in a test and whose CI
+never installs it, so the test SKIPS and the run is green.
+
+⛔ A FINDING IS CONFIRMED TO BE OURS before it is printed. This command had no
+such question and was still naming forks: two of fourteen were a fork of
+somebody else's repository and a checkout GitHub does not have. internal/checkout
+asks it, and testscan asks the same thing through the same function so the two
+cannot drift apart again.
+
+⛔ And a finding is re-derived against the remote default when the checkout is
+behind, because a finding about code that no longer exists is not a finding.
+--fetch=false keeps the working tree as it is, and says so.
+
+Exit status: 0 the scan ran, 1 there was nothing to scan.`
+
+// scanOptions are the flags, gathered so that the command can bind them and the
+// scan can read them.
+type scanOptions struct {
+	root, only       string
+	doFetch, replays bool
+}
+
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	root := flag.String("root", defaultRoot(), "directory holding org/repo checkouts")
-	doFetch := flag.Bool("fetch", true, "git fetch each repository about to be reported, so its distance is measured and not remembered")
-	only := flag.String("repo", "", "scan a single org/repo, verbosely")
-	showReplays := flag.Bool("replays", false, "list every repository whose `go test` can replay a cached result")
-	flag.Parse()
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command. Tests drive it through run, below.
+//
+// ⛔ THIS COMMAND HAD NO run() AT ALL: it parsed os.Args in place through the
+// package-level flag.Parse() and wrote to os.Stdout and os.Stderr from inside
+// main, so nothing in it could be driven by a test. The conversion gives it a
+// surface it did not have, which is most of the work and none of the spelling.
+func RootCmd() *cobra.Command {
+	var o scanOptions
+	c := cli.New("judgescan [flags]",
+		"Repositories whose CI never installs a tool their tests need", longHelp)
+	c.Args = cobra.NoArgs
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(judge(cli.Out(cmd), cli.Err(cmd), &o))
+	}
+	f := c.Flags()
+	f.StringVar(&o.root, "root", defaultRoot(), "directory holding org/repo checkouts")
+	f.BoolVar(&o.doFetch, "fetch", true,
+		"git fetch each repository about to be reported, so its distance is measured and not remembered")
+	f.StringVar(&o.only, "repo", "", "scan a single org/repo, verbosely")
+	f.BoolVar(&o.replays, "replays", false,
+		"list every repository whose go test can replay a cached result")
+	return c
+}
+
+// run drives the command and returns its status, for a test.
+func run(args []string, out, errOut io.Writer) int {
+	return cli.Drive(RootCmd(), args, out, errOut)
+}
+
+func judge(stdout, stderr io.Writer, o *scanOptions) int {
+	// The scan below reads these through pointers, as it did when they came
+	// from the global flag set. Rebinding the names rather than rewriting
+	// twenty dereferences leaves the scan itself untouched.
+	root, only := &o.root, &o.only
+	doFetch, showReplays := &o.doFetch, &o.replays
 
 	repos, err := findRepos(*root, *only)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "judgescan:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "judgescan:", err)
+		return 1
 	}
 	if len(repos) == 0 {
-		fmt.Fprintf(os.Stderr, "judgescan: no repositories under %s\n", *root)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "judgescan: no repositories under %s\n", *root)
+		return 1
 	}
 
 	var found, withTool []finding
@@ -288,7 +345,7 @@ func main() {
 	// that has not fetched in weeks gives a weeks-old answer that looks exactly
 	// like a current one. Say so before anyone acts on the list.
 	if len(replays) > 0 {
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintf(stderr,
 			"\n%d install their judge and can still replay a run that did not have it\n"+
 				"  (go test without -count=1; the cache key does not see a program appearing):\n", len(replays))
 		// ⛔ The COUNT is unconditional and the list is not. 119 lines of
@@ -297,7 +354,7 @@ func main() {
 		// number that only appears with a flag is a number nobody knows to
 		// ask for.
 		if !*showReplays {
-			fmt.Fprintln(os.Stderr, "  (-replays to list them)")
+			fmt.Fprintln(stderr, "  (--replays to list them)")
 		}
 		for _, f := range replays {
 			if !*showReplays {
@@ -311,23 +368,23 @@ func main() {
 			if n := len(f.replay) - 1; n > 0 {
 				more = fmt.Sprintf("  (+%d more)", n)
 			}
-			fmt.Fprintf(os.Stderr, "  %-38s %s%s\n", f.repo, first, more)
+			fmt.Fprintf(stderr, "  %-38s %s%s\n", f.repo, first, more)
 		}
 	}
 
 	if len(loud) > 0 {
-		fmt.Fprintf(os.Stderr, "\n%d left out — their CI FAILS on a `--- SKIP`, so the skip cannot be silent:\n", len(loud))
+		fmt.Fprintf(stderr, "\n%d left out — their CI FAILS on a `--- SKIP`, so the skip cannot be silent:\n", len(loud))
 		for _, f := range loud {
-			fmt.Fprintf(os.Stderr, "  %-38s %s\n", f.repo, strings.Join(f.missing, " "))
+			fmt.Fprintf(stderr, "  %-38s %s\n", f.repo, strings.Join(f.missing, " "))
 		}
-		fmt.Fprintln(os.Stderr, "  (the tool name is spelt unlike the package that installs it; the run is green)")
+		fmt.Fprintln(stderr, "  (the tool name is spelt unlike the package that installs it; the run is green)")
 	}
 
 	if len(dropped) > 0 {
 		sort.Strings(dropped)
-		fmt.Fprintf(os.Stderr, "\n%d checkout(s) left out — not ours to fix:\n", len(dropped))
+		fmt.Fprintf(stderr, "\n%d checkout(s) left out — not ours to fix:\n", len(dropped))
 		for _, d := range dropped {
-			fmt.Fprintf(os.Stderr, "  %s\n", d)
+			fmt.Fprintf(stderr, "  %s\n", d)
 		}
 	}
 
@@ -380,38 +437,39 @@ func main() {
 	for _, f := range found {
 		switch {
 		case f.noCI != "":
-			fmt.Printf("%-40s  no CI at all       %s\n", f.repo, strings.Join(f.missing, " "))
+			fmt.Fprintf(stdout, "%-40s  no CI at all       %s\n", f.repo, strings.Join(f.missing, " "))
 		default:
-			fmt.Printf("%-40s  never installed    %s\n", f.repo, strings.Join(f.missing, " "))
+			fmt.Fprintf(stdout, "%-40s  never installed    %s\n", f.repo, strings.Join(f.missing, " "))
 		}
 		if *only != "" {
-			fmt.Printf("    read %d workflow file(s), %d bytes of YAML\n", f.workflows, f.bytesRead)
+			fmt.Fprintf(stdout, "    read %d workflow file(s), %d bytes of YAML\n", f.workflows, f.bytesRead)
 			if f.dynamic {
-				fmt.Println("    NOTE: a LookPath here takes a non-literal argument; its tool is not in this list")
+				fmt.Fprintln(stdout, "    NOTE: a LookPath here takes a non-literal argument; its tool is not in this list")
 			}
 		}
 	}
 
 	if dropped2 > 0 {
-		fmt.Fprintf(os.Stderr,
+		fmt.Fprintf(stderr,
 			"\n%d finding(s) dropped: re-derived against the remote default and no longer true\n"+
 				"  (the working tree was behind; %d checkout(s) were re-scanned that way).\n", dropped2, rederived)
 	}
-	fmt.Fprint(os.Stderr, checkout.StalenessWarning(ages, *doFetch))
+	fmt.Fprint(stderr, checkout.StalenessWarning(ages, *doFetch))
 
 	// A scan that cannot read reports zero, and zero reads as good news. Say
 	// what was actually looked at, always.
-	fmt.Fprintf(os.Stderr, "\n%d repositories scanned, %d name an external tool in a test, %d have one their CI never installs\n",
+	fmt.Fprintf(stderr, "\n%d repositories scanned, %d name an external tool in a test, %d have one their CI never installs\n",
 		scanned, withTools, len(found))
 	if n := benchOnly.Load(); n > 0 {
-		fmt.Fprintf(os.Stderr, "%d tool(s) left out: only a Benchmark reaches them, and `go test` does not run those.\n", n)
+		fmt.Fprintf(stderr, "%d tool(s) left out: only a Benchmark reaches them, and `go test` does not run those.\n", n)
 	}
 	if n := unparsedFiles.Load(); n > 0 {
 		// Said out loud: those files were read by the old text search, which
 		// is the instrument this replaces precisely because it cannot tell a
 		// call from a string that looks like one.
-		fmt.Fprintf(os.Stderr, "⚠ %d test file(s) did not parse and fell back to the text search.\n", n)
+		fmt.Fprintf(stderr, "⚠ %d test file(s) did not parse and fell back to the text search.\n", n)
 	}
+	return 0
 }
 
 // scan returns the finding for one repository, and whether its tests name any

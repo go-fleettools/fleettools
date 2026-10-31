@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"maps"
@@ -13,7 +12,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 // gh runs the CLI, retrying only what waiting can fix. Same brake as the other
@@ -81,25 +82,61 @@ type finding struct {
 	readError string
 }
 
+const longHelp = `Reports, per organisation, every module that no surface advertises and every
+name a surface lists that is gone.
+
+⛔ A READ THAT FAILS AND A FILE THAT IS ABSENT ARE NOT THE SAME, and the report
+counts the surfaces it actually read so that a pass which could not read them
+cannot be mistaken for an organisation that advertises nothing.
+
+--fail-on-drift is for the per-organisation check, which runs IN the
+organisation and must stop a merge. The fleet-wide report deliberately does NOT
+fail: being unlisted is sometimes a choice, and a weekly red job teaches people
+to ignore it.
+
+--tree owner/repo=dir reads a repository's surfaces from a checkout instead of
+the API, so a pull request is judged on what it PROPOSES rather than on its
+default branch. The report says which trees it used: a green run whose tree flag
+was ignored looks exactly like a green run that read the branch, and the
+difference is the whole point of the flag.
+
+Exit status: 0, or 1 with --fail-on-drift when something is unlisted or stale.`
+
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("docscan", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	only := fs.String("orgs", "", "comma-separated organisations instead of the whole fleet")
-	workers := fs.Int("workers", 6, "concurrent organisations")
-	// ⛔ For the per-organisation check, which runs IN the organisation and
-	// must stop a merge. The fleet-wide report deliberately does not fail:
-	// being unlisted is sometimes a choice, and a weekly red job teaches
-	// people to ignore it.
-	strict := fs.Bool("fail-on-drift", false, "exit non-zero when anything is unlisted or stale")
-	fs.Var(treeFlag{}, "tree", "owner/repo=dir: read this repository's surfaces from a\ncheckout instead of the API, so a pull request is judged on\nwhat it proposes rather than on its default branch")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		only    string
+		workers int
+		strict  bool
+	)
+	c := cli.New("docscan [flags]",
+		"Modules no surface advertises, and names a surface lists that are gone", longHelp)
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(sweep(cli.Out(cmd), cli.Err(cmd), only, workers, strict))
 	}
+	f := c.Flags()
+	f.StringVar(&only, "orgs", "", "comma-separated organisations instead of the whole fleet")
+	f.IntVar(&workers, "workers", 6, "concurrent organisations")
+	f.BoolVar(&strict, "fail-on-drift", false,
+		"exit non-zero when anything is unlisted or stale")
+	f.Var(treeFlag{}, "tree",
+		"owner/repo=dir: read this repository's surfaces from a\n"+
+			"checkout instead of the API, so a pull request is judged on\n"+
+			"what it proposes rather than on its default branch")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), args, stdout, stderr)
+}
+
+func sweep(stdout, stderr io.Writer, only string, workers int, strict bool) int {
 	// ⛔ A result is only as good as what was read, so SAY what was read. A
 	// green run whose tree flag was ignored looks exactly like a green run that
 	// read the branch, and the difference is the whole point of the flag.
@@ -110,19 +147,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
-	orgs, err := organisations(*only)
+	orgs, err := organisations(only)
 	if err != nil {
 		fmt.Fprintln(stderr, "orgs:", err)
 		return 1
 	}
-	if *only != "" {
+	if only != "" {
 		fmt.Fprintln(stdout, "NARROWED to the organisations named: this says nothing about the others.")
 	}
 	fmt.Fprintf(stdout, "orgs: %d\n", len(orgs))
 
 	var mu sync.Mutex
 	var found []finding
-	sem := make(chan struct{}, *workers)
+	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	for _, o := range orgs {
 		wg.Add(1)
@@ -139,7 +176,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	wg.Wait()
 	sort.Slice(found, func(i, j int) bool { return found[i].org < found[j].org })
 	code := report(found, stdout)
-	if *strict && code == 0 {
+	if strict && code == 0 {
 		for _, f := range found {
 			if f.drifted() {
 				return 1

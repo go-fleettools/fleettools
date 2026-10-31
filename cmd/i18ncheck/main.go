@@ -39,7 +39,6 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -51,36 +50,68 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Compares each translated page of a docs site against the base language and
+reports what drifted: a code block that is not byte-exact, a heading count that
+differs, a page that is missing.
+
+Output blocks stay byte-exact always. --comments relaxes only the COMMENTS
+inside blocks whose language has them (hcl, sh, yaml, toml, ini, go...), for a
+configuration example whose comment was translated on purpose.
+
+Exit status: 0 the translations agree, 1 something drifted, 2 nothing was
+compared — no page in the base language is a failure, not a pass.`
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
-const usage = "usage: i18ncheck [-base en] <content-dir>"
+const usage = "usage: i18ncheck [--base en] <content-dir>"
 
-// run is the whole program, so a test can drive it and read what it says.
-func run(args []string, stdout, stderr io.Writer) int {
-	fl := flag.NewFlagSet("i18ncheck", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	base := fl.String("base", "en", "the language the others were translated from")
-	comments := fl.Bool("comments", false, "let comments differ inside blocks whose language has them (hcl, sh, yaml, toml, ini, go...): a translated comment in a configuration example; output blocks stay byte-exact")
-	if code, ok := fleet.ParseFlags(fl, args); !ok {
-		return code
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		base     string
+		comments bool
+	)
+	c := cli.New("i18ncheck [flags] <content-dir>",
+		"What a docs site's translations have drifted from the base language", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(checkSite(cli.Out(cmd), cli.Err(cmd), base, comments, args))
 	}
-	if fl.NArg() != 1 {
+	f := c.Flags()
+	f.StringVar(&base, "base", "en", "the language the others were translated from")
+	f.BoolVar(&comments, "comments", false,
+		"let comments differ inside blocks whose language has them "+
+			"(hcl, sh, yaml, toml, ini, go...): a translated comment in a "+
+			"configuration example; output blocks stay byte-exact")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), args, stdout, stderr)
+}
+
+// checkSite is the whole program, so a test can drive it and read what it says.
+// The name avoids `check`, which this package already uses for two pages.
+func checkSite(stdout, stderr io.Writer, base string, comments bool, args []string) int {
+	if len(args) != 1 {
 		fmt.Fprintln(stderr, usage)
 		return 2
 	}
-	root := fl.Arg(0)
-	langs, err := languages(root, *base)
+	root := args[0]
+	langs, err := languages(root, base)
 	if err != nil {
 		fmt.Fprintln(stderr, "i18ncheck:", err)
 		return 2
 	}
-	rep, err := check(root, *base, langs, *comments)
+	rep, err := check(root, base, langs, comments)
 	if err != nil {
 		fmt.Fprintln(stderr, "i18ncheck:", err)
 		return 2
@@ -89,9 +120,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, p)
 	}
 	fmt.Fprintf(stdout, "%d pages in %s, compared with %s: %d code blocks, %d headings; %d problems\n",
-		rep.pages, *base, strings.Join(langs, ", "), rep.blocks, rep.headings, len(rep.problems))
+		rep.pages, base, strings.Join(langs, ", "), rep.blocks, rep.headings, len(rep.problems))
+	// ⛔ No page in the base language means nothing was compared, which reports
+	// the same "0 problems" as a site whose translations all agree.
 	if rep.pages == 0 {
-		fmt.Fprintf(stderr, "i18ncheck: no page in %s: nothing was compared\n", filepath.Join(root, *base))
+		fmt.Fprintf(stderr, "i18ncheck: no page in %s: nothing was compared\n", filepath.Join(root, base))
 		return 2
 	}
 	if len(rep.problems) > 0 {

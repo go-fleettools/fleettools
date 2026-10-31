@@ -33,47 +33,58 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
 	pagesrules "github.com/go-fleettools/fleettools/internal/pages"
+	"github.com/spf13/cobra"
 )
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	if err := run(os.Args[1:], os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "⛔ %v\n", err)
-		os.Exit(2)
-	}
+	cli.Run(RootCmd())
 }
 
-const usage = `usage: pagesretire [-apply] <gh-pages checkout>
+const usage = `usage: pagesretire [--apply] <gh-pages checkout>
 
 Removes the version directories a documentation branch kept from MkDocs, so
 that the "latest" alias names the Hugo build in main/ instead of a release
-directory nothing can rebuild. Without -apply it only reports.
+directory nothing can rebuild. Without --apply it only reports.
 
 It refuses unless main/ holds the Hugo build and every page under the
 directories it would remove also exists there.`
 
+// RootCmd builds the command. Tests drive it through run, below.
+//
+// --apply was hand-parsed before, accepting both -apply and --apply; pflag
+// takes the second, and internal/cli's shim rewrites the first with a warning,
+// so every existing call site still reaches it.
+func RootCmd() *cobra.Command {
+	var apply bool
+	c := cli.New("pagesretire [--apply] <gh-pages checkout>",
+		"Remove the version directories a docs branch kept from MkDocs", usage)
+	// The refusal IS the usage, as it was: an arity message tells the reader
+	// how many arguments, not what to type.
+	c.Args = func(_ *cobra.Command, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("%s", usage)
+		}
+		return nil
+	}
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return retire(cli.Out(cmd), args[0], apply)
+	}
+	c.Flags().BoolVar(&apply, "apply", false,
+		"remove the directories, instead of only reporting what would go")
+	return c
+}
+
+// run keeps the signature this command's tests were written against -- an
+// error rather than a status, because its failures are sentences.
 func run(args []string, out io.Writer) error {
-	for _, a := range args {
-		if fleet.IsHelpRequest(a) {
-			fmt.Fprintln(out, usage)
-			return nil
-		}
-	}
-	apply := false
-	var rest []string
-	for _, a := range args {
-		if a == "-apply" || a == "--apply" {
-			apply = true
-			continue
-		}
-		rest = append(rest, a)
-	}
-	if len(rest) != 1 {
-		return fmt.Errorf("%s", usage)
-	}
-	dir := rest[0]
+	return cli.Exec(RootCmd(), args, out, out)
+}
+
+func retire(out io.Writer, dir string, apply bool) error {
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 		return fmt.Errorf("%s is not a directory", dir)
 	}

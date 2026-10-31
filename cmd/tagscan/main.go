@@ -19,7 +19,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -28,8 +27,52 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Reports every tagged Go module whose default branch is AHEAD of its latest tag,
+so its consumers cannot reach the work that has landed.
+
+It also separates out the FROZEN ones: a module whose only tag sits on a history
+the branch no longer shares. The tag still resolves, so nothing looks wrong —
+but it names a tree from before a rewrite, and no ` + "`go get -u`" + ` will
+ever move off it.
+
+It asks about TAGS, not releases: ` + "`go get`" + ` resolves a tag, and a
+first draft asking /releases/latest reported a module as behind fifteen minutes
+after its tag had been pushed and proved to resolve. ` + "`git ls-remote`" + `
+costs no API budget, and a tag that IS the head settles without a call.
+
+⛔ An incomplete pass says so and exits 1: an organisation whose repositories
+could not be listed, or a repository whose tags could not be read, is named,
+because a count missing whole organisations is not a count of the fleet.
+
+Exit status: 0 the whole fleet was read, 1 something could not be.`
+
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var only string
+	c := cli.New("tagscan [flags]",
+		"Modules whose branch is ahead of their latest tag", longHelp)
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(scan(cli.Out(cmd), cli.Err(cmd), only))
+	}
+	c.Flags().StringVar(&only, "orgs", "",
+		"comma-separated organisations instead of the whole fleet")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), args, stdout, stderr)
+}
 
 // gh runs the CLI, retrying only what waiting can fix.
 //
@@ -67,25 +110,14 @@ type ahead struct {
 // that failed.
 const noCommonAncestor = "No common ancestor"
 
-func main() {
-	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
-}
-
-// run is the whole program, so a test can drive it and read what it says.
-func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("tagscan", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	only := fs.String("orgs", "", "comma-separated organisations instead of the whole fleet")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
-	orgs, err := organisations(*only)
+// scan is the whole program, so a test can drive it and read what it says.
+func scan(stdout, stderr io.Writer, only string) int {
+	orgs, err := organisations(only)
 	if err != nil {
 		fmt.Fprintln(stderr, "orgs:", err)
 		return 1
 	}
-	if *only != "" {
+	if only != "" {
 		fmt.Fprintln(stdout, "NARROWED to the organisations named: this says nothing about the others.")
 	}
 	fmt.Fprintf(stdout, "orgs: %d\n", len(orgs))

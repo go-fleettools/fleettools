@@ -48,46 +48,71 @@ package main
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Runs the command, shows that much of its output, and exits with ITS status.
+
+` + "`cmd | head`" + ` would exit 0 however the command ended — the status read is
+the LAST stage's — and that is the whole reason this exists.
+
+    brief -n 20 -- go test ./...
+    brief --head -- go build ./...
+
+The default is the LAST lines, because that is where a test suite says what
+failed. Flag parsing stops at the first operand, so the command's own flags
+reach the command and not this one; ` + "`--`" + ` is accepted and not required.
+
+Exit status: the command's own. 127 when it was not found, 2 when it could not
+be run or --n was negative.`
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
-func run(argv []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("brief", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	n := fs.Int("n", 10, "how many `lines` of the command's output to show")
-	head := fs.Bool("head", false, "show the FIRST lines rather than the last;\n"+
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		n    int
+		head bool
+	)
+	c := cli.New("brief [flags] [--] command [args...]",
+		"Run a command, show part of its output, exit with ITS status", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(summarise(cmd, n, head, args))
+	}
+	f := c.Flags()
+	// Both spellings of the old flag: "n" is registered as the long name AND as
+	// the shorthand, so `-n 20` and `--n 20` both reach it. The call sites in
+	// this repository's README and scripts use the first.
+	f.IntVarP(&n, "n", "n", 10, "how many lines of the command's output to show")
+	f.BoolVar(&head, "head", false, "show the FIRST lines rather than the last;\n"+
 		"the default is the last, because that is where a test suite says what failed")
-	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: brief [-n 10] [-head] -- command [args...]")
-		fmt.Fprintln(stderr, "\nRuns the command, shows that much of its output, and exits with ITS status.")
-		fmt.Fprintln(stderr, "`cmd | head` would exit 0 however the command ended.")
-		fs.PrintDefaults()
-	}
-	if err := fs.Parse(argv); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0 // asking for help is not a failure
-		}
-		return 2
-	}
-	cmd := fs.Args()
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(argv []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), argv, stdout, stderr)
+}
+
+func summarise(cobraCmd *cobra.Command, n int, head bool, cmd []string) int {
+	stdout, stderr := cli.Out(cobraCmd), cli.Err(cobraCmd)
 	if len(cmd) == 0 {
-		fs.Usage()
+		fmt.Fprintln(stderr, "usage: brief [--n 10] [--head] [--] command [args...]")
 		return 2
 	}
-	if *n < 0 {
-		fmt.Fprintln(stderr, "brief: -n cannot be negative; 0 shows nothing at all")
+	if n < 0 {
+		fmt.Fprintln(stderr, "brief: --n cannot be negative; 0 shows nothing at all")
 		return 2
 	}
 
@@ -99,7 +124,7 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	c.Stdin = os.Stdin
 	runErr := c.Run()
 
-	fmt.Fprint(stdout, chosen(buf.String(), *n, *head))
+	fmt.Fprint(stdout, chosen(buf.String(), n, head))
 
 	// What happened, said in the words the thing deserves.
 	switch {

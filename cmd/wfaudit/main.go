@@ -36,7 +36,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -45,35 +44,65 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Audits the workflows under each DIR and reports what a job can reach.
+
+With --api it also asks GitHub each repository's default token permission, which
+costs one call per repository from the hourly budget the fleet's Renovate
+runners share.
+
+Exit status: 0 nothing above INFO, or --fail was not given; 1 a MEDIUM or HIGH
+finding with --fail; 2 a workflow could not be read, or no .github/workflows was
+found at all — a scan that read nothing must not look like a clean bill.`
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, defaultTokenPermission))
+	cli.Run(RootCmd())
 }
 
-func run(args []string, stdout, stderr io.Writer, tokenPerm func(dir string) (string, error)) int {
-	fs := flag.NewFlagSet("wfaudit", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	api := fs.Bool("api", false, "ask GitHub each repository's default token permission (one call per repository)")
-	failOn := fs.Bool("fail", false, "exit 1 when a MEDIUM or HIGH finding is reported")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
+// RootCmd builds the command with the real GitHub call behind --api.
+func RootCmd() *cobra.Command { return command(defaultTokenPermission) }
+
+// command is shared with run below, which injects a tokenPerm of its own: the
+// tests must not reach GitHub, and that injection is the only reason run keeps
+// a signature of its own.
+func command(tokenPerm func(dir string) (string, error)) *cobra.Command {
+	var api, failOn bool
+	c := cli.New("wfaudit [flags] DIR...", "What a workflow job can reach", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(audit(cli.Out(cmd), cli.Err(cmd), tokenPerm, api, failOn, args))
 	}
-	if fs.NArg() == 0 {
-		fmt.Fprintln(stderr, "usage: wfaudit [-api] [-fail] DIR...")
+	f := c.Flags()
+	f.BoolVar(&api, "api", false,
+		"ask GitHub each repository's default token permission (one call per repository)")
+	f.BoolVar(&failOn, "fail", false, "exit 1 when a MEDIUM or HIGH finding is reported")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, stdout, stderr io.Writer, tokenPerm func(dir string) (string, error)) int {
+	return cli.Drive(command(tokenPerm), args, stdout, stderr)
+}
+
+func audit(stdout, stderr io.Writer, tokenPerm func(dir string) (string, error),
+	api, failOn bool, dirs []string) int {
+	if len(dirs) == 0 {
+		fmt.Fprintln(stderr, "usage: wfaudit [--api] [--fail] DIR...")
 		return 2
 	}
 
-	repos, err := findRepos(fs.Args())
+	repos, err := findRepos(dirs)
 	if err != nil {
 		fmt.Fprintln(stderr, "wfaudit:", err)
 		return 2
 	}
 	if len(repos) == 0 {
 		// A scan that read nothing must not look like a clean bill.
-		fmt.Fprintln(stderr, "wfaudit: no .github/workflows found under", strings.Join(fs.Args(), " "))
+		fmt.Fprintln(stderr, "wfaudit: no .github/workflows found under", strings.Join(dirs, " "))
 		return 2
 	}
 
@@ -100,7 +129,7 @@ func run(args []string, stdout, stderr io.Writer, tokenPerm func(dir string) (st
 			files++
 			repoFindings = append(repoFindings, found...)
 		}
-		if *api {
+		if api {
 			repoFindings = resolveDefaults(repo, repoFindings, tokenPerm, stderr)
 		}
 		all = append(all, repoFindings...)
@@ -116,7 +145,7 @@ func run(args []string, stdout, stderr io.Writer, tokenPerm func(dir string) (st
 	if unreadable > 0 {
 		return 2
 	}
-	if *failOn && counts[High]+counts[Medium] > 0 {
+	if failOn && counts[High]+counts[Medium] > 0 {
 		return 1
 	}
 	return 0

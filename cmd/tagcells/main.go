@@ -1,8 +1,8 @@
 // tagcells keeps the version a page states for each module equal to the
 // module's latest release.
 //
-//	tagcells -org go-widgets content/*/modules.md hugo.toml          # report
-//	tagcells -org go-widgets -write content/*/modules.md hugo.toml   # rewrite
+//	tagcells --org go-widgets content/*/modules.md hugo.toml           # report
+//	tagcells --org go-widgets --write content/*/modules.md hugo.toml   # rewrite
 //
 // It reads two shapes: a Markdown table row linking the repository with the
 // tag in the next cell (go-widgets/docs' modules page, in every language), and
@@ -23,7 +23,6 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -32,16 +31,29 @@ import (
 
 	"golang.org/x/mod/semver"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
+const longHelp = `Keeps the version a page states for each module equal to the module's latest
+release.
+
+It reads two shapes: a Markdown table row linking the repository with the tag in
+the next cell, and a landing page's [[params.modules]] block in hugo.toml. A row
+linking another organisation's repository is left alone.
+
+The latest release is the highest vX.Y.Z tag with no prerelease — what
+` + "`go get module@latest`" + ` resolves — read with ` + "`git ls-remote`" + `,
+one call per module and none against the REST budget Renovate shares.
+
+Exit status: 0 every cell current (or rewritten), 1 a cell is stale and --write
+was not given, 2 a tag could not be read or no cell was found at all — a page
+with no cells is not an up-to-date page.`
+
 func main() {
-	o, code, proceed := parseArgs(os.Args[1:], os.Stderr)
-	if !proceed {
-		os.Exit(code)
-	}
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(o, os.Stdout, os.Stderr, latestTag))
+	cli.Run(RootCmd())
 }
 
 type options struct {
@@ -50,22 +62,43 @@ type options struct {
 	files []string
 }
 
+// RootCmd builds the command. Tests drive it through parseArgs, below.
+func RootCmd() *cobra.Command {
+	var o options
+	c := command(&o)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		if err := validate(&o, args); err != nil {
+			return err
+		}
+		return cli.FromStatus(run(o, cli.Out(cmd), cli.Err(cmd), latestTag))
+	}
+	return c
+}
+
+func command(o *options) *cobra.Command {
+	c := cli.New("tagcells --org ORG [--write] FILE...",
+		"Keep each page's stated version equal to the module's latest release", longHelp)
+	f := c.Flags()
+	f.StringVar(&o.org, "org", "", "the GitHub organisation whose modules the pages list (required)")
+	f.BoolVar(&o.write, "write", false, "rewrite stale cells in place")
+	return c
+}
+
+func validate(o *options, args []string) error {
+	if o.org == "" || len(args) == 0 {
+		return cli.Unanswerable("usage: tagcells --org ORG [--write] FILE...")
+	}
+	o.files = args
+	return nil
+}
+
+// parseArgs keeps the signature this command's tests were written against.
 func parseArgs(args []string, stderr io.Writer) (options, int, bool) {
-	fs := flag.NewFlagSet("tagcells", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	org := fs.String("org", "", "the GitHub organisation whose modules the pages list (required)")
-	write := fs.Bool("write", false, "rewrite stale cells in place")
-	switch err := fs.Parse(args); {
-	case errors.Is(err, flag.ErrHelp):
-		return options{}, 0, false
-	case err != nil:
-		return options{}, 2, false
-	}
-	if *org == "" || fs.NArg() == 0 {
-		fmt.Fprintln(stderr, "usage: tagcells -org ORG [-write] FILE...")
-		return options{}, 2, false
-	}
-	return options{org: *org, write: *write, files: fs.Args()}, 0, true
+	var o options
+	c := command(&o)
+	c.RunE = func(_ *cobra.Command, rest []string) error { return validate(&o, rest) }
+	code := cli.Drive(c, args, stderr, stderr)
+	return o, code, code == 0 && !cli.HelpRequested(c)
 }
 
 func run(o options, stdout, stderr io.Writer, latest func(org, repo string) (string, error)) int {

@@ -8,6 +8,7 @@ that cost a wrong answer to learn.
 |---|---|
 | `cmd/redscan` | Every default branch whose last run failed. One pass: 1819 repositories, 44 red — **all of them stale Renovate lanes** whose last run predated a token rotation by three hours. A red branch is not a broken one; check WHEN it last ran. ⛔ Until 2026-10-11 it read no arguments at all, so `redscan -h`, run to see its flags, was a full sweep of every organisation and had to be killed. It now prints its usage, refuses anything else with status 2, and `TestEveryCommandReadsItsArguments` fails any command that cannot answer `-h`. ⛔ **It asks for the hourly budget before spending it**, through `internal/fleet`'s guard, and refuses to begin below a floor of 3000 — one call per organisation plus one per repository is about 2000, and that budget is **per user**, shared with the fleet's Renovate runners. Four sweeps have emptied it and made those runs fail, the fourth with the note about the first three already written, which is why the control is in the tool now and not in a note. When the pass runs down to the reserve it **stops** and says so in its own words, separately from the unread list: both arrive as an error from the same call, and filing a deliberate stop under "could not be read" reads as a fault in the fleet and calls for the wrong action — an unread repository is asked again, a budget stop is waited out. The reserve is a **chosen** number, not a measured one: what is measured is the cost of a sweep, and what one Renovate run costs is not. ⛔ And it does not protect against the **secondary** limit, which `rate_limit` is blind to — measured 2026-10-10, gh answered 403 on every call while the budget read 5000/5000. |
 | `cmd/prscan` | Open pull requests across every org. Batches ~15 `org:` qualifiers per search query, so ~20 calls instead of 320 — the search API is rate-limited far more tightly than REST. |
+| `cmd/flagcensus` | Which argument-parsing idiom each command here uses, and which of its flags would need two dashes after a move to cobra. Measured 2026-10-31 over 54 commands: `cobra=24 flag+help=21 flag-global=6 hand -h=3`, 144 flags of which 137 need two dashes. Two of those rows are worth having beyond the migration: **`flag-raw` is zero**, so nothing is left in the state where `-h` arrives as an error — `fleet.ParseFlags` closed that — and **`UNREAD` is zero**, which is the state `redscan` was in when `-h` started a full sweep. ⛔ The split is six ways and not four because a first version labelled six commands with a defect they do not have: it called the package-level `flag.Parse()` and a `ContinueOnError` FlagSet both "flag" and said `-h` arrives as an error, which is false for the global set (`ExitOnError` answers `-h` with 0 itself). What those six lack is a `run()` a test can drive. ⛔ And a registration has a name or a usage string: the receiver is not type-checked, so every `x.String()` looked like a flag and a first count said 149 where there were 113. ⛔ It generates nothing — a blanket rewrite of 54 files is how a campaign here once replaced a helper with a call to itself — and `flagcensus mains <command>...` prints just the entry points a migration rewrites. ⛔ Its two ancestors were written in a scratchpad on 2026-10-18 and were gone with the next reboot, so the same counts had to be derived from nothing thirteen days later: a measurement worth quoting is worth a repository. |
 | `cmd/prmerge` | Merges dependency PRs that are mergeable **and** fully green. |
 | `cmd/tagscan` | Every tagged Go module whose default branch is **ahead of its latest tag** — work that is merged and that `go get` cannot reach. Built after the same mistake twice: `ghmerge` alone on `go-widgets/toolkit` (2026-09-05) and on `go-pdfkit/ops` (2026-09-07), the second time with the rule already written down. It asks about **tags, not releases**: `go get` resolves a tag, and a first draft asking `/releases/latest` reported `ops` as behind fifteen minutes after `v0.12.0` had been pushed and proved to resolve. `git ls-remote` costs no API budget, and a tag that IS the head settles without a call. |
 | `cmd/quietscan` | Every organisation whose Renovate runner has **stopped**. `redscan` asks whether the last run FAILED; a runner that stopped does not fail, it says nothing. This is the other half of that lesson: check WHEN it last ran. |
@@ -483,3 +484,41 @@ stub `gh` on PATH -- a wrong field name there would make every runner in the
 fleet look healthy, silently.
 
 See "What one pass costs" above before scheduling it beside another sweep.
+
+## Flags: one dash became two
+
+Every command here is a **cobra** command. Until v0.20.1 they used the standard
+`flag` package, and the two disagree about one spelling — the one this fleet
+typed everywhere:
+
+    flag   accepts -releases, --releases and -j   (one dash or two, any length)
+    pflag  accepts --releases and -j              (one dash means ONE letter)
+
+So `vulngate -go go1.27.2` is no longer the long flag. **It still works**, and
+says so once on stderr: `internal/cli`'s `Compat` rewrites a single-dash long
+flag into its double-dash spelling when the long flag is registered, warns, and
+will not outlive the next major. It leaves an unknown token alone so pflag still
+rejects it, copies everything after `--` verbatim, and **refuses the ambiguous
+case** — `-ab` when `ab` is a long flag and `a` and `b` are both shorthands,
+where pflag reads a cluster and `flag` read the long name.
+
+The scope was measured before the migration began, with a Go tool rather than a
+guess: **16 call sites in workflows across 13 repositories**, all of them
+`vulngate -go` or `brandcheck -org`, plus 71 more in this repository's scripts,
+READMEs and Go source. There was no flag day, because those lanes install a
+**pinned** version: a lane on v0.20.1 keeps working unchanged, and only a lane
+that bumps has to spell its flags with two dashes.
+
+One-letter flags did not move. `-q`, `-n`, `-j`, `-v` are registered as
+shorthands of a named flag (`--quiet`, `--dry-run`, `--jobs`, `--verbose`), so
+every existing call site reaches them.
+
+`internal/cli` carries the three things all of them shared, so that they are
+decided once instead of thirty-three times:
+
+| | |
+|---|---|
+| `Exit{Code, Err}`, `Found`, `Unanswerable`, `Wrap`, `FromStatus` | the exit convention — **0** clean, **1** found something, **2** could not look. `FromStatus` lets a `run(...) int` keep its body verbatim, which matters: those statuses are chosen one defect at a time, and re-deciding thirty-three of them by hand is how a 1 becomes a 2. |
+| `New`, `Run`, `Drive`, `Status` | `Run` is the whole of every `main()`. `Drive` runs a command exactly as `Run` does, shim included, and returns the status instead of exiting — so each command's existing `run(args, out, errOut) int` became a one-line adapter and **every test written against it kept passing unchanged**. What those tests exercise is now the real surface: pflag parsing, the shim, the status mapping. |
+| `SetInterspersed(false)` and help on **stderr** | two differences from `flag` that change what a command MEANS, not how it is spelled. `flag` stops parsing at the first operand and pflag does not, so `brief -n 5 go test -count=1` would have had the child's flags read as brief's. And cobra writes help to stdout, which is these commands' answer — a child's output, a CI annotation, a table something counts. |
+

@@ -100,7 +100,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"go/build"
 	"io"
@@ -111,7 +110,9 @@ import (
 	"strings"
 
 	"github.com/go-fleettools/fleettools/internal/checkout"
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 func main() {
@@ -194,48 +195,72 @@ func (f finding) actionable() bool {
 	return len(f.orphans) > 0 || len(f.unbuilt) > 0 || len(f.vetFail) > 0 || (f.noCI && !f.noRemote)
 }
 
-func run(argv []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("buildscan", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	root := fs.String("root", "", "`directory` holding the checkouts (default: the fleet's GitHub root)")
-	only := fs.String("repo", "", "scan this `owner/name` only, and say more about it")
-	one := fs.String("dir", "", "scan this `directory`, whatever it is called:\n"+
-		"a worktree made for a measurement is not under owner/name")
-	vet := fs.Bool("vet", false, "also run `go vet` under each configuration, which COMPILES the tree")
-	all := fs.Bool("all", false, "list the repositories with nothing to report too")
-	fail := fs.Bool("fail", false, "exit 1 if anything is found")
-	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: buildscan [-root DIR] [-repo owner/name] [-vet] [-all] [-fail]")
-		fmt.Fprintln(stderr, "\nReports the build configurations a repository's CI compiles, and the")
-		fmt.Fprintln(stderr, "source that none of them reaches.")
-		fs.PrintDefaults()
-	}
-	if err := fs.Parse(argv); err != nil {
-		if err == flag.ErrHelp {
-			return 0
+const longHelp = `Reports the build configurations a repository's CI compiles, and the source
+that none of them reaches.
+
+--dir names one directory, whatever it is called, for a worktree made for a
+measurement that is not under owner/name; --root and --repo name a place in the
+fleet's layout, so they cannot be combined with it.
+
+--vet also runs go vet under each configuration, which COMPILES the tree.
+
+⛔ A tree with no REMOTE is not a repository missing a lane: nothing can run CI
+for something nobody can fetch. It is still printed, because "it exists only on
+this disk" is worth seeing — just not counted as a decision.
+
+Exit status: 0, or 1 with --fail when anything is found.`
+
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		root, only, one string
+		vet, all, fail  bool
+	)
+	c := cli.New("buildscan [flags]",
+		"What a repository's CI compiles, and the source none of it reaches", longHelp)
+	c.Args = func(_ *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return fmt.Errorf("unexpected argument %q; directories come from --root", args[0])
 		}
-		return 2
+		return nil
 	}
-	if fs.NArg() > 0 {
-		fmt.Fprintf(stderr, "buildscan: unexpected argument %q; directories come from -root\n", fs.Arg(0))
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(scanAll(cli.Out(cmd), cli.Err(cmd), root, only, one, vet, all, fail))
+	}
+	f := c.Flags()
+	f.StringVar(&root, "root", "", "directory holding the checkouts (default: the fleet's GitHub root)")
+	f.StringVar(&only, "repo", "", "scan this owner/name only, and say more about it")
+	f.StringVar(&one, "dir", "", "scan this directory, whatever it is called:\n"+
+		"a worktree made for a measurement is not under owner/name")
+	f.BoolVar(&vet, "vet", false, "also run go vet under each configuration, which COMPILES the tree")
+	f.BoolVar(&all, "all", false, "list the repositories with nothing to report too")
+	f.BoolVar(&fail, "fail", false, "exit 1 if anything is found")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(argv []string, stdout, stderr io.Writer) int {
+	return cli.Drive(RootCmd(), argv, stdout, stderr)
+}
+
+// scanAll is the command's work. The name avoids `scan`, which this package
+// already uses for one repository.
+func scanAll(stdout, stderr io.Writer, root, only, one string, vet, all, fail bool) int {
+	if one != "" && (only != "" || root != "") {
+		fmt.Fprintln(stderr, "buildscan: --dir names one directory; --root and --repo name a place in the fleet's layout")
 		return 2
 	}
 
-	if *one != "" && (*only != "" || *root != "") {
-		fmt.Fprintln(stderr, "buildscan: -dir names one directory; -root and -repo name a place in the fleet's layout")
-		return 2
-	}
-
-	dir := *root
+	dir := root
 	if dir == "" {
 		dir = checkout.DefaultRoot()
 	}
 	var repos []string
-	if *one != "" {
-		dir, repos = filepath.Dir(*one), []string{filepath.Base(*one)}
+	if one != "" {
+		dir, repos = filepath.Dir(one), []string{filepath.Base(one)}
 	} else {
 		var err error
-		repos, err = checkout.Repos(dir, *only)
+		repos, err = checkout.Repos(dir, only)
 		if err != nil {
 			fmt.Fprintf(stderr, "buildscan: %v\n", err)
 			return 2
@@ -266,13 +291,13 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		if f.noGo {
 			continue
 		}
-		if *vet {
+		if vet {
 			f.vetFail = vetAll(f, path)
 		}
 		found = append(found, f)
 	}
 
-	return report(found, *only != "" || *one != "", *all, *fail, *vet, stdout)
+	return report(found, only != "" || one != "", all, fail, vet, stdout)
 }
 
 // scan reads one checkout. name is how the report calls it, which is not

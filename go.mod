@@ -22,6 +22,7 @@ require (
 	github.com/go-pdfkit/html2pdf v0.3.0
 	github.com/go-pdfkit/reader v0.9.0
 	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.10
 	github.com/ulikunitz/xz v0.5.17
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/mod v0.42.0
@@ -63,7 +64,6 @@ require (
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/sergeymakinen/go-bmp v1.0.0 // indirect
 	github.com/sergeymakinen/go-ico v1.0.0 // indirect
-	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/tannevaled/gobig2 v0.2.0 // indirect
 	golang.org/x/crypto v0.58.0 // indirect

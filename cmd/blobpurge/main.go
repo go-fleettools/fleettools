@@ -37,7 +37,6 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -46,41 +45,96 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
 const usage = `usage:
-  blobpurge scan [-min 512KiB] <git-dir>
-  blobpurge strip -blob <id> [-blob <id> ...] -to <new-git-dir> <git-dir>`
+  blobpurge scan [--min 512KiB] <git-dir>
+  blobpurge strip --blob <id> [--blob <id> ...] --to <new-git-dir> <git-dir>`
 
-// run is the whole program, so a test can drive it and read what it says.
+// RootCmd is the command and its two subcommands.
+//
+// scan and strip were a switch on args[0] with a FlagSet each, which is exactly
+// what cobra subcommands are: the shape did not change, only who implements it.
+//
+// ⛔ AND A QUESTION IS NOT A MISTAKE, which the hand-written dispatch could not
+// tell: `-h` was neither "scan" nor "strip", so it fell through to the
+// unknown-subcommand branch and answered 2. The subcommands' own flag sets were
+// already right, so only `blobpurge -h` -- the spelling somebody types first --
+// was wrong. cobra answers it before any RunE, which is the kind of guarantee
+// worth having on a tool whose strip subcommand REWRITES HISTORY.
+func RootCmd() *cobra.Command {
+	c := cli.New("blobpurge", "Find and strip large blobs from a git history", usage)
+	c.AddCommand(scanCmd(), stripCmd())
+	// Naming no subcommand is a usage error, not a help request: a command
+	// whose subcommands rewrite history must have NO default action, and must
+	// not answer 0 to a line that asked for nothing.
+	c.RunE = func(*cobra.Command, []string) error {
+		return cli.Unanswerable("%s", usage)
+	}
+	// ⛔ And help goes to STDOUT for this one, against the repository's default.
+	// cli.New puts it on stderr because stdout is where a command writes its
+	// answer -- but this root writes nothing: the scan table and the strip
+	// report belong to the subcommands. `blobpurge -h | less` is how somebody
+	// reads it, and a test pins the choice.
+	c.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
+		fmt.Fprintln(cmd.OutOrStdout(), usage)
+	})
+	return c
+}
+
+func scanCmd() *cobra.Command {
+	var minFlag string
+	c := cli.New("scan <git-dir>", "Report the blobs of at least --min in a history", usage)
+	c.Args = argsExactly(1)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(scanRepo(cli.Out(cmd), cli.Err(cmd), minFlag, args[0]))
+	}
+	c.Flags().StringVar(&minFlag, "min", "512KiB", "report blobs of at least this size")
+	return c
+}
+
+func stripCmd() *cobra.Command {
+	var (
+		ids idList
+		to  string
+	)
+	c := cli.New("strip --blob <id> --to <new-git-dir> <git-dir>",
+		"Write a new repository with the named blobs removed", usage)
+	c.Args = argsExactly(1)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		if len(ids) == 0 || to == "" {
+			return cli.Unanswerable("%s", usage)
+		}
+		return cli.FromStatus(stripRepo(cli.Out(cmd), cli.Err(cmd), ids, to, args[0]))
+	}
+	f := c.Flags()
+	f.Var(&ids, "blob", "a blob ID to strip (repeatable)")
+	f.StringVar(&to, "to", "", "the new repository to write; must not exist")
+	return c
+}
+
+// argsExactly refuses the wrong number of arguments with the USAGE rather than
+// with cobra's arity sentence, which says how many and not what to type.
+func argsExactly(n int) cobra.PositionalArgs {
+	return func(_ *cobra.Command, args []string) error {
+		if len(args) != n {
+			return fmt.Errorf("%s", usage)
+		}
+		return nil
+	}
+}
+
+// run keeps the signature this command's tests were written against.
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, usage)
-		return 2
-	}
-	// ⛔ A QUESTION IS NOT A MISTAKE, and this dispatch could not tell: `-h` is
-	// neither "scan" nor "strip", so it fell through to the unknown-subcommand
-	// branch below and answered 2. The subcommands' own flag sets were already
-	// right, which is why only `blobpurge -h` -- the spelling somebody types
-	// first -- was wrong.
-	if fleet.IsHelpRequest(args[0]) {
-		fmt.Fprintln(stdout, usage)
-		return 0
-	}
-	switch args[0] {
-	case "scan":
-		return runScan(args[1:], stdout, stderr)
-	case "strip":
-		return runStrip(args[1:], stdout, stderr)
-	}
-	fmt.Fprintln(stderr, usage)
-	return 2
+	return cli.Drive(RootCmd(), args, stdout, stderr)
 }
 
 // git runs git in dir and returns its standard output. Its standard error
@@ -242,23 +296,17 @@ func appendNew(s []string, v string) []string {
 	return append(s, v)
 }
 
+// runScan keeps the signature this command's tests were written against.
 func runScan(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("blobpurge scan", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	minFlag := fs.String("min", "512KiB", "report blobs of at least this size")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
-	if fs.NArg() != 1 {
-		fmt.Fprintln(stderr, usage)
-		return 2
-	}
-	min, err := parseSize(*minFlag)
+	return cli.Drive(scanCmd(), args, stdout, stderr)
+}
+
+func scanRepo(stdout, stderr io.Writer, minFlag, dir string) int {
+	min, err := parseSize(minFlag)
 	if err != nil {
 		fmt.Fprintln(stderr, "blobpurge:", err)
 		return 2
 	}
-	dir := fs.Arg(0)
 	bs, read, err := candidates(dir, min)
 	if err != nil {
 		fmt.Fprintln(stderr, "blobpurge:", err)
@@ -285,31 +333,27 @@ func runScan(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// idList is a repeatable -blob flag.
+// idList is a repeatable --blob flag.
 type idList []string
 
 func (l *idList) String() string { return strings.Join(*l, ",") }
+
+// Type is what pflag asks for and the standard flag package did not: the word
+// printed after the flag's name in the usage line.
+func (l *idList) Type() string { return "blobID" }
 func (l *idList) Set(v string) error {
 	*l = append(*l, v)
 	return nil
 }
 
+// runStrip keeps the signature this command's tests were written against.
 func runStrip(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("blobpurge strip", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	var ids idList
-	fs.Var(&ids, "blob", "a blob ID to strip (repeatable)")
-	to := fs.String("to", "", "the new repository to write; must not exist")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
-	if fs.NArg() != 1 || len(ids) == 0 || *to == "" {
-		fmt.Fprintln(stderr, usage)
-		return 2
-	}
-	src := fs.Arg(0)
-	if _, err := os.Stat(*to); !errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(stderr, "blobpurge: %s already exists: strip writes a NEW repository\n", *to)
+	return cli.Drive(stripCmd(), args, stdout, stderr)
+}
+
+func stripRepo(stdout, stderr io.Writer, ids idList, to, src string) int {
+	if _, err := os.Stat(to); !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(stderr, "blobpurge: %s already exists: strip writes a NEW repository\n", to)
 		return 2
 	}
 	strip, err := resolve(src, ids)
@@ -322,22 +366,22 @@ func runStrip(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "blobpurge:", err)
 		return 1
 	}
-	stats, err := rewrite(src, *to, strip)
+	stats, err := rewrite(src, to, strip)
 	if err != nil {
 		fmt.Fprintln(stderr, "blobpurge:", err)
 		return 1
 	}
-	rep, err := verify(src, *to, strip)
+	rep, err := verify(src, to, strip)
 	if err != nil {
 		fmt.Fprintln(stderr, "blobpurge: THE REWRITE IS WRONG, do not push it:", err)
 		return 1
 	}
-	if _, err := git(*to, "gc", "--quiet", "--prune=now"); err != nil {
+	if _, err := git(to, "gc", "--quiet", "--prune=now"); err != nil {
 		fmt.Fprintln(stderr, "blobpurge:", err)
 		return 1
 	}
 	before, _ := packSize(src)
-	after, _ := packSize(*to)
+	after, _ := packSize(to)
 	fmt.Fprintf(stdout, "stripped %d blobs (%d file entries removed); %d commit signatures dropped, as any rewrite must\n",
 		stats.blobs, stats.entries, signed)
 	fmt.Fprintf(stdout, "checked %d refs, %d commits: metadata identical\n", len(rep.refs), rep.commits)
@@ -346,7 +390,7 @@ func runStrip(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "    %s\n", c)
 	}
 	fmt.Fprintf(stdout, "pack: %s -> %s\n", before, after)
-	fmt.Fprintf(stdout, "nothing was pushed. %s holds the result.\n", *to)
+	fmt.Fprintf(stdout, "nothing was pushed. %s holds the result.\n", to)
 	return 0
 }
 

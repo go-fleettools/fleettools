@@ -56,7 +56,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -68,7 +67,9 @@ import (
 	"time"
 
 	"github.com/go-fleettools/fleettools/internal/checkout"
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 // Platforms is what every module is read as. GOARCH is left at the host's:
@@ -172,18 +173,59 @@ func higher(a, b string) string {
 	return a
 }
 
+const longHelp = `Reads each module's API across platforms and says what its next version would
+be: safe, no-api-change, additions, frozen, or incompatible.
+
+--apply CREATES TAGS for the categories named, comma-separated. There is
+deliberately NO value for incompatible: a breaking change is a decision, not a
+category a sweep may act on.
+
+--pause waits between tags, because GitHub's SECONDARY rate limit brakes a burst
+and waiting is the whole remedy. --dry-run says what would be tagged and creates
+nothing.
+
+Exit status: the sweep's own — see run.`
+
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	root := flag.String("root", checkout.DefaultRoot(), "directory holding org/repo checkouts")
-	only := flag.String("repo", "", "read a single org/repo, verbosely")
-	platforms := flag.String("platforms", strings.Join(defaultPlatforms, ","), "comma-separated GOOS values to read the API under")
-	jobs := flag.Int("jobs", 4, "how many modules to read at once")
-	doFetch := flag.Bool("fetch", true, "fetch each checkout, so the version is derived from the branch head and not from whatever the clone was left at")
-	apply := flag.String("apply", "", "CREATE TAGS for these categories, comma-separated: safe, no-api-change, additions, frozen. There is deliberately no value for incompatible.")
-	dryRun := flag.Bool("dry-run", false, "with -apply, say what would be tagged and create nothing")
-	pause := flag.Duration("pause", 2*time.Second, "with -apply, wait this long between tags; GitHub's SECONDARY limit brakes a burst and waiting is the whole remedy")
-	flag.Parse()
-	os.Exit(run(os.Stdout, os.Stderr, *root, *only, strings.Split(*platforms, ","), *jobs, *doFetch, *apply, *dryRun, *pause))
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command.
+//
+// ⛔ This command's run() ALREADY took its writers and plain values, which is
+// why it is the shortest of the six flag-global conversions: only main() parsed
+// os.Args in place, and the sweep below it was already drivable. The others had
+// to be given that surface.
+func RootCmd() *cobra.Command {
+	var (
+		root, only, platforms, apply string
+		jobs                         int
+		doFetch, dryRun              bool
+		pause                        time.Duration
+	)
+	c := cli.New("vscan [flags]",
+		"What each module's next version would be, and optionally tag it", longHelp)
+	c.Args = cobra.NoArgs
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(run(cli.Out(cmd), cli.Err(cmd), root, only,
+			strings.Split(platforms, ","), jobs, doFetch, apply, dryRun, pause))
+	}
+	f := c.Flags()
+	f.StringVar(&root, "root", checkout.DefaultRoot(), "directory holding org/repo checkouts")
+	f.StringVar(&only, "repo", "", "read a single org/repo, verbosely")
+	f.StringVar(&platforms, "platforms", strings.Join(defaultPlatforms, ","),
+		"comma-separated GOOS values to read the API under")
+	f.IntVar(&jobs, "jobs", 4, "how many modules to read at once")
+	f.BoolVar(&doFetch, "fetch", true,
+		"fetch each checkout, so the version is derived from the branch head and not from whatever the clone was left at")
+	f.StringVar(&apply, "apply", "",
+		"CREATE TAGS for these categories, comma-separated: safe, no-api-change, additions, frozen. "+
+			"There is deliberately no value for incompatible.")
+	f.BoolVar(&dryRun, "dry-run", false, "with --apply, say what would be tagged and create nothing")
+	f.DurationVar(&pause, "pause", 2*time.Second,
+		"with --apply, wait this long between tags; GitHub's SECONDARY limit brakes a burst and waiting is the whole remedy")
+	return c
 }
 
 func run(stdout, stderr io.Writer, root, only string, platforms []string, jobs int, doFetch bool, apply string, dryRun bool, pause time.Duration) int {

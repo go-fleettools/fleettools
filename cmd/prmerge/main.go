@@ -8,6 +8,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +17,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 type prRef struct {
@@ -230,29 +233,53 @@ func orgsToSweep(named []string, all func() ([]byte, error)) ([]string, error) {
 	return orgs, nil
 }
 
+const longHelp = `Merges dependency pull requests that are mergeable AND fully green.
+
+With no argument it sweeps every organisation the token can see, which is
+thousands of REST calls against the hourly budget the fleet's Renovate runners
+share. Name organisations to scope it:
+
+    prmerge go-crdt openweft
+
+A pull request is left alone, with the reason counted, when it is not a renovate
+branch, is a draft, conflicts, has no checks, is not green, raises the Go
+toolchain (left to a person), or sits in a repository another session has
+claimed.
+
+Exit status: 0 the sweep ran, 1 there was nothing to sweep or the organisations
+could not be listed.`
+
 func main() {
-	if len(os.Args) > 1 && fleet.IsHelpRequest(os.Args[1]) {
-		fmt.Println("usage: prmerge [org...]")
-		fmt.Println()
-		fmt.Println("Merges dependency pull requests that are mergeable AND fully green.")
-		fmt.Println("With no argument it sweeps every organisation the token can see,")
-		fmt.Println("which is thousands of REST calls against a budget Renovate shares.")
-		fmt.Println("Name organisations to scope it:")
-		fmt.Println()
-		fmt.Println("    prmerge go-crdt openweft")
-		return
-	}
 	fleet.WarnIfStale(os.Stderr)
-	orgs, err := orgsToSweep(os.Args[1:], func() ([]byte, error) {
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command. The organisations are its arguments; it has no
+// flags, and -h is answered by cobra before RunE, which matters for a command
+// whose default is a sweep of the whole fleet.
+func RootCmd() *cobra.Command {
+	c := cli.New("prmerge [org...]",
+		"Merge dependency pull requests that are mergeable and fully green", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return cli.FromStatus(mergeAll(cli.Out(cmd), cli.Err(cmd), args))
+	}
+	return c
+}
+
+// mergeAll is the whole sweep, taking its writers so that what it prints can be
+// read by something other than a terminal. It had none: every line went to
+// os.Stdout from inside main, which is why nothing here was drivable.
+func mergeAll(stdout, stderr io.Writer, argv []string) int {
+	orgs, err := orgsToSweep(argv, func() ([]byte, error) {
 		return fleet.GH("api", "user/orgs", "--paginate", "--jq", ".[].login")
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "orgs:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "orgs:", err)
+		return 1
 	}
 	if len(orgs) == 0 {
-		fmt.Fprintln(os.Stderr, "orgs: none to sweep")
-		os.Exit(1)
+		fmt.Fprintln(stderr, "orgs: none to sweep")
+		return 1
 	}
 
 	var batches [][]string
@@ -277,7 +304,7 @@ func main() {
 		}
 		raw, err := fleet.GH("api", "-X", "GET", "search/issues", "-f", "q="+q, "-f", "per_page=100", "--paginate")
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "search:", err)
+			fmt.Fprintln(stderr, "search:", err)
 			continue
 		}
 		dec := json.NewDecoder(strings.NewReader(string(raw)))
@@ -300,10 +327,10 @@ func main() {
 		}
 		time.Sleep(2 * time.Second)
 	}
-	fmt.Printf("candidates: %d\n", len(refs))
+	fmt.Fprintf(stdout, "candidates: %d\n", len(refs))
 	held := heldByOthers()
 	if len(held) > 0 {
-		fmt.Printf("claimed by other sessions, skipping: %d repositories\n", len(held))
+		fmt.Fprintf(stdout, "claimed by other sessions, skipping: %d repositories\n", len(held))
 	}
 
 	sem := make(chan struct{}, 3)
@@ -334,7 +361,7 @@ func main() {
 				// lines: it looks like a measurement and is not one.
 				if reported < 5 {
 					reported++
-					fmt.Printf("  view-failed %s#%d: %v\n", r.repo, r.num, err)
+					fmt.Fprintf(stdout, "  view-failed %s#%d: %v\n", r.repo, r.num, err)
 				}
 				mu.Unlock()
 				return
@@ -422,34 +449,35 @@ func main() {
 				// in a summary.
 				skipped["merge-refused ("+refusalKind(err)+")"]++
 				mu.Unlock()
-				fmt.Printf("  REFUSED %s#%d: %v\n", r.repo, r.num, err)
+				fmt.Fprintf(stdout, "  REFUSED %s#%d: %v\n", r.repo, r.num, err)
 				return
 			}
 			mu.Lock()
 			merged++
 			mu.Unlock()
-			fmt.Printf("  merged %s#%d  %s\n", r.repo, r.num, pr.Title)
+			fmt.Fprintf(stdout, "  merged %s#%d  %s\n", r.repo, r.num, pr.Title)
 		}(r)
 	}
 	wg.Wait()
 
-	fmt.Printf("\nmerged: %d\n", merged)
+	fmt.Fprintf(stdout, "\nmerged: %d\n", merged)
 	keys := make([]string, 0, len(skipped))
 	for k := range skipped {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Printf("  skipped %-22s %d\n", k, skipped[k])
+		fmt.Fprintf(stdout, "  skipped %-22s %d\n", k, skipped[k])
 	}
 	for _, k := range []string{"not-green", "no-checks"} {
 		if len(detail[k]) == 0 {
 			continue
 		}
 		sort.Strings(detail[k])
-		fmt.Printf("\n%s:\n", k)
+		fmt.Fprintf(stdout, "\n%s:\n", k)
 		for _, d := range detail[k] {
-			fmt.Printf("  %s\n", d)
+			fmt.Fprintf(stdout, "  %s\n", d)
 		}
 	}
+	return 0
 }

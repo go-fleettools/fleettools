@@ -1,8 +1,8 @@
 // modrename gives a forked Go module its new module path, everywhere the path
 // is a module path and nowhere it is not.
 //
-//	modrename -from github.com/ajroetker/go-highway -to github.com/go-simd/highway DIR          # report
-//	modrename -from github.com/ajroetker/go-highway -to github.com/go-simd/highway -write DIR   # rewrite
+//	modrename --from github.com/ajroetker/go-highway --to github.com/go-simd/highway DIR          # report
+//	modrename --from github.com/ajroetker/go-highway --to github.com/go-simd/highway --write DIR   # rewrite
 //
 // A fork that its consumers can actually use needs a new module path: a
 // `replace` in OUR go.mod never reaches the modules that depend on ours, which
@@ -23,14 +23,12 @@
 // It works on the files git tracks, refuses a dirty tree (so its diff is
 // exactly its own), never follows the path into a longer name
 // (go-highway2 is not go-highway), and only rewrites go.mod, .go and .md
-// files -- the places a module path means something. Without -write it
+// files -- the places a module path means something. Without --write it
 // reports what it would change and exits 1 if anything would.
 package main
 
 import (
 	"bytes"
-	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -39,16 +37,29 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
+const longHelp = `Rewrites a forked Go module's path everywhere the path is a module path, and
+nowhere it is not.
+
+An occurrence directly preceded by '/' is a FILE path and is left alone: the
+605 generated assembly files in go-highway record the directory they were
+generated from, and rewriting that would invent a path that never existed on
+anybody's machine.
+
+It works on the files git tracks, refuses a dirty tree so its diff is exactly
+its own, never follows the path into a longer name (go-highway2 is not
+go-highway), and only touches go.mod, .go and .md files.
+
+Exit status: 0 the files were rewritten (--write), 1 something WOULD change
+(without --write), 2 the rewrite could not be made or nothing names --from.`
+
 func main() {
-	o, code, proceed := parseArgs(os.Args[1:], os.Stderr)
-	if !proceed {
-		os.Exit(code)
-	}
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(o, os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
 }
 
 type options struct {
@@ -56,25 +67,51 @@ type options struct {
 	write         bool
 }
 
+// RootCmd builds the command. Tests drive it through parseArgs, below.
+func RootCmd() *cobra.Command {
+	var o options
+	c := command(&o)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		if err := validate(&o, args); err != nil {
+			return err
+		}
+		// run keeps its body and its integer statuses exactly as they were:
+		// each one is a deliberate choice documented against a defect, and
+		// re-deciding thirty-two of those by hand is how a 1 becomes a 2.
+		return cli.FromStatus(run(o, cli.Out(cmd), cli.Err(cmd)))
+	}
+	return c
+}
+
+func command(o *options) *cobra.Command {
+	c := cli.New("modrename --from OLD --to NEW [--write] DIR",
+		"Give a forked Go module its new module path", longHelp)
+	f := c.Flags()
+	f.StringVar(&o.from, "from", "", "the module path to replace (required)")
+	f.StringVar(&o.to, "to", "", "the new module path (required)")
+	f.BoolVar(&o.write, "write", false, "rewrite the files (otherwise report only)")
+	return c
+}
+
+func validate(o *options, args []string) error {
+	if o.from == "" || o.to == "" || o.from == o.to || len(args) != 1 {
+		return cli.Unanswerable("usage: modrename --from OLD --to NEW [--write] DIR")
+	}
+	o.dir = args[0]
+	return nil
+}
+
+// parseArgs keeps the signature this command's tests were written against, and
+// now parses with pflag through the real command.
 func parseArgs(args []string, stderr io.Writer) (options, int, bool) {
-	fs := flag.NewFlagSet("modrename", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	o := options{}
-	fs.StringVar(&o.from, "from", "", "the module path to replace (required)")
-	fs.StringVar(&o.to, "to", "", "the new module path (required)")
-	fs.BoolVar(&o.write, "write", false, "rewrite the files (otherwise report only)")
-	switch err := fs.Parse(args); {
-	case errors.Is(err, flag.ErrHelp):
-		return o, 0, false
-	case err != nil:
-		return o, 2, false
-	}
-	if o.from == "" || o.to == "" || o.from == o.to || fs.NArg() != 1 {
-		fmt.Fprintln(stderr, "usage: modrename -from OLD -to NEW [-write] DIR")
-		return o, 2, false
-	}
-	o.dir = fs.Arg(0)
-	return o, 0, true
+	var o options
+	c := command(&o)
+	c.RunE = func(_ *cobra.Command, rest []string) error { return validate(&o, rest) }
+	code := cli.Drive(c, args, stderr, stderr)
+	// --help is a status of 0 and NOT a reason to proceed: cobra prints the
+	// help and returns nil, so a caller reading the status alone would print
+	// the help and then do the work.
+	return o, code, code == 0 && !cli.HelpRequested(c)
 }
 
 // Rename returns src with every module-path occurrence of from replaced by to,
