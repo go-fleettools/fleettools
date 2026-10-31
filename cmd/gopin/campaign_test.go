@@ -645,10 +645,11 @@ func TestGomodModeRaisesTheDirectiveReadThroughGoVersionFile(t *testing.T) {
 	if code != 0 || len(w.pushed) != 1 {
 		t.Fatalf("code=%d pushed=%v\n%s", code, w.pushed, out)
 	}
-	// an unreadable go.mod is an error row
+	// a go.mod the workflow names but the repository does not hold is skipped
+	// (see TestAVersionFileOutsideThisRepositoryIsNotAnError for the 5xx case)
 	delete(w.files["o/mod"], "go.mod")
 	code, out, _ = w.run("-from", "1.27.2", "-version", "1.27.3", "-list", w.list("o/mod"), "--gomod")
-	if code != 1 || !strings.Contains(out, "ERROR   o/mod") {
+	if code != 0 || strings.Contains(out, "ERROR") {
 		t.Fatalf("code=%d\n%s", code, out)
 	}
 }
