@@ -275,6 +275,9 @@ func (s *sweeper) handle(repo string) result {
 		}
 	}
 	f := inspectWith(repo, s.cfg.version, s.cfg.from, s.cfg.gomod)
+	if s.cfg.noAlias {
+		f.Aliases, f.Files = 0, nil
+	}
 	switch {
 	case isQuota(f.Err):
 		return s.deferred(repo, f.Err)

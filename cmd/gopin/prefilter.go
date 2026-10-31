@@ -32,6 +32,7 @@ type prefilterStats struct {
 func prefilter(cfg config, repos []string, out, errw io.Writer) error {
 	var st prefilterStats
 	cand := map[string]bool{}
+	var elsewhere []string
 	var read func(batch []string) error
 	read = func(batch []string) error {
 		got, err := graphqlWorkflows(batch)
@@ -43,8 +44,11 @@ func prefilter(cfg config, repos []string, out, errw io.Writer) error {
 					st.NoWorkflows++
 					continue
 				}
-				if wantsMove(texts, cfg) {
+				switch {
+				case wantsMove(texts, cfg):
 					cand[repo] = true
+				case namesFromElsewhere(texts, cfg):
+					elsewhere = append(elsewhere, repo)
 				}
 			}
 			return nil
@@ -76,23 +80,42 @@ func prefilter(cfg config, repos []string, out, errw io.Writer) error {
 			st.Candidates++
 		}
 	}
+	for _, repo := range elsewhere {
+		fmt.Fprintf(errw, "elsewhere %s: names %s outside a go-version line (matrix, env:, input default); not touched\n", repo, cfg.from)
+	}
 	// read = candidates + nothing to move, by construction of the loop above,
 	// and the line says both so a reader can check the sum.
-	fmt.Fprintf(errw, "prefilter: %d read · %d candidates · %d nothing to move (%d without a workflows directory) · %d unreadable by GraphQL (passed on to the REST read)\n",
-		st.Read, st.Candidates, st.Read-st.Candidates, st.NoWorkflows, st.Passed)
+	fmt.Fprintf(errw, "prefilter: %d read · %d candidates · %d nothing to move (%d without a workflows directory, %d naming %s elsewhere) · %d unreadable by GraphQL (passed on to the REST read)\n",
+		st.Read, st.Candidates, st.Read-st.Candidates, st.NoWorkflows, len(elsewhere), cfg.from, st.Passed)
 	return nil
 }
 
 // wantsMove says whether any workflow text names something this run would move.
 func wantsMove(texts []string, cfg config) bool {
 	for _, t := range texts {
-		if reStable.MatchString(t) {
+		if !cfg.noAlias && reStable.MatchString(t) {
 			return true
 		}
 		if cfg.from != "" && reExplicit(cfg.from).MatchString(t) {
 			return true
 		}
 		if cfg.gomod && reVersionFile.MatchString(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// namesFromElsewhere says whether the workflows spell the --from version
+// somewhere gopin does not move it: a matrix list, an env: variable, an input
+// default. Such a repository is not touched, and a campaign must LIST it
+// rather than let "not a candidate" read as "not affected".
+func namesFromElsewhere(texts []string, cfg config) bool {
+	if cfg.from == "" {
+		return false
+	}
+	for _, t := range texts {
+		if strings.Contains(t, cfg.from) {
 			return true
 		}
 	}
