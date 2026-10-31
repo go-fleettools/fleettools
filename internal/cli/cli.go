@@ -202,6 +202,26 @@ func Run(c *cobra.Command) {
 	}
 }
 
+// Exec is Drive for a caller that wants the ERROR rather than a status: it
+// applies the argument shim, runs the command, and returns whatever came back
+// without printing it.
+//
+// Some commands here were written as `run(args, out) error` rather than
+// `run(...) int`, because their failures are sentences and not categories -- a
+// missing index.html, a directory that is not one, a version that is neither
+// MAJOR.MINOR nor main. Their tests read the returned error, so handing those
+// tests a status would throw away precisely what they assert.
+func Exec(c *cobra.Command, args []string, out, errOut io.Writer) error {
+	c.SetOut(out)
+	c.SetErr(errOut)
+	shimmed, err := Compat(c, args, errOut)
+	if err != nil {
+		return err
+	}
+	c.SetArgs(shimmed)
+	return c.Execute()
+}
+
 // Status executes a command, prints whatever its error has to say, and reports
 // the status it would exit with.
 //

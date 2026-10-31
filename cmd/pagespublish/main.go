@@ -36,9 +36,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
 	// Aliased: `pages` is this command's name for the gh-pages checkout.
 	pagesrules "github.com/go-fleettools/fleettools/internal/pages"
+	"github.com/spf13/cobra"
 )
 
 var versionRE = pagesrules.VersionRE
@@ -48,10 +50,36 @@ func main() {
 	// was built from; a publish step run from CI through `go run …@tag` is
 	// exactly where that matters.
 	fleet.WarnIfStale(os.Stderr)
-	if err := run(os.Args[1:], os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "⛔ %v\n", err)
-		os.Exit(2)
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command. Tests drive it through run, below.
+//
+// ⛔ -h ANSWERS, and under cobra it answers before RunE is reached. A command
+// that reads -h as its first argument is one somebody runs to see its flags and
+// gets a publish instead.
+func RootCmd() *cobra.Command {
+	c := cli.New("pagespublish <version> <built site> <gh-pages checkout>",
+		"Put one documentation build into a gh-pages checkout", usage)
+	// Not cobra.ExactArgs(3): it says "accepts 3 arg(s), received 0", which
+	// tells the reader the arity and not what to type. The refusal IS the
+	// usage, and a test pins that.
+	c.Args = func(_ *cobra.Command, args []string) error {
+		if len(args) != 3 {
+			return fmt.Errorf("%s", usage)
+		}
+		return nil
 	}
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		return publish(cli.Out(cmd), args[0], args[1], args[2])
+	}
+	return c
+}
+
+// run keeps the signature this command's tests were written against -- an
+// error rather than a status, because its failures are sentences.
+func run(args []string, out io.Writer) error {
+	return cli.Exec(RootCmd(), args, out, out)
 }
 
 const usage = `usage: pagespublish <version> <built site> <gh-pages checkout>
@@ -62,21 +90,7 @@ replaces <pages>/<version>/ AT THE BRANCH ROOT and nothing else, and then
 versions.json, the latest link and the root redirect are rewritten from the
 versions present.`
 
-func run(args []string, out io.Writer) error {
-	// ⛔ -h ANSWERS. A command that reads -h as its first argument is one
-	// somebody runs to see its flags and gets a publish instead; this
-	// repository has a control for exactly that, and the control was right
-	// about this command before this loop existed.
-	for _, a := range args {
-		if fleet.IsHelpRequest(a) {
-			fmt.Fprintln(out, usage)
-			return nil
-		}
-	}
-	if len(args) != 3 {
-		return fmt.Errorf("%s", usage)
-	}
-	version, site, pages := args[0], args[1], args[2]
+func publish(out io.Writer, version, site, pages string) error {
 	if version != "main" && !versionRE.MatchString(version) {
 		return fmt.Errorf("version %q is neither MAJOR.MINOR nor main", version)
 	}
