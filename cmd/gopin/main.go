@@ -352,8 +352,14 @@ func openPR(repo string, f finding, want, from string) (string, error) {
 			return "", err
 		}
 		modDir := filepath.Dir(full)
-		if out, err := goTidy(modDir); err != nil {
-			return "", fmt.Errorf("go mod tidy in %s: %v: %s", p, err, out)
+		// --no-tidy: a module with `replace => ../sibling` directives cannot be
+		// tidied in a lone clone (measured: 22 of the first 170 repositories of
+		// the Go 1.27.3 campaign). Raising the directive changes no requirement,
+		// so go.sum cannot need a tidy for it; CI is the check.
+		if !noTidy {
+			if out, err := goTidy(modDir); err != nil {
+				return "", fmt.Errorf("go mod tidy in %s: %v: %s", p, err, out)
+			}
 		}
 		staged = append(staged, p)
 		if _, err := os.Stat(filepath.Join(modDir, "go.sum")); err == nil {
@@ -418,6 +424,9 @@ func pinBranch(f finding, want, from string) string {
 	}
 	return "go-" + strings.ReplaceAll(want, ".", "") + "-pinned-because-an-alias-cannot-be-reviewed"
 }
+
+// noTidy skips go mod tidy after raising a go-version-file directive (flag).
+var noTidy bool
 
 // goTidy runs `go mod tidy` in dir.
 var goTidy = func(dir string) (string, error) {
