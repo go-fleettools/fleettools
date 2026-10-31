@@ -37,7 +37,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -48,7 +47,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
 
 // childMarker is set in the environment of every process this starts.
@@ -110,9 +111,83 @@ type report struct {
 	Repos       []result       `json:"repos"`
 }
 
+const longHelp = `Clones each repository listed and asks govulncheck whether it reaches a known
+vulnerability, under each GOOS named.
+
+--go is the GOTOOLCHAIN every scan runs with: the standard library's findings
+are decided by that one version, so a sweep that silently resolved another
+answered a different question.
+
+--state appends each finished repository and skips the ones it already holds, so
+a sweep interrupted after four hours resumes rather than starting again;
+--rescan ignores it and --retry-unread asks again only about the repositories
+that could not be read.
+
+--selftest judges the recorded fixtures and exits: a known positive, a known
+clean, and a known LOAD FAILURE -- because a scan that could not load the
+packages prints no finding, and read as JSON alone that is a clean repository.
+
+Exit status: 0 the sweep ran, 1 something was found, 2 it could not run.`
+
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Stdin, os.Stdout, os.Stderr, os.Args[1:], realRunner))
+	cli.Run(RootCmd())
+}
+
+// scanOptions are the flags, gathered so that the command can bind them and the
+// sweep can read them.
+type scanOptions struct {
+	list, jsonOut, state     string
+	rescan, retry            bool
+	jobs                     int
+	goTool, goosList, goarch string
+	gvc, work                string
+	keep                     bool
+	timeout                  time.Duration
+	self                     bool
+}
+
+// RootCmd builds the command with the real runner behind it.
+func RootCmd() *cobra.Command { return command(realRunner) }
+
+// command is shared with run below, which injects a runner of its own: the
+// tests must not start real processes, and that injection is the only reason
+// run keeps a signature of its own.
+func command(exe runner) *cobra.Command {
+	var o scanOptions
+	home, _ := os.UserHomeDir()
+	c := cli.New("vulnscan [flags]",
+		"Which repositories reach a known vulnerability", longHelp)
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		return cli.FromStatus(scanFleet(cmd.InOrStdin(), cli.Out(cmd), cli.Err(cmd), &o, exe))
+	}
+	f := c.Flags()
+	f.StringVar(&o.list, "list", "", "file of org/repo lines (# comments allowed); stdin when empty")
+	f.StringVar(&o.jsonOut, "json", "", "write the per-repository report here (rewritten as the sweep goes)")
+	f.StringVar(&o.state, "state", "", "append each finished repository here, and skip the ones it already holds")
+	f.BoolVar(&o.rescan, "rescan", false, "with --state, scan every repository again")
+	f.BoolVar(&o.retry, "retry-unread", false, "with --state, scan again the repositories that were UNREAD")
+	// --jobs keeps the old -j as its shorthand.
+	f.IntVarP(&o.jobs, "jobs", "j", 2, fmt.Sprintf("repositories scanned at once (at most %d)", maxJobs))
+	f.StringVar(&o.goTool, "go", "go1.27.3",
+		"GOTOOLCHAIN for every scan: the toolchain CI builds with, which decides every standard-library finding")
+	f.StringVar(&o.goosList, "goos", "linux", "comma-separated GOOS values; each module is scanned under each")
+	f.StringVar(&o.goarch, "goarch", "amd64", "GOARCH for every scan")
+	f.StringVar(&o.gvc, "govulncheck", filepath.Join(home, "go", "bin", "govulncheck"), "govulncheck binary")
+	f.StringVar(&o.work, "work", "", "scratch directory for clones (default: a new one under $TMPDIR)")
+	f.BoolVar(&o.keep, "keep", false, "keep each clone after scanning it")
+	f.DurationVar(&o.timeout, "timeout", 20*time.Minute, "per clone and per govulncheck run")
+	f.BoolVar(&o.self, "selftest", false,
+		"judge the recorded fixtures and exit: a known positive, a known clean, a known load failure")
+	return c
+}
+
+// run keeps the signature this command's tests were written against, including
+// the injected runner and the reader they hand it in place of stdin.
+func run(stdin io.Reader, stdout, stderr io.Writer, args []string, exe runner) int {
+	c := command(exe)
+	c.SetIn(stdin)
+	return cli.Drive(c, args, stdout, stderr)
 }
 
 // realRunner is replaced by a panic in TestMain: see runner.
@@ -132,33 +207,30 @@ func execRunner(ctx context.Context, dir string, env []string, name string, args
 	return []byte(out.String()), []byte(errb.String()), err
 }
 
-func run(stdin io.Reader, stdout, stderr io.Writer, args []string, exe runner) int {
+// scanFleet is the whole sweep. The name avoids `sweep`, which this package's
+// own tests already use for a helper -- the sixth such collision in this
+// migration, and the reason to read a package before adding a function to it.
+func scanFleet(stdin io.Reader, stdout, stderr io.Writer, o *scanOptions, exe runner) int {
 	if os.Getenv(childMarker) != "" {
 		fmt.Fprintf(stderr, "vulnscan: refusing to run under %s=1 -- something vulnscan started is starting vulnscan\n", childMarker)
 		return 2
 	}
-	fs := flag.NewFlagSet("vulnscan", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	home, _ := os.UserHomeDir()
-	var (
-		list     = fs.String("list", "", "file of org/repo lines (# comments allowed); stdin when empty")
-		jsonOut  = fs.String("json", "", "write the per-repository report here (rewritten as the sweep goes)")
-		state    = fs.String("state", "", "append each finished repository here, and skip the ones it already holds")
-		rescan   = fs.Bool("rescan", false, "with -state, scan every repository again")
-		retry    = fs.Bool("retry-unread", false, "with -state, scan again the repositories that were UNREAD")
-		jobs     = fs.Int("j", 2, fmt.Sprintf("repositories scanned at once (at most %d)", maxJobs))
-		goTool   = fs.String("go", "go1.27.3", "GOTOOLCHAIN for every scan: the toolchain CI builds with, which decides every standard-library finding")
-		goosList = fs.String("goos", "linux", "comma-separated GOOS values; each module is scanned under each")
-		goarch   = fs.String("goarch", "amd64", "GOARCH for every scan")
-		gvc      = fs.String("govulncheck", filepath.Join(home, "go", "bin", "govulncheck"), "govulncheck binary")
-		work     = fs.String("work", "", "scratch directory for clones (default: a new one under $TMPDIR)")
-		keep     = fs.Bool("keep", false, "keep each clone after scanning it")
-		timeout  = fs.Duration("timeout", 20*time.Minute, "per clone and per govulncheck run")
-		self     = fs.Bool("selftest", false, "judge the recorded fixtures and exit: a known positive, a known clean, a known load failure")
-	)
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
+	// ⛔ THE SWEEP BELOW IS UNCHANGED, and these ten lines are why. It read its
+	// flags through pointers because they came from a FlagSet; rebinding the
+	// same names to the option struct's fields keeps all six hundred lines
+	// byte-identical, instead of rewriting twenty-five dereferences by hand in
+	// a function whose every exit status is chosen against a defect it once
+	// got wrong. A migration of the flag SPELLING has no business re-deciding
+	// any of them.
+	list, jsonOut, state := &o.list, &o.jsonOut, &o.state
+	rescan, retry := &o.rescan, &o.retry
+	jobs := &o.jobs
+	goTool, goosList, goarch := &o.goTool, &o.goosList, &o.goarch
+	gvc, work := &o.gvc, &o.work
+	keep := &o.keep
+	timeout := &o.timeout
+	self := &o.self
+
 	if *self {
 		return selftest(stdout)
 	}
