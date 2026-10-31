@@ -373,6 +373,12 @@ func (s *sweeper) settle(repo string, r result) result {
 	if r.note != "" {
 		s.printf("        %s: %s\n", r.st, r.note)
 	}
+	// A merge is a write like opening was: resuming a campaign merges one
+	// pull request after another with no CI wait between them, and the SECONDARY
+	// limit brakes exactly that burst. Pace it with the same --pause.
+	if r.st == stMerged && !r.opened {
+		sleep(s.cfg.pause)
+	}
 	return s.record(repo, r)
 }
 

@@ -20,6 +20,34 @@ func TestAliasReportNamesTheGoModDecision(t *testing.T) {
 	}
 }
 
+// Resuming a campaign merges pull request after pull request with no CI wait
+// between them; the merge is a write and is paced with --pause. A pull request
+// this run just opened was already paced by the open.
+func TestMergesOfResumedPullRequestsArePaced(t *testing.T) {
+	w := newWorld(t)
+	w.repo("o/old", pinned272, "")
+	w.repo("o/new", pinned272, "")
+	st := filepath.Join(t.TempDir(), "s.json")
+	seed := `{"from":"1.27.2","version":"1.27.3","repos":{"o/old":{"status":"opened","pr":"https://github.com/o/old/pull/4"}}}`
+	if err := os.WriteFile(st, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := w.run("-from", "1.27.2", "-version", "1.27.3", "-list", w.list("o/old", "o/new"), "-apply", "-follow", "-pause", "7s", "-state", st)
+	if code != 0 {
+		t.Fatalf("code=%d\n%s", code, out)
+	}
+	var sevens int
+	for _, d := range w.sleeps {
+		if d.Seconds() == 7 {
+			sevens++
+		}
+	}
+	// o/old: one pause after its merge; o/new: one after its open, none after its merge.
+	if sevens != 2 {
+		t.Fatalf("pauses of 7s = %d (sleeps %v); want 2", sevens, w.sleeps)
+	}
+}
+
 func TestStateWriteFailuresAreSurfaced(t *testing.T) {
 	dir := t.TempDir()
 	// the rename target is a directory
