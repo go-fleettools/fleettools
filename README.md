@@ -424,24 +424,43 @@ workflow` opens a browser. Until it is run, these pull requests wait.
 |---|---|
 | `govulncheck, judged by vulngate` | this module, judged by `cmd/vulngate` rather than by an exit status. **It moved here from `ci.yml`**, under the same job name, because a branch protection rule names a check and not a workflow. |
 | `vulnscan over the tools that gate the fleet` | `cmd/vulnscan` over `.github/vulnscan-tools.txt` — **blast radius**: what holds the token, refuses a push, or produces the figures other decisions are taken from. |
-| `vulnscan over the repositories that read untrusted bytes` | `cmd/vulnscan` over `.github/vulnscan-decoders.txt` — **exposure**: the parsers, decoders, filesystem and image readers, and the network-facing servers among them. |
+| `vulnscan over the repositories with a network surface` | `cmd/vulnscan` over `.github/vulnscan-exposed.txt` — **exposure**: the browser and proxy, and the filesystems served or fetched over a network. Nightly. Plus `.github/vulnscan-decoders.txt`, the local-byte codecs, **on `workflow_dispatch` only**. |
 
-⛔ **Two lists because they answer two different questions**, and either can be
-dropped without touching the other. And ⛔ **two JOBS rather than two steps**,
-because a step after a failing one is *skipped*: in one job, every night the
-tools sweep went red the decoders would go unswept, and silently.
+⛔ **Two lists because they answer two different questions** — blast radius and
+exposure — and either can be dropped without touching the other. And ⛔ **two
+JOBS rather than two steps**, because a step after a failing one is *skipped*:
+in one job, every night the tools sweep went red the second list would go
+unswept, and silently.
 
 ⛔ **Choosing that second population is what found something.** On 2026-10-31,
-the first sweep anyone had run over it: **58 scanned, 0 unread, 56 clean, and 2
-reaching** `GO-2026-6860` (`golang.org/x/net`, fixed in v0.62.0) — in
+the first sweep anyone had run over the 58 Go repositories of `go-webengine`,
+`go-compressions`, `go-filesystems` and `go-images`: **56 clean and 2 reaching**
+`GO-2026-6860` (`golang.org/x/net`, fixed in v0.62.0) — in
 `go-webengine/browserproxy` through `engineRender → Engine.RenderWithLinks →
 html.Parse`, which is the actual job of that program rather than an init
 artefact. `x/net` was **`// indirect`** there, so no dependency manager had a
 version string to compare or rewrite and **nothing was watching it at all**.
 The repositories that *reach* an advisory are not the ones with the most
-dependencies; they are the ones that read bytes they did not write. 56 of 58
-clean also says this population is in good health: the sweep is insurance, not
-firefighting.
+dependencies; they are the ones that read bytes they did not write.
+
+⛔ **And the nightly list is sized, not chosen.** GitHub rate limits the **git
+transport**, not only the REST API — so a clone-based sweep has a ceiling even
+though it spends none of the REST budget the Renovate runners draw on. Measured
+the same evening, same binary, same toolchain:
+
+| repositories in one run | result |
+|---|---|
+| 13 (tools) | read clean, **twice** |
+| 22 (tools + exposed) | 22 scanned, **0 unread** |
+| 58 (every decoder) | **14 of 58 unread**, every failure a `git clone … 403` |
+
+`UNREAD` is not clean — `vulnscan` exits 2 — so the 58-repository list would
+have made the lane red for a reason that is the *sweep's own*. ⛔ Slicing it
+across the week was rejected rather than untried: it keeps everything in view
+and reintroduces exactly the latency a clock exists to remove, which is how
+those go-pkgx advisories went 2 and 4 days unnoticed. The cut is by **exposure**,
+and the evidence supports it — both repositories that reached an advisory were
+network-facing.
 
 ⛔ **A gate that only fires on a push has the coverage of the repository's
 activity, and the quietest repository needs it most.** Measured on go-pkgx,

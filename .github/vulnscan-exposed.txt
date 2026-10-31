@@ -1,0 +1,47 @@
+# The repositories with a NETWORK SURFACE, swept nightly by
+# .github/workflows/vuln.yml beside vulnscan-tools.txt.
+#
+# WHY THESE AND NOT ALL 58 DECODERS, and the number is the whole argument:
+# GitHub rate limits the git transport, not only the REST API. Measured
+# 2026-10-31 with the same binary and the same toolchain, three runs an hour
+# apart:
+#
+#   13 repositories (vulnscan-tools.txt)        read clean, twice
+#   22 repositories (tools + this list)         22 scanned, 0 UNREAD
+#   58 repositories (every decoder)             14 of 58 UNREAD, every
+#                                               failure a `git clone … 403`
+#
+# So 22 clones a night is under the line and 58 is over it. UNREAD is not
+# clean -- vulnscan exits 2 -- so the 58-repository list would have made the
+# lane RED for a reason that is the sweep's own and not any repository's.
+#
+# ⛔ AND SLICING THE 58 ACROSS THE WEEK WAS THE WRONG ANSWER, which is worth
+# writing down because it was my first one. It keeps every repository in view
+# but reintroduces exactly the latency this workflow exists to remove: an
+# advisory published on Monday would reach Friday's slice on Friday. The whole
+# reason this runs on a clock is that GO-2026-6860 and GO-2026-6866 sat green
+# for days in two go-pkgx repositories and were found 2 and 4 days late.
+#
+# ⛔ SO THE CUT IS BY EXPOSURE, NOT BY CONVENIENCE, and the evidence supports
+# it: both repositories that actually REACHED an advisory in the 58 were
+# network-facing -- go-webengine/browserproxy (html.Parse on pages it did not
+# write, through an `// indirect` x/net) and go-webengine/engine. A codec that
+# decodes a local byte slice has a smaller surface and no transport dependency,
+# which is why the rest live in vulnscan-decoders.txt and run on request.
+#
+# Both of those are fixed as of 2026-10-31: browserproxy v0.2.0 (x/net v0.62.0,
+# Go floor 1.27.3, and a vuln lane of its own), and engine by the session that
+# held it.
+
+# the browser: network in, untrusted HTML parsed
+go-webengine/engine
+go-webengine/browserproxy
+go-webengine/esbuildsandbox
+
+# filesystems served or fetched over a network
+go-filesystems/nfs
+go-filesystems/sftp
+go-filesystems/s3
+go-filesystems/smb
+go-filesystems/webdav
+go-filesystems/remote
