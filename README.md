@@ -417,15 +417,33 @@ case.
 **The fix is one command, and it is not automatable**: `gh auth refresh -s
 workflow` opens a browser. Until it is run, these pull requests wait.
 
-## The two vulnerability lanes, and why one of them runs on a clock
+## The three vulnerability lanes, and why two of them run on a clock
 
-`.github/workflows/vuln.yml` holds both, on `push`, `pull_request`, a **daily**
-`cron` and `workflow_dispatch`.
+`.github/workflows/vuln.yml` holds all three, on `push`, `pull_request`, a
+**daily** `cron` and `workflow_dispatch`.
 
 | | |
 |---|---|
 | `govulncheck, judged by vulngate` | this module, judged by `cmd/vulngate` rather than by an exit status. **It moved here from `ci.yml`**, under the same job name, because a branch protection rule names a check and not a workflow. |
-| `vulnscan over the tools that gate the fleet` | `cmd/vulnscan` over `.github/vulnscan-tools.txt` — the repositories that hold the token, refuse a push, or produce the figures other decisions are taken from. |
+| `vulnscan over the tools that gate the fleet` | `cmd/vulnscan` over `.github/vulnscan-tools.txt` — **blast radius**: what holds the token, refuses a push, or produces the figures other decisions are taken from. |
+| `vulnscan over the repositories that read untrusted bytes` | `cmd/vulnscan` over `.github/vulnscan-decoders.txt` — **exposure**: the parsers, decoders, filesystem and image readers, and the network-facing servers among them. |
+
+⛔ **Two lists because they answer two different questions**, and either can be
+dropped without touching the other. And ⛔ **two JOBS rather than two steps**,
+because a step after a failing one is *skipped*: in one job, every night the
+tools sweep went red the decoders would go unswept, and silently.
+
+⛔ **Choosing that second population is what found something.** On 2026-10-31,
+the first sweep anyone had run over it: **58 scanned, 0 unread, 56 clean, and 2
+reaching** `GO-2026-6860` (`golang.org/x/net`, fixed in v0.62.0) — in
+`go-webengine/browserproxy` through `engineRender → Engine.RenderWithLinks →
+html.Parse`, which is the actual job of that program rather than an init
+artefact. `x/net` was **`// indirect`** there, so no dependency manager had a
+version string to compare or rewrite and **nothing was watching it at all**.
+The repositories that *reach* an advisory are not the ones with the most
+dependencies; they are the ones that read bytes they did not write. 56 of 58
+clean also says this population is in good health: the sweep is insurance, not
+firefighting.
 
 ⛔ **A gate that only fires on a push has the coverage of the repository's
 activity, and the quietest repository needs it most.** Measured on go-pkgx,

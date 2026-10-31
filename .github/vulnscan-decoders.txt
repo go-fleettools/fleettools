@@ -1,0 +1,138 @@
+# The repositories whose job is to read bytes they did not write, swept daily
+# by .github/workflows/vuln.yml beside vulnscan-tools.txt.
+#
+# WHY A SECOND LIST AND NOT MORE LINES IN THE FIRST: that one is a policy about
+# BLAST RADIUS -- the tools that hold the token, refuse a push, or produce the
+# figures other decisions are taken from. This one is a policy about EXPOSURE:
+# parsers, decoders, filesystem and image readers, and the network-facing
+# servers among them. Two different questions, two lists, and either can be
+# dropped from the lane without touching the other.
+#
+# WHAT CHOOSING THIS POPULATION FOUND, 2026-10-31, the first sweep anyone had
+# run over it: 58 scanned, 0 unread, 56 clean, and **2 reaching** GO-2026-6860
+# (golang.org/x/net, fixed in v0.62.0) -- go-webengine/browserproxy and
+# go-webengine/engine. In browserproxy the call paths were
+# engineRender -> Engine.RenderWithLinks -> html.Parse and
+# run -> http.Server.Shutdown -> html.ParseFragment: the actual job of the
+# program, not an init artefact.
+#
+# ⛔ AND x/net WAS `// indirect` THERE. An indirect requirement is not a floor
+# the module declares for itself, so no dependency manager has a version string
+# to compare or rewrite: nothing was watching it, and nothing would have. That
+# is the whole reason this list exists rather than a Renovate rule.
+#
+# ⛔ THE REACHING REPOSITORIES ARE NOT THE ONES WITH THE MOST DEPENDENCIES.
+# They are the ones whose job is to read untrusted bytes. 56 of 58 clean means
+# this population is in good health; the sweep is insurance, not firefighting.
+#
+# ⛔ A REPOSITORY ADDED HERE MUST BE GREEN FIRST. A lane that is red on its
+# first night is not an alarm, it is something people learn to scroll past --
+# which is the failure this whole workflow exists to refuse. Run the sweep by
+# hand over the new line before committing it.
+#
+# ⛔⛔ DO NOT ENABLE THIS LANE YET -- 58 UNAUTHENTICATED CLONES TRIP GITHUB'S
+# RATE LIMIT. Measured here at 22:31 on 2026-10-31, the same list, the same
+# binary, half an hour after a run that read all 58:
+#
+#   58 listed, 58 scanned: CALLED 0, CLEAN 44, NO-GO 0, UNREAD 14
+#   [50/58] UNREAD go-images/gif  could not scan: git clone: exit status 128:
+#           fatal: unable to access 'https://github.com/go-images/gif.git/':
+#           The requested URL returned error: 403
+#
+# Fourteen failures, every one a clone and not a finding. vulnscan makes no REST
+# call per repository -- that claim stands, and it is why this cannot starve the
+# budget the Renovate runners spend from -- but the GIT TRANSPORT is rate
+# limited too, and an unauthenticated sweep of 58 repositories reaches it. The
+# 13-repository tools list does not: it read clean twice tonight.
+#
+# ⛔ And UNREAD IS NOT CLEAN. vulnscan exits 2, so the lane would be RED for a
+# reason that is the SWEEP's and not any repository's -- the precise shape of
+# alarm this workflow was written to refuse.
+#
+# Two ways out, and the choice is a real one rather than an oversight:
+#   - SLICE the list across the week, so each night clones a dozen -- under the
+#     line, and every repository still seen weekly;
+#   - AUTHENTICATE the clones, which raises the limit and gives up the
+#     no-credential property this job was built on.
+#
+# ⛔ AND NOT `-state`, WHICH IS THE ANSWER TO A DIFFERENT QUESTION. It makes a
+# sweep RESUMABLE: it records each repository's verdict and skips what it
+# already holds, so `-retry-unread` reclones only the ones that failed. That is
+# exactly right WITHIN one run -- the 14 clone refusals tonight would have cost
+# 14 retries instead of 58 -- and exactly wrong ACROSS nights: a repository that
+# was CLEAN yesterday is not clean today if an advisory was published since.
+# The code did not change; the DATABASE did, which is the whole reason this runs
+# on a clock. Carrying state between nights would turn the lane into a cache of
+# yesterday's answers.
+#
+# So: slice or authenticate for the volume, and `-state` with `-retry-unread`
+# inside whichever is chosen, so one refused clone does not cost a whole pass.
+# (Verified from tonight's artefacts: the state file holds one verdict per
+# repository with its own `scanned_at`. The run that hit the limit had `-json`
+# but no `-state`, which is why it recloned all 58.)
+
+# the browser: network in, untrusted HTML parsed
+go-webengine/engine
+go-webengine/browserproxy
+go-webengine/esbuildsandbox
+
+# compressed streams
+go-compressions/adc
+go-compressions/appleoracle
+go-compressions/b3sum
+go-compressions/bzip2
+go-compressions/compress
+go-compressions/deflate
+go-compressions/lz4
+go-compressions/lz4c
+go-compressions/lzfse
+go-compressions/lzfsec
+go-compressions/lzip
+go-compressions/lzo
+
+# filesystem images, archives, and the network-facing servers over them
+go-filesystems/apfs
+go-filesystems/btrfs
+go-filesystems/cab
+go-filesystems/cpio
+go-filesystems/detect
+go-filesystems/exfat
+go-filesystems/ext4
+go-filesystems/fat32
+go-filesystems/ffs
+go-filesystems/hfsplus
+go-filesystems/hostcopy
+go-filesystems/interface
+go-filesystems/iso9660
+go-filesystems/nfs
+go-filesystems/ntfs
+go-filesystems/oci
+go-filesystems/osfs
+go-filesystems/overlay
+go-filesystems/playground
+go-filesystems/rar
+go-filesystems/remote
+go-filesystems/rpm
+go-filesystems/s3
+go-filesystems/sevenzip
+go-filesystems/sftp
+go-filesystems/smb
+go-filesystems/squashfs
+go-filesystems/ufs
+go-filesystems/uefi
+go-filesystems/unarchive
+go-filesystems/warc
+go-filesystems/webdav
+go-filesystems/xar
+go-filesystems/xfs
+go-filesystems/zfs
+
+# image decoders
+go-images/depth
+go-images/gif
+go-images/images
+go-images/jpeg
+go-images/jpeg2000
+go-images/png
+go-images/psd
+go-images/webp
