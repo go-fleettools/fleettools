@@ -23,7 +23,6 @@ package main
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,8 +34,29 @@ import (
 
 	"golang.org/x/net/html"
 
+	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/spf13/cobra"
 )
+
+const longHelp = `Fetches each URL and prints its status and, for each string, whether the page
+contains it.
+
+    pagetext https://example.org "a title" "a sentence"
+    pagetext --retry 6 URL want -- URL want
+
+Flags go BEFORE the first URL, and -- separates one URL's group from the next.
+Flag parsing stops at the first URL, so a -- after it is a separator and not a
+terminator.
+
+By default the match is on the page's TEXT (tags dropped, entities decoded,
+whitespace collapsed, script and style ignored); --raw matches the raw bytes. A
+cache-busting query parameter is added unless --no-cache-bust, because Pages'
+CDN can serve the previous build for a while after a deploy. --retry N polls up
+to N more times, --wait apart, until the page is 200 and has every string.
+
+Exit status: 0 every page is 200 and has every string, 1 one does not, 2 a usage
+error.`
 
 // maxBody bounds what is read from one response: a page with a data URL in it
 // can be megabytes, and a hostile or broken server can send forever.
@@ -50,7 +70,34 @@ var (
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	cli.Run(RootCmd())
+}
+
+// RootCmd builds the command. Tests drive it through run, below.
+func RootCmd() *cobra.Command {
+	var (
+		o      options
+		noBust bool
+	)
+	c := cli.New("pagetext [flags] URL want... [-- URL want...]",
+		"Whether each page is 200 and contains each string", longHelp)
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		o.bust = !noBust
+		return cli.FromStatus(checkAll(cli.Out(cmd), cli.Err(cmd), o, args))
+	}
+	f := c.Flags()
+	f.BoolVar(&o.raw, "raw", false, "match the raw bytes instead of the page's text")
+	f.BoolVar(&noBust, "no-cache-bust", false, "do not add the nocache=<time> query parameter")
+	f.IntVar(&o.retry, "retry", 0,
+		"poll up to N more times until the page is 200 and has every string")
+	f.DurationVar(&o.wait, "wait", 20*time.Second, "time between polls")
+	f.DurationVar(&o.timeout, "timeout", 20*time.Second, "timeout of one request")
+	return c
+}
+
+// run keeps the signature this command's tests were written against.
+func run(args []string, out, errOut io.Writer) int {
+	return cli.Drive(RootCmd(), args, out, errOut)
 }
 
 type options struct {
@@ -61,40 +108,16 @@ type options struct {
 	timeout time.Duration
 }
 
-func run(args []string, out, errOut io.Writer) int {
-	fs := flag.NewFlagSet("pagetext", flag.ContinueOnError)
-	fs.SetOutput(errOut)
-	fs.Usage = func() {
-		fmt.Fprint(errOut, `usage: pagetext [-raw] [-no-cache-bust] [-retry N] [-wait 20s] [-timeout 20s] URL want... [-- URL want...]
-
-Fetches each URL and prints its status and, for each string, whether the page
-contains it. Flags go BEFORE the first URL. Exits 1 if any page is not 200 or
-lacks any string, 2 on a usage error.
-
-By default the match is on the page's text (tags dropped, entities decoded,
-whitespace collapsed, script and style ignored); -raw matches the raw bytes.
-A cache-busting query parameter is added unless -no-cache-bust: Pages' CDN can
-serve the previous build for a while after a deploy. -retry N polls up to N more
-times, -wait apart, until the page is 200 and has every string.
-`)
-	}
-	var o options
-	fs.BoolVar(&o.raw, "raw", false, "match the raw bytes instead of the page's text")
-	noBust := fs.Bool("no-cache-bust", false, "do not add the nocache=<time> query parameter")
-	fs.IntVar(&o.retry, "retry", 0, "poll up to N more times until the page is 200 and has every string")
-	fs.DurationVar(&o.wait, "wait", 20*time.Second, "time between polls")
-	fs.DurationVar(&o.timeout, "timeout", 20*time.Second, "timeout of one request")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
-	o.bust = !*noBust
+// checkAll is the command's work. The name avoids `check`, which this package
+// already uses for one page.
+func checkAll(out, errOut io.Writer, o options, args []string) int {
 	if o.retry < 0 || o.wait < 0 || o.timeout <= 0 {
-		fmt.Fprintln(errOut, "pagetext: -retry and -wait must not be negative, -timeout must be positive")
+		fmt.Fprintln(errOut, "pagetext: --retry and --wait must not be negative, --timeout must be positive")
 		return 2
 	}
-	groups := split(fs.Args())
+	groups := split(args)
 	if len(groups) == 0 {
-		fs.Usage()
+		fmt.Fprintln(errOut, longHelp)
 		return 2
 	}
 	for _, g := range groups {

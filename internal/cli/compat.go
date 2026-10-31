@@ -32,7 +32,23 @@ import (
 // single-dash token is left exactly as it came so that pflag still produces its
 // own error, and everything after a bare `--` is an argument, not a flag.
 func Compat(c *cobra.Command, args []string, warn io.Writer) ([]string, error) {
-	flags := c.Flags()
+	// ⛔ THE FLAGS TO LOOK UP ARE THE SUBCOMMAND'S, not the root's. A first
+	// version of this used c.Flags() alone, so it rewrote nothing for a command
+	// with subcommands: `blobpurge strip -blob X -to Y dir` reached pflag
+	// untouched and died on "unknown shorthand flag: 'b' in -blob". blobpurge's
+	// own tests caught it, which is the only reason it did not reach the fleet
+	// -- every unit test of this shim used a flat command, so the shim was
+	// proven on the shape that could not fail.
+	target := c
+	if found, _, err := c.Find(args); err == nil && found != nil {
+		target = found
+	}
+	// ⛔ AND --help IS NOT REGISTERED YET. cobra adds it lazily, inside
+	// Execute, so at this point Lookup("help") answers nil and `-help` -- which
+	// the standard flag package accepted -- was passed through to pflag and
+	// refused. Asking for it explicitly is the whole fix; it is idempotent.
+	target.InitDefaultHelpFlag()
+	flags := target.Flags()
 	out := make([]string, 0, len(args))
 	var rewritten []string
 

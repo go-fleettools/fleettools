@@ -65,6 +65,54 @@ func TestTheFleetsOwnSpellingKeepsWorking(t *testing.T) {
 	}
 }
 
+// ⛔ THE SHAPE EVERY OTHER TEST HERE MISSED: a command with SUBCOMMANDS, whose
+// flags live on the subcommand rather than on the root.
+//
+// The first version of Compat looked up c.Flags() alone, so it rewrote nothing
+// for `blobpurge strip -blob X -to Y dir`: those flags reached pflag untouched
+// and died on "unknown shorthand flag: 'b' in -blob". Every test above used a
+// FLAT command, so the shim was proven on the one shape that could not fail,
+// and blobpurge's own tests are what caught it.
+//
+// Pinned here too: cobra registers --help LAZILY, inside Execute, so `-help`
+// found no flag to rewrite until Compat asked for it.
+func TestASubcommandsOwnFlagsAreRewrittenToo(t *testing.T) {
+	build := func() *cobra.Command {
+		root := New("tool", "", "")
+		var blob, to string
+		sub := New("strip", "", "")
+		sub.Flags().StringVar(&blob, "blob", "", "")
+		sub.Flags().StringVar(&to, "to", "", "")
+		sub.RunE = func(*cobra.Command, []string) error { return nil }
+		root.AddCommand(sub)
+		return root
+	}
+
+	var warn bytes.Buffer
+	got, err := Compat(build(), []string{"strip", "-blob", "abc", "-to", "new", "dir"}, &warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "strip --blob abc --to new dir"
+	if strings.Join(got, " ") != want {
+		t.Errorf("Compat on a subcommand = %v,\nwant %q", got, want)
+	}
+
+	// And it must RUN, not merely rewrite: the rewrite is only right if pflag
+	// then accepts it.
+	if code := Drive(build(), []string{"strip", "-blob", "abc", "-to", "new", "dir"},
+		&bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Errorf("the rewritten line exited %d, want 0", code)
+	}
+
+	for _, help := range []string{"-help", "--help", "-h"} {
+		var out bytes.Buffer
+		if code := Drive(build(), []string{help}, &out, &out); code != 0 {
+			t.Errorf("%s exited %d, want 0", help, code)
+		}
+	}
+}
+
 // The other half, in three directions: what must NOT be touched.
 func TestCompatLeavesAloneWhatIsNotItsBusiness(t *testing.T) {
 	for _, in := range [][]string{
