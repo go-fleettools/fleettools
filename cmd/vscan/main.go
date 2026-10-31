@@ -447,8 +447,24 @@ var askGorelease = func(dir, base, goos string) reading {
 func parseGorelease(out, goos string) reading {
 	r := reading{goos: goos}
 	var refusal string
-	var wantReason bool
+	var wantReason, inErr bool
 	for _, line := range strings.Split(out, "\n") {
+		// ⛔ A gorelease error can run over several lines, and the cause is on
+		// the LAST of them. When the go command refuses the module graph it
+		// prints the requirement chain after gorelease's own line:
+		//
+		//	gorelease: preparing to load packages for M@v0.13.3: ...: go: -d flag is deprecated. -d=true is a no-op
+		//	go: M@v0.13.3 requires
+		//		github.com/ajroetker/go-highway@v0.0.12 requires
+		//		github.com/ajroetker/go-highway/hwy/goat@v0.0.0: reading ...: unknown revision hwy/goat/v0.0.0
+		//
+		// Keeping only the first line kept a harmless deprecation warning and
+		// threw the reason away, so graphUnreadable never saw it.
+		if inErr && (strings.HasPrefix(line, "go: ") || strings.HasPrefix(line, "\t")) {
+			r.err += " " + strings.TrimSpace(line)
+			continue
+		}
+		inErr = false
 		switch {
 		case strings.HasPrefix(line, "Suggested version: "):
 			r.suggested = strings.TrimSpace(strings.TrimPrefix(line, "Suggested version: "))
@@ -458,6 +474,7 @@ func parseGorelease(out, goos string) reading {
 			r.grew++
 		case strings.HasPrefix(line, "gorelease: "):
 			r.err = strings.TrimSpace(strings.TrimPrefix(line, "gorelease: "))
+			inErr = true
 		case strings.HasPrefix(line, "Cannot suggest a release version."):
 			// ⛔ Keep gorelease's OWN words. An earlier version replaced every
 			// one of these with "said nothing this could read", and eleven
