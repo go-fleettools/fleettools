@@ -156,7 +156,7 @@ func TestRunRefusesAnEmptyList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := run([]string{"-version", "1.27.1", "-list", f}, &out, &errb); code != 1 {
+	if code := run([]string{"-version", "1.27.1", "-list", f}, strings.NewReader(""), &out, &errb); code != 1 {
 		t.Fatalf("code = %d; want 1", code)
 	}
 	if !strings.Contains(errb.String(), "not a clean fleet") {
@@ -166,7 +166,7 @@ func TestRunRefusesAnEmptyList(t *testing.T) {
 
 func TestRunRequiresAVersion(t *testing.T) {
 	var out, errb strings.Builder
-	if code := run(nil, &out, &errb); code != 2 {
+	if code := run(nil, strings.NewReader(""), &out, &errb); code != 2 {
 		t.Fatalf("code = %d; want 2", code)
 	}
 	if !strings.Contains(errb.String(), "same unreviewable choice as `stable`") {

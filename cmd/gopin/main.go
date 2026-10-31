@@ -43,18 +43,14 @@ package main
 import (
 	"encoding/base64"
 	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
-
-	"github.com/go-fleettools/fleettools/internal/fleet"
 )
 
 // reStable matches the alias in both spellings the fleet uses: a block mapping
@@ -93,7 +89,7 @@ var reLiteral = regexp.MustCompile(`go-version:\s*['"]?(\d+\.\d+(?:\.\d+)?)['"]?
 // prTitle names the job this pull request actually does. A repository that
 // never said `stable` must not receive a title claiming otherwise.
 func prTitle(f finding, want, from string) string {
-	if f.Aliases == 0 && f.Moves > 0 {
+	if f.Aliases == 0 && f.moveCount() > 0 {
 		return "ci: move the Go pin from " + from + " to " + want
 	}
 	return "ci: pin Go " + want + " instead of `stable`"
@@ -125,169 +121,28 @@ type finding struct {
 	// different pull requests.
 	MoveFiles []string `json:"movefiles,omitempty"`
 	Moves     int      `json:"moves,omitempty"`
+
+	// GoModFiles are the go.mod files a workflow reads its version from
+	// (`go-version-file:`) whose go directive is EXACTLY the -from version.
+	// gopin cannot see those through a `go-version:` line; --gomod looks.
+	GoModFiles []string `json:"gomodfiles,omitempty"`
 }
 
-func main() {
-	// Every command here does this first: a binary built from an older
-	// checkout than HEAD says so rather than quietly doing an older thing.
-	// It matters more for this one than most, since it writes to other
-	// people's repositories.
-	fleet.WarnIfStale(os.Stderr)
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
-}
-
-func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("gopin", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	version := fs.String("version", "", "the Go version to pin, e.g. 1.27.1 (required)")
-	from := fs.String("from", "", "also move workflows pinned to EXACTLY this version to -version, e.g. -from 1.27.1 -version 1.27.2 after a Go security release; an exact match, so a repository held back on purpose at some other version is not a candidate")
-	list := fs.String("list", "", "file of org/repo lines, # comments; default: read stdin")
-	apply := fs.Bool("apply", false, "open pull requests; without it this only reports")
-	pause := fs.Duration("pause", 3*time.Second, "wait this long between repositories; GitHub's SECONDARY limit brakes a burst and waiting is the whole remedy")
-	limit := fs.Int("limit", 0, "stop after this many repositories that needed a change (0: no limit)")
-	if code, ok := fleet.ParseFlags(fs, args); !ok {
-		return code
-	}
-	if *version == "" {
-		fmt.Fprintln(stderr, "gopin: -version is required: there is no safe default, and a default would be the same unreviewable choice as `stable`")
-		return 2
-	}
-	target, err := parseGoVersion(*version)
-	if err != nil {
-		fmt.Fprintf(stderr, "gopin: %v\n", err)
-		return 2
-	}
-	if *from != "" {
-		fromV, err := parseGoVersion(*from)
-		if err != nil {
-			fmt.Fprintf(stderr, "gopin: -from %v\n", err)
-			return 2
-		}
-		if *from == *version {
-			fmt.Fprintln(stderr, "gopin: -from and -version name the same version, so there is nothing to move")
-			return 2
-		}
-		// ⛔ FORWARD ONLY. The reason to move an explicit pin is a release
-		// that fixes something; moving one BACKWARDS is a different act and
-		// not one to perform across a fleet by accident.
-		if target.olderThan(fromV) {
-			fmt.Fprintf(stderr, "gopin: -version %s is older than -from %s; this moves pins forward, and going back is not a sweep\n", *version, *from)
-			return 2
-		}
-	}
-
-	repos, err := readList(*list)
-	if err != nil {
-		fmt.Fprintf(stderr, "gopin: %v\n", err)
-		return 2
-	}
-	// A sweep with an empty corpus reports "nothing to do" exactly like one
-	// that read everything.
-	if len(repos) == 0 {
-		fmt.Fprintln(stderr, "gopin: the list is empty — that is a failure, not a clean fleet")
-		return 1
-	}
-
-	// ⛔ ONE COUNTER CANNOT CARRY TWO CLAIMS. The totals said "N hold the
-	// alias" off the shared `changed`, so the first -from run reported
-	// "5 hold the alias" about five repositories that held no alias at all —
-	// every line above it saying REPIN. A summary that contradicts its own
-	// detail is worse than no summary, because the summary is what gets
-	// quoted.
-	var changed, aliased, repinned, skipped, failed, opened, archived int
-	for _, repo := range repos {
-		f := inspect(repo, *version, *from)
-		switch {
-		case f.Err != "":
-			failed++
-			fmt.Fprintf(stdout, "ERROR   %s: %s\n", repo, f.Err)
-			continue
-		case f.Aliases == 0 && f.Moves > 0:
-			// An explicit pin on the version being moved away from. Reported
-			// under its own word, because "ALIAS" would say the opposite of
-			// what is true here: this repository CAN be reviewed, it is
-			// simply on a Go that something is wrong with.
-			changed++
-			repinned++
-			fmt.Fprintf(stdout, "REPIN   %s: %d × %s -> %s in %s\n", repo, f.Moves, *from, *version, strings.Join(f.MoveFiles, " "))
-		case f.Aliases == 0:
-			skipped++
-			if len(f.Literals) > 0 {
-				fmt.Fprintf(stdout, "pinned  %s (%s)\n", repo, strings.Join(f.Literals, " "))
-			}
-			continue
-		default:
-			changed++
-			aliased++
-			fmt.Fprintf(stdout, "ALIAS   %s: %d in %s", repo, f.Aliases, strings.Join(f.Files, " "))
-			held, isHeld := heldBackBy(f.Literals, target)
-			switch {
-			case olderGoMod(f.GoMod, target) && isHeld:
-				fmt.Fprintf(stdout, " ; go.mod HELD at %s by the %s pin", f.GoMod, held)
-			case olderGoMod(f.GoMod, target):
-				fmt.Fprintf(stdout, " ; go.mod %s -> %s", f.GoMod, *version)
-			}
-			if len(f.Literals) > 0 {
-				fmt.Fprintf(stdout, " ; leaving %s alone", strings.Join(f.Literals, " "))
-			}
-			fmt.Fprintln(stdout)
-		}
-		if *apply {
-			switch err := open(repo, f, *version, *from); {
-			case errors.Is(err, errArchived):
-				archived++
-				fmt.Fprintf(stdout, "        skipped: %v\n", err)
-			case err != nil:
-				failed++
-				fmt.Fprintf(stdout, "        pull request FAILED: %v\n", err)
-			default:
-				opened++
-			}
-			time.Sleep(*pause)
-		}
-		if *limit > 0 && changed >= *limit {
-			fmt.Fprintf(stdout, "stopping at -limit %d\n", *limit)
-			break
-		}
-	}
-	fmt.Fprintf(stdout, "\n%d read · %d hold the alias · %d already explicit · %d unreadable", len(repos), aliased, skipped, failed)
-	if repinned > 0 {
-		fmt.Fprintf(stdout, " · %d to move from %s", repinned, *from)
-	}
-	if *apply {
-		fmt.Fprintf(stdout, " · %d pull request(s) opened", opened)
-		if archived > 0 {
-			fmt.Fprintf(stdout, " · %d archived and skipped", archived)
-		}
-	}
-	fmt.Fprintln(stdout)
-	if failed > 0 {
-		return 1
-	}
-	return 0
-}
-
-// readList reads org/repo lines from a file or stdin.
-func readList(path string) ([]string, error) {
-	var b []byte
-	var err error
-	if path == "" {
-		b, err = io.ReadAll(os.Stdin)
-	} else {
-		b, err = os.ReadFile(path)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return readListFrom(string(b))
-}
-
-// ghJSON is a seam over fleet.GH so the inspection is testable.
-var ghJSON = func(args ...string) ([]byte, error) { return fleet.GH(args...) }
+// moveCount is every place this repository names the version being left:
+// workflow lines plus go.mod files that CI reads through go-version-file.
+func (f finding) moveCount() int { return f.Moves + len(f.GoModFiles) }
 
 // inspect reads a repository's default branch and says what it needs.
-func inspect(repo, want, from string) finding {
+func inspect(repo, want, from string) finding { return inspectWith(repo, want, from, false) }
+
+// reVersionFile finds the go.mod a workflow reads its Go version from.
+var reVersionFile = regexp.MustCompile(`go-version-file:\s*['"]?([^\s'"#]+)`)
+
+// inspectWith is inspect, optionally also following go-version-file to the
+// go.mod it names (gomod), which the go-version lines cannot show.
+func inspectWith(repo, want, from string, gomod bool) finding {
 	f := finding{Repo: repo}
+	modPaths := map[string]bool{}
 	names, err := workflowNames(repo)
 	if err != nil {
 		f.Err = err.Error()
@@ -313,6 +168,26 @@ func inspect(repo, want, from string) finding {
 		for _, m := range reLiteral.FindAllStringSubmatch(body, -1) {
 			lits[m[1]] = true
 		}
+		if gomod && from != "" {
+			for _, m := range reVersionFile.FindAllStringSubmatch(body, -1) {
+				modPaths[path.Clean(m[1])] = true
+			}
+		}
+	}
+	for _, p := range sortedKeys(modPaths) {
+		// A go-version-file need not be a go.mod (.go-version, .tool-versions);
+		// only a go.mod has the directive this edits.
+		if path.Base(p) != "go.mod" {
+			continue
+		}
+		body, err := getFile(repo, p)
+		if err != nil {
+			f.Err = err.Error()
+			return f
+		}
+		if m := reGoDirective.FindStringSubmatch(body); m != nil && m[1] == from {
+			f.GoModFiles = append(f.GoModFiles, p)
+		}
 	}
 	for v := range lits {
 		f.Literals = append(f.Literals, v)
@@ -324,6 +199,15 @@ func inspect(repo, want, from string) finding {
 		}
 	}
 	return f
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // workflowNames lists the repository's workflow files. A repository with no
@@ -381,13 +265,20 @@ func getFile(repo, path string) (string, error) {
 // redacts what it prints. A token must never reach a URL, a command line or
 // an environment variable.
 func open(repo string, f finding, want, from string) error {
+	_, err := openPR(repo, f, want, from)
+	return err
+}
+
+// openPR is open, and also returns the pull request's URL (empty when there
+// was nothing to change), which --follow needs to wait on and merge it.
+func openPR(repo string, f finding, want, from string) (string, error) {
 	base, err := defaultBranch(repo)
 	if err != nil {
-		return err
+		return "", err
 	}
 	dir, err := osMkdirTemp("", "gopin-*")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(dir)
 
@@ -395,18 +286,15 @@ func open(repo string, f finding, want, from string) error {
 	// 258 full clones would be minutes spent on history nobody reads.
 	if out, err := git("", "clone", "--depth", "1", "--single-branch",
 		"--branch", base, "https://github.com/"+repo+".git", dir); err != nil {
-		return fmt.Errorf("clone: %v: %s", err, out)
+		return "", fmt.Errorf("clone: %v: %s", err, out)
 	}
 	// The branch and the title say which of the two jobs this is. A pull
 	// request titled "instead of `stable`" against a repository that never
 	// said `stable` is a claim its reviewer can check and find false, and
 	// then nothing else in the body is worth their time either.
-	branch := "go-" + strings.ReplaceAll(want, ".", "") + "-pinned-because-an-alias-cannot-be-reviewed"
-	if f.Aliases == 0 {
-		branch = "go-" + strings.ReplaceAll(want, ".", "") + "-moved-from-" + strings.ReplaceAll(from, ".", "")
-	}
+	branch := pinBranch(f, want, from)
 	if out, err := git(dir, "checkout", "-b", branch); err != nil {
-		return fmt.Errorf("branch: %v: %s", err, out)
+		return "", fmt.Errorf("branch: %v: %s", err, out)
 	}
 
 	changed := 0
@@ -414,14 +302,14 @@ func open(repo string, f finding, want, from string) error {
 		path := filepath.Join(dir, ".github", "workflows", n)
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return "", err
 		}
 		next := reStable.ReplaceAllString(string(b), "${1}'"+want+"'${2}")
 		if next == string(b) {
 			continue
 		}
 		if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
-			return err
+			return "", err
 		}
 		changed++
 	}
@@ -433,14 +321,43 @@ func open(repo string, f finding, want, from string) error {
 		path := filepath.Join(dir, ".github", "workflows", n)
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return "", err
 		}
 		next := reExplicit(from).ReplaceAllString(string(b), "${1}'"+want+"'${2}")
 		if next == string(b) {
 			continue
 		}
 		if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
-			return err
+			return "", err
+		}
+		changed++
+	}
+	// --gomod: CI reads its version from go.mod, so moving the pin IS raising
+	// the directive there, then tidying. Only a directive that is EXACTLY the
+	// -from version was recorded by inspect, so a module that needs more is
+	// left alone. go.mod and go.sum are staged by name below, never `commit -a`
+	// over whatever tidy touched.
+	var staged []string
+	for _, p := range f.GoModFiles {
+		full := filepath.Join(dir, filepath.FromSlash(p))
+		b, err := os.ReadFile(full)
+		if err != nil {
+			return "", err
+		}
+		next := reGoDirective.ReplaceAllString(string(b), "go "+want)
+		if next == string(b) {
+			continue
+		}
+		if err := os.WriteFile(full, []byte(next), 0o644); err != nil {
+			return "", err
+		}
+		modDir := filepath.Dir(full)
+		if out, err := goTidy(modDir); err != nil {
+			return "", fmt.Errorf("go mod tidy in %s: %v: %s", p, err, out)
+		}
+		staged = append(staged, p)
+		if _, err := os.Stat(filepath.Join(modDir, "go.sum")); err == nil {
+			staged = append(staged, path.Join(path.Dir(p), "go.sum"))
 		}
 		changed++
 	}
@@ -448,14 +365,18 @@ func open(repo string, f finding, want, from string) error {
 	// names an older version on purpose breaks the moment the directive goes
 	// past it, because setup-go sets GOTOOLCHAIN=local and the pin is then
 	// enforced rather than re-downloaded.
+	//
+	// Only the alias case raises go.mod. The -from case says in its own pull
+	// request body that go.mod is NOT raised (the directive is a minimum for
+	// consumers), and a campaign must not do the one thing its body denies.
 	_, isHeld := heldBackBy(f.Literals, mustParse(want))
-	if cur, err := parseGoVersion(f.GoMod); !isHeld && f.GoMod != "" && err == nil && cur.olderThan(mustParse(want)) {
+	if cur, err := parseGoVersion(f.GoMod); f.Aliases > 0 && !isHeld && f.GoMod != "" && err == nil && cur.olderThan(mustParse(want)) {
 		path := filepath.Join(dir, "go.mod")
 		if b, err := os.ReadFile(path); err == nil {
 			next := reGoDirective.ReplaceAllString(string(b), "go "+want)
 			if next != string(b) {
 				if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
-					return err
+					return "", err
 				}
 				changed++
 			}
@@ -464,23 +385,46 @@ func open(repo string, f finding, want, from string) error {
 	// Nothing to say is not a failure, but it must not become an empty pull
 	// request either.
 	if changed == 0 {
-		return nil
+		return "", nil
 	}
 
-	if out, err := git(dir, "commit", "-aqm", commitMessage(f, want, from)); err != nil {
-		return fmt.Errorf("commit: %v: %s", err, out)
+	commitArgs := []string{"commit", "-aqm", commitMessage(f, want, from)}
+	if len(staged) > 0 {
+		if out, err := git(dir, append([]string{"add", "--"}, staged...)...); err != nil {
+			return "", fmt.Errorf("add: %v: %s", err, out)
+		}
+	}
+	if out, err := git(dir, commitArgs...); err != nil {
+		return "", fmt.Errorf("commit: %v: %s", err, out)
 	}
 	if out, err := push(dir, branch); err != nil {
-		return fmt.Errorf("gitpush: %v: %s", err, out)
+		return "", fmt.Errorf("gitpush: %v: %s", err, out)
 	}
 	bodyFile, err := osCreateTempFile(prBody(f, want, from))
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.Remove(bodyFile)
-	_, err = ghJSON("pr", "create", "--repo", repo, "--base", base, "--head", branch,
+	out, err := ghJSON("pr", "create", "--repo", repo, "--base", base, "--head", branch,
 		"--title", prTitle(f, want, from), "--body-file", bodyFile)
-	return err
+	return strings.TrimSpace(string(out)), err
+}
+
+// pinBranch names the branch for this job. The same name every run is what
+// lets an interrupted campaign find its own pull request again.
+func pinBranch(f finding, want, from string) string {
+	if f.Aliases == 0 {
+		return "go-" + strings.ReplaceAll(want, ".", "") + "-moved-from-" + strings.ReplaceAll(from, ".", "")
+	}
+	return "go-" + strings.ReplaceAll(want, ".", "") + "-pinned-because-an-alias-cannot-be-reviewed"
+}
+
+// goTidy runs `go mod tidy` in dir.
+var goTidy = func(dir string) (string, error) {
+	cmd := exec.Command("go", "mod", "tidy")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
 // git runs git in dir (or anywhere, for a clone) and returns its combined

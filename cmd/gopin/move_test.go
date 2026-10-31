@@ -156,7 +156,7 @@ func TestFromRefusesWhatItCannotMean(t *testing.T) {
 		"backwards":    {"-version", "1.27.1", "-from", "1.27.2"},
 	} {
 		var out, errb strings.Builder
-		if code := run(args, &out, &errb); code != 2 {
+		if code := run(args, strings.NewReader(""), &out, &errb); code != 2 {
 			t.Errorf("%s: code=%d, want 2; stderr=%q", name, code, errb.String())
 		}
 		if errb.Len() == 0 {
@@ -181,7 +181,7 @@ func TestTheSummaryDoesNotCallARepinAnAlias(t *testing.T) {
 	t.Setenv("GOPIN_LIST_UNUSED", "")
 
 	var out, errb strings.Builder
-	code := run([]string{"-version", "1.27.2", "-from", "1.27.1", "-list", writeList(t, "o/r")}, &out, &errb)
+	code := run([]string{"-version", "1.27.2", "-from", "1.27.1", "-list", writeList(t, "o/r")}, strings.NewReader(""), &out, &errb)
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%q", code, errb.String())
 	}
