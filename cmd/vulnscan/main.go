@@ -432,8 +432,16 @@ func scanRepo(ctx context.Context, exe runner, cfg config, repo, jobDir string) 
 		return res
 	}
 	cctx, cancel := context.WithTimeout(ctx, cfg.timeout)
-	err := clone(cctx, exe, repo, repoDir)
+	refused, err := clone(cctx, exe, repo, repoDir)
 	cancel()
+	// ⛔ SAY THAT THE CLONE WAS REFUSED AND RETRIED, whichever way it ended. A
+	// pass that took minutes longer than usual, or one that read a repository
+	// only on the third try, is a pass somebody should be able to explain
+	// without reading a runner log.
+	if refused > 0 {
+		res.Notes = append(res.Notes,
+			fmt.Sprintf("clone refused %d time(s) for pace and retried", refused))
+	}
 	if err != nil {
 		res.Status, res.Err = Unread, err.Error()
 		return res

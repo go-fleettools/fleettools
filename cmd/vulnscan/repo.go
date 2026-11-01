@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/modfile"
 )
@@ -30,18 +31,63 @@ type runner func(ctx context.Context, dir string, env []string, name string, arg
 // none at all.
 func cloneURL(repo string) string { return "https://github.com/" + repo + ".git" }
 
-// clone makes a depth-1 copy of repo's default branch at dir.
+// cloneAttempts is how many times a clone REFUSED FOR GOING TOO FAST is tried.
+//
+// ⛔ Short waits on purpose. The aim is to ride out a burst limit, not to sit
+// out an hourly reset: a 49-repository sweep that waited a minute per refusal
+// would spend most of an hour on the ones it could not read. A repository still
+// refused after these attempts stays UNREAD and the sweep moves on, which is
+// the honest answer -- and `-state` with `-retry-unread` is how a person
+// finishes it later, when the limit has actually cleared.
+const cloneAttempts = 3
+
+// cloneBackoff is the wait before the next attempt. A var so a test does not
+// take a minute to prove a retry happened.
+var cloneBackoff = func(attempt int) { time.Sleep(time.Duration(attempt) * 20 * time.Second) }
+
+// refusedForPace reports whether git's stderr says the refusal was about the
+// RATE of our requests rather than about the repository.
+//
+// ⛔ THE DISTINCTION IS THE WHOLE POINT. A 403 or 429 on the transport means
+// "come back in a moment" -- measured 2026-10-31, a 58-repository sweep from
+// one workstation got `The requested URL returned error: 403` on 14 clones
+// while nothing was wrong with any of them. A 404, a "Repository not found" or
+// a request for a username is NOT transient: the repository was deleted, made
+// private, or renamed, and retrying it burns the budget that would have read
+// the next one. Those must fail on the first attempt, which is why this matches
+// the pace signatures only and never a generic failure.
+func refusedForPace(stderr []byte) bool {
+	s := string(stderr)
+	return strings.Contains(s, "error: 403") ||
+		strings.Contains(s, "error: 429") ||
+		strings.Contains(s, "rate limit")
+}
+
+// clone makes a depth-1 copy of repo's default branch at dir, and reports how
+// many times it was refused for pace before it got through.
 //
 // GIT_TERMINAL_PROMPT=0 because a repository that was deleted or made private
 // otherwise asks for a username on a terminal nobody is watching, and the
 // sweep stops there for good.
-func clone(ctx context.Context, run runner, repo, dir string) error {
-	_, stderr, err := run(ctx, "", []string{"GIT_TERMINAL_PROMPT=0"},
-		"git", "clone", "--quiet", "--depth", "1", cloneURL(repo), dir)
-	if err != nil {
-		return fmt.Errorf("git clone %s: %v: %s", repo, err, tail(stderr))
+//
+// ⛔ A REFUSAL THAT IS RECOVERABLE MUST NOT BECOME A VERDICT. Reporting UNREAD
+// for a transient 403 is correct about this run and wrong about the repository,
+// and UNREAD makes the lane red -- so a sweep could go red over nothing but its
+// own pace. The retry count is returned rather than swallowed, so a slow pass
+// is legible instead of mysterious.
+func clone(ctx context.Context, run runner, repo, dir string) (refused int, err error) {
+	for attempt := 1; ; attempt++ {
+		_, stderr, runErr := run(ctx, "", []string{"GIT_TERMINAL_PROMPT=0"},
+			"git", "clone", "--quiet", "--depth", "1", cloneURL(repo), dir)
+		if runErr == nil {
+			return refused, nil
+		}
+		if attempt == cloneAttempts || !refusedForPace(stderr) {
+			return refused, fmt.Errorf("git clone %s: %v: %s", repo, runErr, tail(stderr))
+		}
+		refused++
+		cloneBackoff(attempt)
 	}
-	return nil
 }
 
 // skipDir is a directory no module of the repository's own lives under. The go
@@ -239,7 +285,16 @@ func siblings(ctx context.Context, run runner, root, repo, repoDir string, mods 
 			name := parts[0] + "/" + parts[1]
 			if !have[name] {
 				have[name] = true
-				if err := clone(ctx, run, name, filepath.Join(root, parts[0], parts[1])); err != nil {
+				// A sibling gets the same retry as the repository itself: a
+				// replace whose target was refused for pace makes the whole
+				// module fail to load, so it is the same defect one level
+				// down. The count goes into problems, where a reader
+				// already looks for why a sibling was odd.
+				refused, cerr := clone(ctx, run, name, filepath.Join(root, parts[0], parts[1]))
+				if refused > 0 {
+					problems = append(problems, fmt.Sprintf("sibling %s: clone refused %d time(s) for pace and retried", name, refused))
+				}
+				if err := cerr; err != nil {
 					problems = append(problems, "sibling "+err.Error())
 					continue
 				}
