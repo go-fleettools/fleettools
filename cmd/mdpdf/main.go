@@ -61,8 +61,20 @@ var papers = map[string]string{"a4": "A4", "letter": "letter"}
 
 type options struct {
 	in, out, title, author, paper, css string
-	toc, pageNumbers                   bool
+	toc, pageNumbers, allowNetwork     bool
 	tocTitle, lang, tocAfter           string
+}
+
+// exportOptions are the html2pdf options of a run. Without --allow-network
+// the renderer fetches nothing (html2pdf.Offline: no request, no file: read),
+// so a Markdown file from elsewhere cannot make this command reach a URL;
+// data: images still render.
+func exportOptions(o options, title string) html2pdf.Options {
+	opts := html2pdf.Options{Title: title, Author: o.author}
+	if !o.allowNetwork {
+		opts.Fetch = html2pdf.Offline
+	}
+	return opts
 }
 
 // tocTitles is the default table-of-contents title per primary language
@@ -168,6 +180,7 @@ to the input's name without extension.`,
 	f.BoolVar(&o.toc, "toc", false, "add a table of contents (h2 and h3, with page numbers); it goes where `<!-- toc -->` stands in the Markdown, else after the title block")
 	f.StringVar(&o.tocAfter, "toc-after", "", "place the table of contents at the end of the section with this heading (exact text, NFC, case-sensitive; else a slug or id match); implies --toc and wins over a `<!-- toc -->` marker")
 	f.BoolVar(&o.pageNumbers, "page-numbers", true, `print "n / N" at the bottom centre of every page (--page-numbers=false to turn off)`)
+	f.BoolVar(&o.allowNetwork, "allow-network", false, "let the renderer fetch remote images and stylesheets (default: offline, nothing is fetched; data: images still render)")
 	_ = cmd.MarkFlagRequired("in")
 	return cmd
 }
@@ -258,7 +271,7 @@ func run(o options) error {
 	if err != nil {
 		return err
 	}
-	doc, err := html2pdf.Export(page, html2pdf.Options{Title: title, Author: o.author})
+	doc, err := html2pdf.Export(page, exportOptions(o, title))
 	if err != nil {
 		return fmt.Errorf("html2pdf: %w", err)
 	}
