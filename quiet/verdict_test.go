@@ -49,6 +49,133 @@ func TestHealthy(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE SIXTEEN. On 2026-10-31 this tool reported sixteen organisations as
+// `healthy` whose Renovate runner failed in about ten seconds every single
+// night -- RENOVATE_TOKEN was never set, and an unset secret expands to the
+// empty string. go-approx's whole history was 11 runs, 11 failures, zero
+// successes, so it had NEVER received a dependency update; the sweep whose only
+// job is Renovate runners called it fine, because it asked when the last run
+// started and never what became of it.
+//
+// This is that runner: perfectly timely, and failing.
+func TestATimelyRunnerThatFailsIsNotHealthy(t *testing.T) {
+	r := healthyRunner()
+	r.LastConclusion = "failure"
+
+	got := classify(r, now)
+	if got.Verdict != Broken {
+		t.Fatalf("verdict = %s, want broken", got.Verdict)
+	}
+	// The control that matters: the OLD classification is still reachable on
+	// the same runner, so this test proves the conclusion is what moved it.
+	r.LastConclusion = "success"
+	if was := classify(r, now); was.Verdict != Healthy {
+		t.Fatalf("with conclusion=success the same runner is %s, want healthy -- "+
+			"so this test is not measuring the conclusion", was.Verdict)
+	}
+	if !Broken.Pages() {
+		t.Error("broken must page: sixteen of these went unreported for ten days")
+	}
+}
+
+// ⚠ AN UNREAD CONCLUSION IS UNREAD. A reader that does not fill the field --
+// an older fixture, a run still in flight -- must get the timeliness verdict it
+// always got, never a silent `broken`. The same rule that makes a refused call
+// Unreadable instead of healthy, in the other direction.
+func TestAnEmptyConclusionChangesNothing(t *testing.T) {
+	r := healthyRunner()
+	r.LastConclusion = ""
+	if got := classify(r, now); got.Verdict != Healthy {
+		t.Errorf("verdict = %s, want healthy: an unread conclusion is not a failure", got.Verdict)
+	}
+}
+
+// Failed is an allowlist of failures, not "anything but success". A watcher that
+// pages on a cancellation is a watcher people learn to ignore.
+func TestOnlyRealFailuresCountAsBroken(t *testing.T) {
+	for _, c := range []struct {
+		conclusion string
+		want       Verdict
+	}{
+		{"failure", Broken},
+		{"timed_out", Broken},
+		{"startup_failure", Broken},
+		{"success", Healthy},
+		// A person stopped it; that is not the runner failing.
+		{"cancelled", Healthy},
+		// A condition did not hold, so nothing ran and nothing broke.
+		{"skipped", Healthy},
+		{"neutral", Healthy},
+	} {
+		r := healthyRunner()
+		r.LastConclusion = c.conclusion
+		if got := classify(r, now); got.Verdict != c.want {
+			t.Errorf("conclusion %q -> %s, want %s", c.conclusion, got.Verdict, c.want)
+		}
+	}
+}
+
+// ⛔ FAILING AND LATE AT ONCE READS AS FAILING, because the failure carries its
+// own diagnosis while "overdue" sends the reader to GitHub's scheduler, which
+// is working perfectly. The lateness is not lost -- it stays on the Result, and
+// the printed line shows it.
+func TestAFailingRunnerThatIsAlsoOverdueReadsAsBroken(t *testing.T) {
+	r := healthyRunner()
+	r.LastConclusion = "failure"
+
+	// Three days past the occurrence it owed.
+	got := classify(r, "2026-09-03T14:00:00Z")
+	if got.Verdict != Broken {
+		t.Fatalf("verdict = %s, want broken", got.Verdict)
+	}
+	if got.Late <= 0 {
+		t.Errorf("Late = %v, want > 0: the lateness must survive the verdict", got.Late)
+	}
+	// And the control: without the failure, the same clock gives overdue.
+	r.LastConclusion = "success"
+	if was := classify(r, "2026-09-03T14:00:00Z"); was.Verdict != Overdue {
+		t.Fatalf("without the failure the same runner is %s, want overdue", was.Verdict)
+	}
+}
+
+// ⭐ THE STREAK IS THE DIAGNOSIS, not the failure. "It broke last night" and
+// "it has never once worked" are the same red tick and different fixes, and on
+// 2026-10-31 it was the streak -- go-approx, 11 runs, 11 failures, zero
+// successes -- that showed the sixteen had never been configured at all rather
+// than having regressed.
+func TestStreak(t *testing.T) {
+	ok := RunRecord{Status: "completed", Conclusion: "success"}
+	bad := RunRecord{Status: "completed", Conclusion: "failure"}
+	slow := RunRecord{Status: "in_progress"}
+	stopped := RunRecord{Status: "completed", Conclusion: "cancelled"}
+
+	for _, c := range []struct {
+		name         string
+		runs         []RunRecord
+		wantFailures int
+		wantSuccess  bool
+	}{
+		{"never once worked", []RunRecord{bad, bad, bad, bad}, 4, false},
+		{"broke last night", []RunRecord{bad, ok, ok}, 1, true},
+		{"failing for three, green before", []RunRecord{bad, bad, bad, ok}, 3, true},
+		{"working", []RunRecord{ok, ok}, 0, true},
+		// A run in flight has not failed and is not a success either: it must
+		// not break the streak nor be counted into it.
+		{"a run in flight is skipped, not judged", []RunRecord{slow, bad, bad}, 2, false},
+		{"in flight above a success still sees the success", []RunRecord{slow, ok}, 0, true},
+		// A cancellation ends the streak without joining it -- claiming an
+		// unbroken run of failures through it would overstate the evidence.
+		{"a cancellation ends the streak without being one", []RunRecord{bad, stopped, bad}, 1, false},
+		{"nothing read at all", nil, 0, false},
+	} {
+		gotF, gotS := Streak(c.runs)
+		if gotF != c.wantFailures || gotS != c.wantSuccess {
+			t.Errorf("%s: Streak = (%d, %v), want (%d, %v)",
+				c.name, gotF, gotS, c.wantFailures, c.wantSuccess)
+		}
+	}
+}
+
 // A slack of one hour would page on this healthy runner. That is the measured
 // mistake the eight-hour default exists to avoid, so it is asserted, not
 // remembered.

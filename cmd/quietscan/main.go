@@ -1,4 +1,5 @@
-// Reports every organisation whose Renovate runner has stopped running.
+// Reports every organisation whose Renovate runner has stopped running, or runs
+// and fails.
 //
 // The failure it exists to catch is silent by construction. `redscan` asks
 // whether the last run FAILED; a runner that stopped does not fail, it says
@@ -7,6 +8,24 @@
 // scan that branches on `conclusion`. This is the other half of that file's own
 // lesson: a red branch is not a broken one, and a green fleet is not a running
 // one. Check WHEN it last ran.
+//
+// ⛔⛔ AND THEN CHECK WHAT BECAME OF IT, which this file did not do for ten days.
+// On 2026-10-31 it reported SIXTEEN organisations as `healthy` whose runner
+// failed in about ten seconds every night, RENOVATE_TOKEN never having been set:
+// none of them had ever received a dependency update. Timeliness was the only
+// question asked, so timely was the only way to be fine. `redscan` caught them
+// incidentally, because a runner's workflow happens to sit on a default branch
+// -- the specialised sweep was the one that said nothing. Activity is not
+// health, and a runner that fails fast is the most active-looking failure there
+// is. The `broken` verdict, the conclusion on the line and the failure streak
+// are that lesson; see quiet.Broken.
+//
+// ⚠ AND THE EVIDENCE IS THE SCHEDULED PATH ONLY, which cuts both ways. The runs
+// listing below is filtered to `event=schedule` because a manual dispatch is not
+// evidence the cron still fires -- so a runner whose dispatches succeed and
+// whose nightly runs fail is reported BROKEN, correctly. Three of those sixteen
+// were called proven on 2026-10-31 on the strength of a dispatch; this tool
+// disagreed, and it was right.
 //
 // Two properties are structural, not conventions:
 //
@@ -326,7 +345,9 @@ func readRepo(org, name string) (quiet.Runner, bool) {
 	// event=schedule, because a manual dispatch is not evidence the schedule
 	// still fires -- and a person poking a dead runner is exactly how this
 	// failure hides.
-	b, err = counted("api", fmt.Sprintf("repos/%s/%s/actions/workflows/%d/runs?event=schedule&per_page=1", org, name, wf.ID))
+	// per_page=10 rather than 1: ONE request either way, and the page is what
+	// separates "it broke last night" from "it has never worked once".
+	b, err = counted("api", fmt.Sprintf("repos/%s/%s/actions/workflows/%d/runs?event=schedule&per_page=10", org, name, wf.ID))
 	if err != nil {
 		r.ReadError = "runs: " + err.Error()
 		return r, true
@@ -334,6 +355,12 @@ func readRepo(org, name string) (quiet.Runner, bool) {
 	var runs struct {
 		Runs []struct {
 			CreatedAt string `json:"created_at"`
+			// ⛔ WHAT BECAME OF IT, not merely that it happened. Reading
+			// created_at alone is what let sixteen organisations whose every run
+			// failed in ten seconds be reported `healthy`: they were timely, and
+			// this file had no field in which timely could be contradicted.
+			Conclusion string `json:"conclusion"`
+			Status     string `json:"status"`
 		} `json:"workflow_runs"`
 	}
 	if json.Unmarshal(b, &runs) != nil {
@@ -342,6 +369,17 @@ func readRepo(org, name string) (quiet.Runner, bool) {
 	}
 	if len(runs.Runs) > 0 {
 		r.LastRun = parseTime(runs.Runs[0].CreatedAt)
+		// A run still in flight has an empty conclusion, which is exactly the
+		// "not read" case: it must not be reported broken for being unfinished.
+		if runs.Runs[0].Status == "completed" {
+			r.LastConclusion = runs.Runs[0].Conclusion
+		}
+		r.RunsRead = len(runs.Runs)
+		rec := make([]quiet.RunRecord, 0, len(runs.Runs))
+		for _, run := range runs.Runs {
+			rec = append(rec, quiet.RunRecord{Status: run.Status, Conclusion: run.Conclusion})
+		}
+		r.ConsecutiveFailures, r.SawSuccess = quiet.Streak(rec)
 	}
 	return r, true
 }
@@ -445,20 +483,21 @@ func readWorkflowState(org, repo string) (string, bool) {
 type fixtureFile struct {
 	Now     string `json:"now"`
 	Runners []struct {
-		Org           string   `json:"org"`
-		RepoExists    bool     `json:"repo_exists"`
-		Archived      bool     `json:"archived"`
-		PushedAt      string   `json:"pushed_at"`
-		WorkflowFound bool     `json:"workflow_found"`
-		WorkflowState string   `json:"workflow_state"`
-		Born          string   `json:"born"`
-		Crons         []string `json:"crons"`
-		LastRun       string   `json:"last_run"`
-		Repo          string   `json:"repo"`
-		Covers        []string `json:"covers"`
-		FilterNote    string   `json:"filter_note"`
-		App           string   `json:"app"` // "present", "absent", "unread"
-		ReadError     string   `json:"read_error"`
+		Org            string   `json:"org"`
+		RepoExists     bool     `json:"repo_exists"`
+		Archived       bool     `json:"archived"`
+		PushedAt       string   `json:"pushed_at"`
+		WorkflowFound  bool     `json:"workflow_found"`
+		WorkflowState  string   `json:"workflow_state"`
+		Born           string   `json:"born"`
+		Crons          []string `json:"crons"`
+		LastRun        string   `json:"last_run"`
+		LastConclusion string   `json:"last_conclusion"`
+		Repo           string   `json:"repo"`
+		Covers         []string `json:"covers"`
+		FilterNote     string   `json:"filter_note"`
+		App            string   `json:"app"` // "present", "absent", "unread"
+		ReadError      string   `json:"read_error"`
 	} `json:"runners"`
 }
 
@@ -487,7 +526,8 @@ func loadFixture(path string) ([]quiet.Runner, time.Time, map[string]quiet.AppCo
 			PushedAt: parseTime(in.PushedAt), WorkflowFound: in.WorkflowFound,
 			WorkflowState: in.WorkflowState, Born: parseTime(in.Born),
 			BornSource: "fixture", LastRun: parseTime(in.LastRun),
-			Repo: in.Repo, Covers: in.Covers, FilterNote: in.FilterNote,
+			LastConclusion: in.LastConclusion,
+			Repo:           in.Repo, Covers: in.Covers, FilterNote: in.FilterNote,
 			ReadError: in.ReadError,
 		}
 		for _, c := range in.Crons {
@@ -549,13 +589,26 @@ func stamp(t time.Time) string {
 // a guard somebody will go around.
 func init() { fleet.Guard = readOnly }
 
-const longHelp = `Reports every Renovate runner in the fleet that has gone quiet: a schedule
-behind its own cron, a repository GitHub is about to disable for inactivity, or
-a coverage gap no runner answers for.
+const longHelp = `Reports every Renovate runner in the fleet that has gone quiet or gone wrong: a
+schedule behind its own cron, a runner that runs on time and FAILS, a repository
+GitHub is about to disable for inactivity, or a coverage gap no runner answers
+for.
 
 ⛔ IT IS DRIVEN FROM THE ORGANISATION LIST, not the runner list. A recency check
 over runners structurally cannot see an organisation that has no runner to be
 quiet.
+
+⛔ ACTIVITY IS NOT HEALTH. This tool once reported sixteen organisations as
+healthy whose runner failed in ten seconds every night — none had ever received
+a dependency update — because it asked WHEN the last run started and never what
+became of it. The ` + "`broken`" + ` bucket, the conclusion printed on each line and the
+failure streak ("9 of the 9 scheduled runs read, NONE successful") are that
+lesson. A runner that fails fast is the most active-looking failure there is.
+
+⛔ THE EVIDENCE IS THE SCHEDULED PATH ONLY. Runs are read with
+event=schedule, because a manual dispatch is not evidence that the cron still
+fires — so a runner whose dispatches succeed while its nightly runs fail is
+reported broken, which is the useful answer and not the flattering one.
 
 ⛔ A coverage map is a SNAPSHOT, so it carries the window it was read in: a
 runner can be retired between two calls of one pass, and the report says when
@@ -752,6 +805,9 @@ func sweep(stdout, stderr io.Writer) int {
 		v   quiet.Verdict
 		fix string
 	}{
+		// Broken leads, because it is the only bucket whose members look like
+		// they are working: they run on time, every night, and fail.
+		{quiet.Broken, "it RUNS AND FAILS -- the schedule is fine, the run is not; read that run's logs and check the secret"},
 		{quiet.Overdue, "the runner has stopped; look at the last run's logs and the token"},
 		{quiet.NeverFired, "it has never run at all; the schedule or the token is wrong"},
 		{quiet.DisabledInactivity, "re-enable it -- and note it expires again 60 days later"},
@@ -903,9 +959,32 @@ func detail(r quiet.Result) string {
 		return "cron " + r.Schedule.String() + " has no reachable occurrence"
 	case quiet.NotYetDue:
 		return fmt.Sprintf("born %s   first due %s   cron %s", stamp(r.Born), stamp(r.Due), r.Schedule)
+	case quiet.Broken:
+		// The verdict is about the conclusion, so the conclusion leads -- and
+		// the lateness still comes along, because a runner can be failing AND
+		// behind, and hiding one of the two is what this bucket exists to undo.
+		s := fmt.Sprintf("last run %s ENDED %s", stamp(r.LastRun), strings.ToUpper(r.LastConclusion))
+		switch {
+		case r.ConsecutiveFailures > 1 && !r.SawSuccess:
+			// The sentence that diagnosed the sixteen: not "it is failing" but
+			// "it has never once worked", which is a different fix.
+			s += fmt.Sprintf("   %d of the %d scheduled runs read, NONE successful",
+				r.ConsecutiveFailures, r.RunsRead)
+		case r.ConsecutiveFailures > 1:
+			s += fmt.Sprintf("   failing for %d runs, the one before succeeded", r.ConsecutiveFailures)
+		case r.SawSuccess:
+			s += "   the run before it succeeded, so this is new"
+		}
+		return s + fmt.Sprintf("   due %s   late %s   cron %s",
+			stamp(r.Due), hm(r.Late), r.Schedule)
 	default:
 		s := fmt.Sprintf("last run %s   due %s   late %s   cron %s",
 			stamp(r.LastRun), stamp(r.Due), hm(r.Late), r.Schedule)
+		if r.LastConclusion != "" && r.LastConclusion != "success" {
+			// Not a failure by Failed()'s allowlist -- a cancellation or a skip.
+			// Worth seeing, not worth paging on.
+			s += "   ended " + r.LastConclusion
+		}
 		if r.HasLag {
 			s += fmt.Sprintf("   lag %s", hm(r.Lag))
 		}

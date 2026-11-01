@@ -18,6 +18,23 @@ type Verdict string
 const (
 	// Healthy: it ran, and the next occurrence it owes is not yet due.
 	Healthy Verdict = "healthy"
+	// Broken: the schedule fires on time and every run it produces FAILS.
+	//
+	// ⛔⛔ THIS TOOL REPORTED SIXTEEN OF THESE AS `healthy`. On 2026-10-31,
+	// sixteen organisations had their Renovate runner failing in about ten
+	// seconds every night -- `RENOVATE_TOKEN` was never set, and an unset secret
+	// expands to the empty string -- so NONE of them had ever received a
+	// dependency update. go-approx's entire history was 11 runs, 11 failures,
+	// zero successes. This file asked WHEN the last run started and never what
+	// became of it, so all sixteen were timely, and timely read as fine.
+	//
+	// ⭐ THE LESSON IS THE MEASUREMENT'S SUBJECT, NOT THE MISSING FIELD.
+	// `redscan` caught them only incidentally, because the runner's workflow
+	// happens to live on a default branch. The specialised sweep -- the one whose
+	// whole job is Renovate runners -- was the one that said nothing. Activity is
+	// not health, and a runner that fails fast is the most active-looking
+	// failure there is.
+	Broken Verdict = "broken"
 	// NotYetDue: it has never run, but its first scheduled occurrence has not
 	// arrived. This is NOT the same as never having fired, and conflating the
 	// two is what produced a false alarm about 26 dead runners that were merely
@@ -65,7 +82,7 @@ const (
 // that stopped without anyone deciding it should.
 func (v Verdict) Pages() bool {
 	switch v {
-	case Overdue, NeverFired, DisabledInactivity, NoSchedule, Unreadable:
+	case Broken, Overdue, NeverFired, DisabledInactivity, NoSchedule, Unreadable:
 		return true
 	}
 	return false
@@ -114,6 +131,29 @@ type Runner struct {
 	BornSource    string // what Born was keyed on, so a wrong clock is visible
 	Schedule      Schedule
 	LastRun       time.Time // zero means: no scheduled run has ever completed
+	// LastConclusion is what became of that run: GitHub's `conclusion`, one of
+	// success, failure, timed_out, startup_failure, cancelled, skipped, neutral,
+	// stale, action_required.
+	//
+	// ⚠ EMPTY MEANS NOT READ, AND MUST NOT READ AS EITHER VERDICT. A reader that
+	// leaves this blank gets the old timeliness-only classification rather than
+	// a silent `broken` -- an unread field is unread, the same rule that makes a
+	// refused call Unreadable instead of healthy.
+	LastConclusion string
+	// ConsecutiveFailures is how many of the most recent scheduled runs failed
+	// in a row, and RunsRead how many were on the page they were counted from.
+	// SawSuccess says the streak ENDED inside that window -- that a run in
+	// living memory actually worked.
+	//
+	// ⭐ THIS IS THE DIFFERENCE BETWEEN "IT BROKE LAST NIGHT" AND "IT HAS NEVER
+	// WORKED", and the two take different fixes. What made the sixteen
+	// diagnosable on 2026-10-31 was not the failure, it was the streak:
+	// go-approx had 11 runs, 11 failures, zero successes, so the runner was
+	// never configured rather than recently regressed. It costs nothing to know
+	// -- the same single request returns the page.
+	ConsecutiveFailures int
+	RunsRead            int
+	SawSuccess          bool
 	// Covers is the runner's autodiscoverFilter: the organisations it watches,
 	// which are NOT the organisation it lives in.
 	Covers     []string
@@ -146,6 +186,53 @@ type Result struct {
 	// CoverageUnknown. A watcher that cannot say WHY it does not know is not
 	// much better than one that guesses.
 	UnknownWhy string
+}
+
+// Failed says whether a run's `conclusion` means the runner did not do its job.
+//
+// It is an ALLOWLIST OF FAILURES, not "anything that is not success", and the
+// difference is the point: `cancelled` is usually a person, `skipped` is a
+// condition that did not hold, `neutral` is a run that declined to judge, and
+// paging on any of those is how a watcher earns being ignored. They fall through
+// to the timeliness verdicts and the printed line still shows the word, so a
+// reader can see a cancellation without being woken for it.
+//
+// An empty conclusion is NOT a failure: it means nobody read the field.
+func Failed(conclusion string) bool {
+	switch conclusion {
+	case "failure", "timed_out", "startup_failure":
+		return true
+	}
+	return false
+}
+
+// RunRecord is one scheduled run, reduced to what a health check needs.
+type RunRecord struct {
+	Status     string // queued | in_progress | completed
+	Conclusion string
+}
+
+// Streak counts, newest first, how many runs failed in a row, and says whether
+// a success appears anywhere in the window at all.
+//
+// A run still in flight is SKIPPED rather than counted either way: it has not
+// failed, and it is not a success that would end the streak. A cancellation
+// ends the streak without being part of it -- the run did not fail, so claiming
+// an unbroken run of failures through it would overstate the evidence.
+func Streak(runs []RunRecord) (failures int, sawSuccess bool) {
+	for _, r := range runs {
+		if r.Status != "completed" {
+			continue
+		}
+		if r.Conclusion == "success" {
+			return failures, true
+		}
+		if !Failed(r.Conclusion) {
+			return failures, false
+		}
+		failures++
+	}
+	return failures, false
 }
 
 // Classify decides one runner's verdict.
@@ -216,6 +303,12 @@ func Classify(r Runner, now time.Time, slack, pushWarn time.Duration) Result {
 	res.Due = due
 	res.Late = now.Sub(due.Add(slack))
 	switch {
+	// ⛔ A FAILING RUN OUTRANKS A LATE ONE, because it carries its own
+	// diagnosis. A runner that is both failing and overdue is reported broken:
+	// the failure says WHY, while "overdue" sends the reader to look at GitHub's
+	// scheduler, which is working perfectly. The line still prints the lateness.
+	case Failed(r.LastConclusion):
+		res.Verdict = Broken
 	case res.Late <= 0 && r.LastRun.IsZero():
 		res.Verdict = NotYetDue
 	case res.Late <= 0:
