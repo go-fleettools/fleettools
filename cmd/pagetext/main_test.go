@@ -41,6 +41,46 @@ func TestTextAbsentIsExit1(t *testing.T) {
 	}
 }
 
+// ⛔ THE FALSE NEGATIVE THAT COST SIX RETRIES ON A CORRECT PAGE, 2026-11-01.
+// The landing said "262 of this fleet's own"; Hugo printed "fleet’s" with a
+// typographic apostrophe; this command reported the string MISSING and polled
+// until it gave up. Every English possessive and contraction was affected, which
+// is most sentences we write.
+func TestTypographicPunctuationIsFoldedOnBothSides(t *testing.T) {
+	// What Goldmark's typographer actually emits for 'x', "x", -- and ---.
+	const doc = `<p>262 of this fleet&rsquo;s own &mdash; a &ldquo;campaign&rdquo; &ndash; see more&hellip;</p>`
+	srv := httptest.NewServer(page(doc))
+	defer srv.Close()
+
+	code, out, _ := drive(t, srv.URL,
+		"262 of this fleet's own", // the apostrophe, the case that bit
+		`a "campaign"`,            // both quote pairs
+		"own - a",                 // an em dash, written as a hyphen
+		"see more...",             // an ellipsis, written as three dots
+	)
+	if code != 0 {
+		t.Fatalf("code %d, out %q", code, out)
+	}
+
+	// The control, in the other direction: a want written WITH the typographic
+	// characters must match a page that has them too, so the fold cannot be
+	// passing by erasing one side only.
+	if code, out, _ := drive(t, srv.URL, "262 of this fleet’s own"); code != 0 {
+		t.Fatalf("the typographic spelling must match as well: code %d, out %q", code, out)
+	}
+
+	// And the negative control: folding punctuation must not make unrelated
+	// words match, or the whole check is worthless.
+	if code, _, _ := drive(t, srv.URL, "a stampede"); code != 1 {
+		t.Fatalf("an absent string became present: code %d", code)
+	}
+
+	// --raw stays exact: it compares bytes, and the page's bytes are entities.
+	if code, _, _ := drive(t, "--raw", srv.URL, "262 of this fleet's own"); code != 1 {
+		t.Fatalf("--raw must not fold: code %d", code)
+	}
+}
+
 func TestEntitySplitTextMatchesInTextModeButNotRaw(t *testing.T) {
 	const doc = `<p>use <code>--</code><span>output</span> &amp; more&nbsp;text<script>var hidden = "secret"</script></p>`
 	srv := httptest.NewServer(page(doc))

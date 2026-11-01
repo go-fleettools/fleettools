@@ -48,6 +48,62 @@ func TestFindTOMLKeepsATagWithItsOwnName(t *testing.T) {
 	}
 }
 
+// ⛔ THE SHAPE THIS COMMAND COULD NOT READ. go-fleettools.github.io/hugo.toml --
+// and every go-* landing built with the landing kit -- writes [[params.repos]]
+// with `label  = "vX.Y.Z"`, aligned. Against it this command answered "1
+// file(s), 0 cell(s), 0 stale" and exited 2: right to refuse to call nothing a
+// pass, and the reason thirteen labels on our own landing had never been
+// checked by the tool that exists for it.
+func TestFindTOMLReadsTheLandingsOwnRepoBlocks(t *testing.T) {
+	const landing = `[params.brand]
+  base = "#7c2d12"
+
+[[params.repos]]
+  name   = "fleettools"
+  status = "ready"
+  label  = "v0.65.0"
+[[params.repos]]
+  name   = "dotgithub"
+  status = "active"
+  label  = "no tag"
+[[params.repos]]
+  name   = "modfloor"
+  status = "ready"
+  label  = "v0.6.1"
+`
+	cells := Find(landing, "go-fleettools", true)
+	got := []string{}
+	for _, c := range cells {
+		got = append(got, c.Module+"@"+c.Tag)
+	}
+	// `no tag` is not a version, so it yields no cell: there is nothing to keep
+	// equal to a release that does not exist.
+	if strings.Join(got, " ") != "fleettools@v0.65.0 modfloor@v0.6.1" {
+		t.Fatalf("%v", got)
+	}
+	out := Rewrite(landing, cells, map[string]string{"fleettools": "v0.66.0", "modfloor": "v0.6.1"})
+	if !strings.Contains(out, `label  = "v0.66.0"`) {
+		t.Error("the aligned spelling must survive the rewrite:\n" + out)
+	}
+	if !strings.Contains(out, `label  = "no tag"`) {
+		t.Error("a label that is not a version must be left alone:\n" + out)
+	}
+}
+
+// ⛔ A name must not be credited a version from the NEXT table. The block ends
+// at any table header, not only at a `[[...]]` one -- no page here has this
+// shape today, which is exactly why the guard is worth having before one does.
+func TestATableHeaderEndsTheBlock(t *testing.T) {
+	const src = `[[params.repos]]
+  name = "orphan"
+[params.footer]
+  label = "v9.9.9"
+`
+	if cells := Find(src, "go-fleettools", true); len(cells) != 0 {
+		t.Fatalf("a version in another table was credited to `orphan`: %+v", cells)
+	}
+}
+
 func TestRewriteChangesOnlyStaleKnownCells(t *testing.T) {
 	cells := Find(md, "go-widgets", false)
 	out := Rewrite(md, cells, map[string]string{"window": "v0.89.1", "mvvm": "v0.15.0"})
