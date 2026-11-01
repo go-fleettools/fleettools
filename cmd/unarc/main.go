@@ -36,7 +36,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/ulikunitz/xz"
+	"github.com/go-compressions/xz"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
@@ -52,6 +52,10 @@ decompression bomb outright.
 
 Exit status: 0 everything extracted or was already there, 1 an archive was
 refused or failed, 2 the directory could not be read.`
+
+// xzMaxDictionary is the ceiling on the LZMA2 window a .tar.xz may make us
+// allocate: 256 MiB, above the 64 MiB of `xz -9`.
+const xzMaxDictionary = 256 << 20
 
 // maxEntrySize bounds one entry, because a declared size is a number the
 // archive chose. Ten gigabytes is past anything in a downloads directory and
@@ -336,7 +340,11 @@ func extractTar(src, dest string, k kind) (files, renamed int, err error) {
 	case kindTarBz2:
 		body = bzip2.NewReader(f)
 	case kindTarXz:
-		xr, err := xz.NewReader(f)
+		// ⛔ The dictionary is bounded by the DATA, not by the block header: this
+		// decoder's window grows with the output and a header declaring 4 GiB
+		// over a few bytes costs kilobytes (ulikunitz/xz allocated it whole).
+		// MaxDictionary is the ceiling on what the data may really need.
+		xr, err := xz.ReaderConfig{MaxDictionary: xzMaxDictionary}.NewReader(f)
 		if err != nil {
 			return 0, 0, err
 		}

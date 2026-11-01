@@ -17,6 +17,7 @@ go 1.27.3
 retract v0.1.0 // tracked 8.4 MB of compiled executables; use v0.1.1 or later
 
 require (
+	github.com/go-compressions/xz v0.2.0
 	github.com/go-kramdown/kramdown v0.3.1
 	github.com/go-pdfkit/extract v0.9.0
 	github.com/go-pdfkit/html2pdf v0.4.0

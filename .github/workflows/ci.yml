@@ -59,6 +59,15 @@ jobs:
       - name: test
         run: go test -race -timeout 15m ./...
 
+      # The planted xz bomb (1.5 GiB declared over a few bytes) runs as a
+      # compiled binary under a virtual memory limit and GOMEMLIMIT, so a
+      # regression fails by itself instead of allocating gigabytes of the runner.
+      - name: unarc bomb under limits
+        run: |
+          go test -c -o unarc.test ./cmd/unarc
+          ulimit -v 4194304
+          GOMEMLIMIT=256MiB ./unarc.test -test.run 'DeclaredDictionary' -test.v
+
       # ⛔ THE WINDOWS HALF OF A PLATFORM SPLIT WAS COMPILED BY NOTHING.
       # cmd/brief has signal_unix.go and signal_windows.go because WaitStatus
       # is not portable -- and signal_unix.go's comment claimed "the tests this
