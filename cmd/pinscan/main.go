@@ -85,7 +85,12 @@ func ours(path string) bool {
 		return false
 	}
 	switch org {
-	case "openweft", "nano-container-linux", "deskplan", "cloud-boot":
+	// ⛔ THIS LIST IS THE TAXONOMY'S BLIND SPOT, and `wasmdesk` was missing
+	// from it until 2026-11-01, when pinscan's own --repos output called
+	// wasmdesk/wasmaqua and wasmdesk/wasmbox "not ours". They are ours. A
+	// name list cannot tell "not in the list" from "not ours", so the report
+	// no longer says "not ours" about an org it merely does not recognise.
+	case "openweft", "nano-container-linux", "deskplan", "cloud-boot", "wasmdesk":
 		return true
 	}
 	return strings.HasPrefix(org, "go-")
@@ -113,6 +118,24 @@ type Pin struct {
 	// NOT [Pin.Repo]: a worktree and a nested module each have their own
 	// go.mod and consumer name, and share one repository. See [gitRepoOf].
 	GitRepo string
+
+	// Indirect is the `// indirect` marker: this consumer does not require the
+	// module, something it requires does.
+	//
+	// ⛔ IT DECIDES WHERE THE REMEDY GOES, and most of them are inherited.
+	// Measured 2026-11-01: go-freedesktop/notifications pins
+	// go-images/images at a 2026-08-31 pseudo-version, marked indirect, and
+	// `go mod why` gives notifications/cmd/notifyd -> go-widgets/toolkit ->
+	// go-images/images/ops. toolkit requires it DIRECTLY. So raising it in
+	// notifications treats a symptom; raising it in toolkit and releasing
+	// toolkit reaches every consumer, as an ordinary TAGGED bump that
+	// Renovate performs by itself.
+	//
+	// That is also why Renovate had not fixed any of this, which I had
+	// wrongly blamed on dead runners: go-images's runner has succeeded daily
+	// since 2026-10-28. Renovate raises tagged versions, and the
+	// pseudo-version sits in the intermediate library, not in the consumer.
+	Indirect bool
 }
 
 // Behind reports whether the pinned commit predates the release.
@@ -124,14 +147,16 @@ func main() { cli.Run(RootCmd()) }
 
 // RootCmd builds the command. Tests drive it through run, below.
 func RootCmd() *cobra.Command {
-	var verbose bool
+	var verbose, named bool
 	c := cli.New("pinscan [flags] DIR...",
 		"Pins of a fleet module older than a release the consumer cannot reach", longHelp)
 	c.RunE = func(cmd *cobra.Command, args []string) error {
-		return cli.FromStatus(scan(cli.Out(cmd), cli.Err(cmd), verbose, args))
+		return cli.FromStatus(scan(cli.Out(cmd), cli.Err(cmd), verbose, named, args))
 	}
 	c.Flags().BoolVarP(&verbose, "verbose", "v", false,
 		"name every pair rather than only counting")
+	c.Flags().BoolVar(&named, "repos", false,
+		"name the repositories that DECLARE a stale pin, which is the campaign's set")
 	return c
 }
 
@@ -140,7 +165,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return cli.Drive(RootCmd(), args, stdout, stderr)
 }
 
-func scan(stdout, stderr io.Writer, verbose bool, roots []string) int {
+func scan(stdout, stderr io.Writer, verbose, named bool, roots []string) int {
 	// On stderr and inside the work, as it was: the staleness note is not part
 	// of the answer, and a reader of the table must not have to filter it out.
 	fleet.WarnIfStale(stderr)
@@ -211,9 +236,64 @@ func scan(stdout, stderr io.Writer, verbose bool, roots []string) int {
 	for _, p := range behind {
 		repos[p.GitRepo] = true
 	}
-	fmt.Fprintf(stdout, "  %d repositor%s would receive a pull request — "+
+	fmt.Fprintf(stdout, "  %d repositor%s hold them — "+
 		"worktrees and nested modules share one\n",
 		len(repos), plural(len(repos), "y", "ies"))
+
+	// ⛔ DIRECT AND INHERITED ARE DIFFERENT WORK, and conflating them sizes a
+	// campaign against the wrong set. An inherited pin is raised by releasing
+	// the library that DECLARES it, after which every consumer gets an
+	// ordinary tagged bump — so the campaign is the DIRECT set, and the
+	// inherited count is what that set buys.
+	//
+	// ⛔ AND OUR TREES HOLD REPOSITORIES THAT ARE NOT OURS. A checkout under
+	// these roots is not ours because it is on this disk: a sibling tool
+	// published "904 of 939" over three pages before anybody asked whose the
+	// modules were, and the true total was 262. Origin's owner decides, so a
+	// repository we cannot open a pull request against is counted apart
+	// rather than silently included.
+	// ⛔⛔ AND "UNKNOWN" IS NOT "NOT OURS". [gitRepoOf] falls back to the
+	// directory when a checkout has no readable origin, so those come back as
+	// a PATH rather than owner/name. The first version of this counted all of
+	// them as foreign: of 7 so called, 5 were simply checkouts whose remote
+	// could not be read. An unread answer must not read as a negative.
+	direct, inherited := map[string]bool{}, map[string]bool{}
+	foreign, unknown := map[string]bool{}, map[string]bool{}
+	nDirect := 0
+	for _, p := range behind {
+		if p.Indirect {
+			inherited[p.GitRepo] = true
+			continue
+		}
+		nDirect++
+		direct[p.GitRepo] = true
+		switch {
+		case !strings.Contains(p.GitRepo, "/") || strings.HasPrefix(p.GitRepo, "/"):
+			unknown[p.GitRepo] = true // a path: no origin to attribute it to
+		case !ours("github.com/" + p.GitRepo):
+			foreign[p.GitRepo] = true
+		}
+	}
+	fmt.Fprintf(stdout, "  %d declared by the consumer, %d inherited through a dependency\n",
+		nDirect, len(behind)-nDirect)
+	fmt.Fprintf(stdout, "  → the campaign is %d repositor%s that DECLARE one: "+
+		"%d in a fleet org, %d in another org, %d with no origin this could read\n",
+		len(direct), plural(len(direct), "y", "ies"),
+		len(direct)-len(foreign)-len(unknown), len(foreign), len(unknown))
+
+	if named {
+		fmt.Fprintln(stdout, "\nrepositories that declare a stale pin:")
+		for _, r := range sortedStrings(direct) {
+			switch {
+			case unknown[r]:
+				fmt.Fprintf(stdout, "    %s   (no origin read)\n", r)
+			case foreign[r]:
+				fmt.Fprintf(stdout, "    %s   (another org)\n", r)
+			default:
+				fmt.Fprintf(stdout, "    %s\n", r)
+			}
+		}
+	}
 
 	byModule(stdout, behind)
 	if verbose {
@@ -322,10 +402,11 @@ func walk(roots []string) ([]Pin, int, error) {
 					continue
 				}
 				pin := Pin{
-					Repo:    repo,
-					GitRepo: gitRepoOf(filepath.Dir(p), repoCache),
-					Module:  r.Mod.Path,
-					Pinned:  r.Mod.Version,
+					Repo:     repo,
+					GitRepo:  gitRepoOf(filepath.Dir(p), repoCache),
+					Module:   r.Mod.Path,
+					Pinned:   r.Mod.Version,
+					Indirect: r.Indirect,
 				}
 				if t, err := module.PseudoVersionTime(r.Mod.Version); err == nil {
 					pin.PinAt = t
@@ -339,6 +420,17 @@ func walk(roots []string) ([]Pin, int, error) {
 		}
 	}
 	return out, files, nil
+}
+
+// sortedStrings is the set in a stable order, so two runs of the same corpus
+// print the same list.
+func sortedStrings(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // plural picks a suffix, so the count and the noun agree.
