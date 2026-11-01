@@ -1,45 +1,42 @@
 # The decoders of LOCAL bytes: compressed streams, filesystem images, image
-# formats. Swept by .github/workflows/vuln.yml on `workflow_dispatch` ONLY --
-# there is no cron over this list, and that is a measured decision rather than
-# an omission.
+# formats. Swept NIGHTLY by .github/workflows/vuln.yml, beside
+# vulnscan-exposed.txt and vulnscan-tools.txt.
 #
-# ⛔ WHY NOT NIGHTLY: GitHub rate limits the git transport. Measured 2026-10-31,
-# same binary, same toolchain, runs an hour apart:
+# ⛔ THEY WERE `workflow_dispatch` ONLY FOR ONE DAY, AND THAT WAS A MEASUREMENT
+# TAKEN IN THE WRONG PLACE -- kept here because the mistake is more useful than
+# the number. On 2026-10-31 a 58-repository sweep from the WORKSTATION answered
 #
-#   13 repositories (vulnscan-tools.txt)     read clean, twice
-#   22 repositories (tools + exposed)        22 scanned, 0 UNREAD
-#   58 repositories (tools' population + all of these)
-#                                            14 of 58 UNREAD, every failure a
-#                                            `git clone … 403` -- and my own
-#                                            push was refused the same way
+#   58 scanned: CLEAN 44, UNREAD 14   (every failure a `git clone … 403`,
+#                                      and a push from the same machine was
+#                                      refused minutes later)
 #
-# UNREAD is not clean: vulnscan exits 2, so a nightly sweep of this list would
-# make the lane RED for a reason that is the sweep's own and not any
-# repository's -- the exact shape of alarm this workflow was written to refuse.
+# so the nightly list was cut to 22 and these 49 were relegated to a dispatch,
+# with the argument written out at length. The first real run from a RUNNER, on
+# 2026-11-01, answered differently:
 #
-# ⛔ AND SLICING IT ACROSS THE WEEK WAS THE WRONG ANSWER. It keeps everything in
-# view and reintroduces the latency the clock exists to remove: an advisory
-# published on Monday would reach Friday's slice on Friday, and the founding
-# case here is two advisories found 2 and 4 days late.
+#   9 exposed  : 9 scanned,  0 UNREAD
+#   49 decoders: 49 scanned, 0 UNREAD   (48 seconds)
+#   13 tools   : 13 scanned, 0 UNREAD
+#   -> 72 clones in one run, nothing unread
 #
-# So the nightly budget goes to EXPOSURE (see vulnscan-exposed.txt), which is
-# where reachability actually was: both repositories that reached an advisory
-# among all 58 were network-facing. These decode a byte slice somebody already
-# has, which is a smaller surface and no transport dependency.
+# The ceiling belonged to that workstation's unauthenticated requests, not to
+# the runner that executes the lane. A limit measured from the wrong client is a
+# property of the instrument, not of the subject.
 #
-# ⛔ WHAT WOULD MAKE THEM NIGHTLY, so the next reader does not re-derive it:
-# authenticated clones (which gives up the no-credential property this job is
-# built on -- it makes no REST call per repository, so it cannot starve the
-# budget the Renovate runners spend from), or a run that stays under roughly
-# two dozen clones. `-state` with `-retry-unread` belongs INSIDE whichever is
-# chosen -- it makes one run resumable, 14 retries instead of 58 -- but it must
-# NOT be carried between nights: a repository that was CLEAN yesterday is not
-# clean today if an advisory was published since. The code does not change; the
-# database does, which is the whole reason this runs on a clock.
+# ⛔ One run of 72 clones is not proof of a steady state, and that is acceptable
+# for one reason: the failure is VISIBLE. UNREAD names the repositories and
+# vulnscan exits 2, so a night that does meet the limit says so rather than
+# going quiet. `-state` is passed so a person can finish a partial run with
+# `-retry-unread`; the in-tool retry is issue #150.
 #
-# ⛔ RUN IT BY HAND after any x/net, x/crypto or stdlib advisory lands, and
-# before trusting a silence from it. A dispatch-only lane reports nothing when
-# nobody asks, and nothing is not green.
+# ⛔ AND IT MUST NOT BE CARRIED BETWEEN NIGHTS: a repository that was CLEAN
+# yesterday is not clean today if an advisory was published since. The code does
+# not change; the DATABASE does, which is the whole reason this runs on a clock.
+#
+# ⛔ SLICING ACROSS THE WEEK STAYS REJECTED, and that part was never about the
+# limit: it keeps everything in view while reintroducing the latency a clock
+# exists to remove -- an advisory published on Monday would reach Friday's slice
+# on Friday, and the founding case is two advisories found 2 and 4 days late.
 #
 # Last full pass: 2026-10-31, 58 scanned, 56 clean, 2 reaching GO-2026-6860 --
 # both network-facing, both now fixed, and both now in vulnscan-exposed.txt.
