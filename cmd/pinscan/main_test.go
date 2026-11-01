@@ -255,3 +255,78 @@ func TestHelpExitsZero(t *testing.T) {
 		t.Errorf("exit %d for -h, want 0", code)
 	}
 }
+
+// ⛔⛔ THE UNIT OF A CAMPAIGN IS A PULL REQUEST, AND THREE DIFFERENT go.mod
+// FILES CAN SHARE ONE. Measured 2026-11-01 in go-pdfkit: five "consumers" of
+// go-images/images were THREE repositories — `app` with its worktree
+// `app.wt-verbs2`, and `html2pdf` with the module nested at
+// `html2pdf/corpus`. Reporting only the pin count invites a plan about 40%
+// too large, and the error is invisible because every row is real.
+func TestAWorktreeAndANestedModuleAreOneRepository(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "org", "app")
+	nested := filepath.Join(repo, "corpus")
+	worktree := filepath.Join(root, "org", "app.wt-verbs2")
+
+	for _, d := range []string{filepath.Join(repo, ".git"), nested, worktree} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := "[core]\n\tbare = false\n[remote \"origin\"]\n" +
+		"\turl = https://github.com/org/app.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+	if err := os.WriteFile(filepath.Join(repo, ".git", "config"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A linked worktree's .git is a FILE pointing into the main checkout.
+	gitFile := "gitdir: " + filepath.Join(repo, ".git", "worktrees", "verbs2") + "\n"
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte(gitFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := map[string]string{}
+	for _, dir := range []string{repo, nested, worktree} {
+		if got := gitRepoOf(dir, cache); got != "org/app" {
+			t.Errorf("gitRepoOf(%s) = %q, want org/app", dir, got)
+		}
+	}
+
+	// ⭐ The negative half: a checkout with no remote must still count ONCE
+	// rather than vanish, or a campaign would under-count instead.
+	loose := filepath.Join(root, "loose")
+	if err := os.MkdirAll(filepath.Join(loose, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitRepoOf(loose, cache); got != loose {
+		t.Errorf("gitRepoOf(%s) = %q, want the directory itself", loose, got)
+	}
+	// And a directory under no repository at all is its own identity.
+	bare := filepath.Join(root, "nowhere")
+	if err := os.MkdirAll(bare, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitRepoOf(bare, cache); got == "" {
+		t.Error("a directory under no repository resolved to nothing")
+	}
+}
+
+// ⭐ One repository named four ways must come out once, or the count is of
+// spellings rather than of repositories.
+func TestOwnerNameAgreesAcrossRemoteForms(t *testing.T) {
+	for _, url := range []string{
+		"https://github.com/org/app.git",
+		"https://github.com/org/app",
+		"git@github.com:org/app.git",
+		"ssh://git@github.com/org/app.git",
+		"https://github.com/org/app/",
+	} {
+		if got := ownerName(url); got != "org/app" {
+			t.Errorf("ownerName(%q) = %q, want org/app", url, got)
+		}
+	}
+	for _, url := range []string{"", "app", "/"} {
+		if got := ownerName(url); got != "" {
+			t.Errorf("ownerName(%q) = %q, want empty", url, got)
+		}
+	}
+}
