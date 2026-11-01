@@ -426,7 +426,7 @@ workflow` opens a browser. Until it is run, these pull requests wait.
 |---|---|
 | `govulncheck, judged by vulngate` | this module, judged by `cmd/vulngate` rather than by an exit status. **It moved here from `ci.yml`**, under the same job name, because a branch protection rule names a check and not a workflow. |
 | `vulnscan over the tools that gate the fleet` | `cmd/vulnscan` over `.github/vulnscan-tools.txt` — **blast radius**: what holds the token, refuses a push, or produces the figures other decisions are taken from. |
-| `vulnscan over the repositories with a network surface` | `cmd/vulnscan` over `.github/vulnscan-exposed.txt` — **exposure**: the browser and proxy, and the filesystems served or fetched over a network. Nightly. Plus `.github/vulnscan-decoders.txt`, the local-byte codecs, **on `workflow_dispatch` only**. |
+| `vulnscan over the repositories with a network surface` | `cmd/vulnscan` over `.github/vulnscan-exposed.txt` — **exposure**: the browser and proxy, and the filesystems served or fetched over a network. And over `.github/vulnscan-decoders.txt`, the 49 local-byte codecs. Both nightly; the codecs were dispatch-only for one day, on a ceiling measured from the wrong machine (below). |
 
 ⛔ **Two lists because they answer two different questions** — blast radius and
 exposure — and either can be dropped without touching the other. And ⛔ **two
@@ -445,24 +445,44 @@ version string to compare or rewrite and **nothing was watching it at all**.
 The repositories that *reach* an advisory are not the ones with the most
 dependencies; they are the ones that read bytes they did not write.
 
-⛔ **And the nightly list is sized, not chosen.** GitHub rate limits the **git
-transport**, not only the REST API — so a clone-based sweep has a ceiling even
-though it spends none of the REST budget the Renovate runners draw on. Measured
-the same evening, same binary, same toolchain:
+⛔ **A ceiling measured in the wrong place cost this lane a day, and the mistake
+is worth more than the number.** GitHub rate limits the **git transport**, not
+only the REST API, so a clone-based sweep has a ceiling even though it spends
+none of the REST budget the Renovate runners draw on. Measured from **this
+workstation** on 2026-10-31 — and acted on:
 
-| repositories in one run | result |
+| repositories in one run, from the workstation | result |
 |---|---|
 | 13 (tools) | read clean, **twice** |
 | 22 (tools + exposed) | 22 scanned, **0 unread** |
 | 58 (every decoder) | **14 of 58 unread**, every failure a `git clone … 403` |
 
-`UNREAD` is not clean — `vulnscan` exits 2 — so the 58-repository list would
-have made the lane red for a reason that is the *sweep's own*. ⛔ Slicing it
-across the week was rejected rather than untried: it keeps everything in view
-and reintroduces exactly the latency a clock exists to remove, which is how
-those go-pkgx advisories went 2 and 4 days unnoticed. The cut is by **exposure**,
-and the evidence supports it — both repositories that reached an advisory were
-network-facing.
+So the nightly list was cut to 22 and the 49 local-byte codecs were relegated to
+`workflow_dispatch`. The first real run from a **runner**, the next morning,
+answered differently:
+
+| repositories in one run, from a runner | result |
+|---|---|
+| 9 (exposed) | 9 scanned, **0 unread** |
+| **49 (the codecs)** | 49 scanned, **0 unread** — in 48 seconds |
+| 13 (tools) | 13 scanned, **0 unread** |
+
+**72 clones in one run, nothing unread.** The ceiling belonged to the
+workstation's unauthenticated requests, not to the machine that executes the
+lane — a limit measured from the wrong client is a property of the *instrument*,
+not of the subject. All three lists are nightly now.
+
+⛔ One run of 72 clones is not proof of a steady state, and that is acceptable
+for one reason: the failure is **visible**. `UNREAD` names the repositories and
+`vulnscan` exits 2, so a night that does meet the limit says so instead of going
+quiet. The in-tool retry is #150.
+
+⛔ Slicing across the week stays rejected, and that was never about the limit: it
+keeps everything in view while reintroducing exactly the latency a clock exists
+to remove, which is how those go-pkgx advisories went 2 and 4 days unnoticed.
+The two lists remain separate because they answer different questions, and the
+evidence still supports the distinction — both repositories that reached an
+advisory were network-facing.
 
 ⛔ **A gate that only fires on a push has the coverage of the repository's
 activity, and the quietest repository needs it most.** Measured on go-pkgx,

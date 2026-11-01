@@ -241,13 +241,29 @@ jobs:
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: /tmp/vulnscan -list .github/vulnscan-exposed.txt -go "$(go env GOVERSION)" -state /tmp/exposed.state -json /tmp/vulnscan-exposed.json
 
-      # ⛔ THE LOCAL-BYTE DECODERS RUN ON REQUEST ONLY, never on the cron: 58
-      # clones a night trips the git transport limit (14 of 58 UNREAD, measured
-      # 2026-10-31), and UNREAD is not clean. Run it by hand after an x/net,
-      # x/crypto or standard-library advisory lands -- and remember that a lane
-      # nobody dispatches reports nothing, which is not green.
-      - name: the local-byte decoders, on request
-        if: github.event_name == 'workflow_dispatch'
+      # ⛔ THESE RAN ON REQUEST ONLY UNTIL 2026-11-01, AND THE REASON WAS A
+      # MEASUREMENT TAKEN IN THE WRONG PLACE. A 58-repository sweep from the
+      # workstation came back with 14 UNREAD, every failure a `git clone … 403`,
+      # so the list was cut to 22 a night and these 49 were relegated to a
+      # dispatch. The first real run from a RUNNER answered differently:
+      #
+      #   9 exposed  : 9 scanned,  0 UNREAD
+      #   49 decoders: 49 scanned, 0 UNREAD   (48 seconds)
+      #   13 tools   : 13 scanned, 0 UNREAD
+      #   -> 72 clones in one run, nothing unread
+      #
+      # The ceiling belonged to this workstation's unauthenticated requests, not
+      # to the runner that actually executes the lane. So they are nightly now --
+      # and a lane nobody dispatches reports nothing, which is not green, so
+      # "on request" was the worse of the two anyway.
+      #
+      # ⛔ One run of 72 clones is not proof of a steady state, and that is
+      # acceptable here for one reason: the failure is VISIBLE. UNREAD names the
+      # repositories and exits 2, so a lane that does meet the limit says so
+      # instead of going quiet. -state is passed so a person can finish a
+      # partial run with -retry-unread; #150 is the in-tool fix.
+      - name: the local-byte decoders, swept on a clock
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: /tmp/vulnscan -list .github/vulnscan-decoders.txt -go "$(go env GOVERSION)" -state /tmp/decoders.state -json /tmp/vulnscan-decoders.json
 
       - name: keep the reports even when a sweep failed
