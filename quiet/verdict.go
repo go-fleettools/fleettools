@@ -18,6 +18,24 @@ type Verdict string
 const (
 	// Healthy: it ran, and the next occurrence it owes is not yet due.
 	Healthy Verdict = "healthy"
+	// MissingSecret: the workflow references a secret that exists in neither the
+	// repository's nor the organisation's listing. The runner will start, run
+	// with an EMPTY STRING where the secret should be, and fail.
+	//
+	// ⭐ IT NAMES THE FIX INSTEAD OF POINTING AT A LOG. Broken says "read that
+	// run's logs and check the secret"; this says which secret, having checked.
+	// The sixteen organisations of 2026-10-31 were exactly this, invisible for
+	// ten days because nothing compared what the workflow asked for against
+	// what existed.
+	//
+	// ⚠ IT REPLACES Broken OR NeverFired, AND NEVER Healthy. Only the
+	// repository's secret listing can be read -- the organisation's needs
+	// admin:org, which this fleet's token deliberately does not have -- so a
+	// name absent from it proves nothing on a runner that WORKS: a successful
+	// run is itself proof the secret resolves. On a failing one the same
+	// absence is the cause. A healthy runner carries the fact on its line
+	// instead, so nothing is hidden and nothing cries wolf.
+	MissingSecret Verdict = "missing_secret"
 	// Broken: the schedule fires on time and every run it produces FAILS.
 	//
 	// ⛔⛔ THIS TOOL REPORTED SIXTEEN OF THESE AS `healthy`. On 2026-10-31,
@@ -82,7 +100,7 @@ const (
 // that stopped without anyone deciding it should.
 func (v Verdict) Pages() bool {
 	switch v {
-	case Broken, Overdue, NeverFired, DisabledInactivity, NoSchedule, Unreadable:
+	case MissingSecret, Broken, Overdue, NeverFired, DisabledInactivity, NoSchedule, Unreadable:
 		return true
 	}
 	return false
@@ -154,6 +172,22 @@ type Runner struct {
 	ConsecutiveFailures int
 	RunsRead            int
 	SawSuccess          bool
+	// SecretsWanted are the secret names the workflow references, and
+	// Repo/OrgSecrets the names that exist. SecretsNote says why they could not
+	// be read.
+	//
+	// ⛔ NOTHING HERE IS A SECRET. These are NAMES, which is what the API
+	// returns -- "without revealing their encrypted values". A secret is
+	// verified by its properties, never by printing it, and a name is a
+	// property.
+	//
+	// ⚠ A NON-EMPTY SecretsNote MUST SUPPRESS THE VERDICT. An unread listing is
+	// unread, not empty: concluding "the secret is absent" from a refused call
+	// would invent the exact finding this check exists to report.
+	SecretsWanted []string
+	RepoSecrets   []string
+	OrgSecrets    []string
+	SecretsNote   string
 	// Covers is the runner's autodiscoverFilter: the organisations it watches,
 	// which are NOT the organisation it lives in.
 	Covers     []string
@@ -182,6 +216,9 @@ type Result struct {
 	// fleet-wide by ApplyCoverage.
 	CoveredBy        string
 	CoveredByVerdict Verdict
+	// MissingSecrets are the referenced secret names that exist nowhere this
+	// tool can see. Empty whenever the listings could not be read.
+	MissingSecrets []string
 	// UnknownWhy says what could not be read, when the verdict is
 	// CoverageUnknown. A watcher that cannot say WHY it does not know is not
 	// much better than one that guesses.
@@ -302,6 +339,11 @@ func Classify(r Runner, now time.Time, slack, pushWarn time.Duration) Result {
 	}
 	res.Due = due
 	res.Late = now.Sub(due.Add(slack))
+	// Only when BOTH listings were read. A refused call must not be allowed to
+	// manufacture the finding.
+	if r.SecretsNote == "" {
+		res.MissingSecrets = MissingSecrets(r.SecretsWanted, r.RepoSecrets, r.OrgSecrets)
+	}
 	switch {
 	// ⛔ A FAILING RUN OUTRANKS A LATE ONE, because it carries its own
 	// diagnosis. A runner that is both failing and overdue is reported broken:
@@ -317,6 +359,28 @@ func Classify(r Runner, now time.Time, slack, pushWarn time.Duration) Result {
 		res.Verdict = NeverFired
 	default:
 		res.Verdict = Overdue
+	}
+
+	// ⛔ A MISSING SECRET IS A VERDICT ONLY ON A RUNNER THAT IS FAILING, and the
+	// reason is the cheapest possible proof: a run that SUCCEEDED has already
+	// demonstrated that its secret resolves, wherever it comes from. The
+	// organisation listing cannot be read without admin:org -- measured across
+	// this fleet on 2026-11-01 -- so a name absent from the repository listing
+	// alone proves nothing about a working runner, and paging on it would
+	// report every organisation-level credential in the fleet as missing.
+	//
+	// On a runner that fails, or that has never once run, the same absence is
+	// the diagnosis: an unset secret expands to the empty string, so the
+	// action starts and refuses. That is the sixteen of 2026-10-31, and it is
+	// named here instead of sending the reader to a log to rediscover it.
+	//
+	// Healthy and NotYetDue keep their verdict and carry the fact on their
+	// line, so the information is never hidden -- only never paged on.
+	if len(res.MissingSecrets) > 0 {
+		switch res.Verdict {
+		case Broken, NeverFired:
+			res.Verdict = MissingSecret
+		}
 	}
 	return res
 }
