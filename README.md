@@ -11,7 +11,7 @@ that cost a wrong answer to learn.
 | `cmd/flagcensus` | Which argument-parsing idiom each command here uses, and which of its flags would need two dashes after a move to cobra. Measured 2026-10-31 over 54 commands: `cobra=24 flag+help=21 flag-global=6 hand -h=3`, 144 flags of which 137 need two dashes. Two of those rows are worth having beyond the migration: **`flag-raw` is zero**, so nothing is left in the state where `-h` arrives as an error — `fleet.ParseFlags` closed that — and **`UNREAD` is zero**, which is the state `redscan` was in when `-h` started a full sweep. ⛔ The split is six ways and not four because a first version labelled six commands with a defect they do not have: it called the package-level `flag.Parse()` and a `ContinueOnError` FlagSet both "flag" and said `-h` arrives as an error, which is false for the global set (`ExitOnError` answers `-h` with 0 itself). What those six lack is a `run()` a test can drive. ⛔ And a registration has a name or a usage string: the receiver is not type-checked, so every `x.String()` looked like a flag and a first count said 149 where there were 113. ⛔ It generates nothing — a blanket rewrite of 54 files is how a campaign here once replaced a helper with a call to itself — and `flagcensus mains <command>...` prints just the entry points a migration rewrites. ⛔ Its two ancestors were written in a scratchpad on 2026-10-18 and were gone with the next reboot, so the same counts had to be derived from nothing thirteen days later: a measurement worth quoting is worth a repository. |
 | `cmd/prmerge` | Merges dependency PRs that are mergeable **and** fully green. |
 | `cmd/tagscan` | Every tagged Go module whose default branch is **ahead of its latest tag** — work that is merged and that `go get` cannot reach. Built after the same mistake twice: `ghmerge` alone on `go-widgets/toolkit` (2026-09-05) and on `go-pdfkit/ops` (2026-09-07), the second time with the rule already written down. It asks about **tags, not releases**: `go get` resolves a tag, and a first draft asking `/releases/latest` reported `ops` as behind fifteen minutes after `v0.12.0` had been pushed and proved to resolve. `git ls-remote` costs no API budget, and a tag that IS the head settles without a call. |
-| `cmd/quietscan` | Every organisation whose Renovate runner has **stopped**. `redscan` asks whether the last run FAILED; a runner that stopped does not fail, it says nothing. This is the other half of that lesson: check WHEN it last ran. |
+| `cmd/quietscan` | Every organisation whose Renovate runner has **stopped**, or **runs and fails**. `redscan` asks whether the last run FAILED; a runner that stopped does not fail, it says nothing — so this checks WHEN it last ran. And then WHAT BECAME OF IT: sixteen runners were once reported healthy while every nightly run failed in ten seconds. |
 | `cmd/judgescan` | Every repository whose tests look for an external tool its CI **never installs** — a foreign judge that exists in the source and has never once run. Written after the same defect surfaced twice in one afternoon: `go-fde/luks` had a cryptsetup interop test gated on root (formatting a file needs none; only attaching a device does), and `go-filesystems/btrfs` had seven oracles whose `btrfs check` half — upstream judging OUR WRITES — was locked behind the same borrowed root gate, in a CI that installed no btrfs-progs. Both looked like a green lane over a file full of assertions, judging nothing. Reads the working tree only, so it cannot starve Renovate: its ONE call is the staleness check below. Knows that a step says `poppler-utils` and a test says `pdftotext`, and that a checkout `path: btrfs` is not an installation of btrfs-progs — the false negative that would have erased its own founding case. |
 | `.github/workflows/docs-current.yml` | **Reusable.** An organisation's landing repository calls it and the check runs THERE, with no secret — listing a public organisation is a public read. Nine lines in the caller — ⛔ not `on: [push, pull_request]`, which both fire for a branch with a PR open and ran the check twice on the first three organisations that copied the snippet. |
 | `cmd/docscan` | Every repository an organisation **has** but does not **advertise** — and every one it advertises and no longer has. First pass (2026-09-25): 334 organisations, **87 modules named on no surface**. **2026-09-26: `0 organisations with drift`**, with the check adopted in eighteen organisations so it stays there — re-measure with `go run ./cmd/docscan` rather than trusting this line. Five of its six hardenings came from FALSE POSITIVES, which cost more than a miss: an entry carrying `org = "<other-org>"` is not a claim about this one, a nav line may name its module in its title (`- The client (reddit): client.md`), an **archived** repository is not a gone one, a YAML flow mapping on one line is a list the reader could not parse, and a PR check reading the published page judges `main` rather than the branch. Two definitions of drift — the printed count and the exit status — disagreed in both directions until one method served both. |
@@ -201,12 +201,41 @@ sub-module keeps its own, and a lane that vets it fails while the root module is
 spotless (`go-widgets/toolkit` has `rougelex/`). It tolerates modules that
 cannot resolve standalone, but requires the ROOT one to tidy.
 
-## What `quietscan` is, and the five rules it will not soften
+## What `quietscan` is, and the six rules it will not soften
 
 Nothing else in the fleet queries run recency. `redscan` fetches `created_at`
 and never compares it to anything: it branches on `conclusion` alone, and
 `status=completed&per_page=1` on a repository with zero runs returns `{}` -- so
 a runner that has NEVER run is invisible to it.
+
+**⛔ Activity is not health, and this tool learned that the expensive way.** On
+2026-10-31 it reported **sixteen** organisations as `healthy` whose Renovate
+runner failed in about ten seconds every single night: `RENOVATE_TOKEN` had
+never been set, and an unset secret expands to the empty string. None of those
+sixteen had ever received a dependency update. `go-approx`'s entire history was
+11 runs, 11 failures, zero successes. The sweep asked WHEN the last run started
+and never what became of it, so timely was the only way to be fine — and a
+runner that fails fast is the most active-looking failure there is. `redscan`
+caught them only incidentally, because a runner's workflow happens to sit on a
+default branch; the specialised sweep, the one whose whole job is Renovate
+runners, was the one that said nothing.
+
+So there is a `broken` verdict, it leads the report, and each line carries the
+conclusion and the **failure streak**:
+
+    go-autodiff/.github   last run 2026-10-31 19:13Z ENDED FAILURE
+                          9 of the 9 scheduled runs read, NONE successful
+
+The streak is the diagnosis, not the failure: *"it broke last night"* and *"it
+has never once worked"* are the same red tick and different fixes. It costs no
+extra request — the page comes back from the call already being made.
+
+**⛔ And the evidence is the scheduled path only, which cuts both ways.** Runs
+are read with `event=schedule`, because a manual dispatch is not evidence that
+the cron still fires. A runner whose dispatches succeed while its nightly runs
+fail is therefore reported `broken`. Three of those sixteen were called *proven*
+on 2026-10-31 on the strength of a successful dispatch; this tool disagreed, and
+it was right — their scheduled runs had still never worked.
 
 **Twelve hours of slack, and the observed lag printed every pass.** GitHub's
 scheduler was measured on this fleet running 1h59m to 7h56m behind its crons. A
