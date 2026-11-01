@@ -310,6 +310,113 @@ func TestAWorktreeAndANestedModuleAreOneRepository(t *testing.T) {
 	}
 }
 
+// ⛔⛔ DIRECT AND INHERITED ARE DIFFERENT WORK, and the campaign is the direct
+// set. Measured 2026-11-01: go-freedesktop/notifications pins
+// go-images/images at a 2026-08-31 pseudo-version marked `// indirect`, and
+// `go mod why` gives notifications/cmd/notifyd -> go-widgets/toolkit ->
+// go-images/images/ops — toolkit requires it DIRECTLY. Raising it in the
+// consumer treats a symptom; releasing toolkit reaches every consumer.
+//
+// ⛔ AND A CHECKOUT UNDER THESE ROOTS IS NOT OURS BECAUSE IT IS ON THIS DISK.
+// Origin's owner decides, so `third-party/app` is counted apart: we cannot
+// open a pull request against it.
+func TestDirectAndInheritedAreCountedApart(t *testing.T) {
+	dir := t.TempDir()
+	fakeProxy(t,
+		map[string][]string{"github.com/go-images/images": {"v0.3.0"}},
+		map[string]string{"github.com/go-images/images v0.3.0": "2026-10-01T00:00:00Z"},
+		nil)
+
+	const old = "v0.0.0-20260620120000-aaaaaaaaaaaa"
+	// A library that DECLARES the stale pin: the root of the problem.
+	write(t, dir, "go-widgets/toolkit/go.mod",
+		"module github.com/go-widgets/toolkit\n\ngo 1.27\n\nrequire github.com/go-images/images "+old+"\n")
+	write(t, dir, "go-widgets/toolkit/.git/config",
+		"[remote \"origin\"]\n\turl = https://github.com/go-widgets/toolkit.git\n")
+	// A consumer that INHERITS it.
+	write(t, dir, "go-freedesktop/notifications/go.mod",
+		"module github.com/go-freedesktop/notifications\n\ngo 1.27\n\nrequire github.com/go-images/images "+old+" // indirect\n")
+	write(t, dir, "go-freedesktop/notifications/.git/config",
+		"[remote \"origin\"]\n\turl = https://github.com/go-freedesktop/notifications.git\n")
+	// A repository that is NOT ours, declaring it directly.
+	write(t, dir, "third-party/app/go.mod",
+		"module example.com/third-party/app\n\ngo 1.27\n\nrequire github.com/go-images/images "+old+"\n")
+	write(t, dir, "third-party/app/.git/config",
+		"[remote \"origin\"]\n\turl = https://example.com/third-party/app.git\n")
+
+	// ⛔ A checkout with NO readable origin is a third class: the first
+	// version of this called it "not ours", and 5 of the 7 it so named were
+	// simply checkouts whose remote could not be read.
+	write(t, dir, "nameless/go.mod",
+		"module example.com/nameless\n\ngo 1.27\n\nrequire github.com/go-images/images "+old+"\n")
+	if err := os.MkdirAll(filepath.Join(dir, "nameless", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := pinscan(t, dir)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", code, out)
+	}
+	for _, want := range []string{
+		"4 pin(s) older than a release",
+		"3 declared by the consumer, 1 inherited through a dependency",
+		"the campaign is 3 repositories that DECLARE one: " +
+			"1 in a fleet org, 1 in another org, 1 with no origin this could read",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+
+	// ⭐ --repos names the set, and distinguishes what it cannot attribute
+	// from what it attributed elsewhere.
+	named, code := pinscan(t, "--repos", dir)
+	if code != 1 {
+		t.Fatalf("exit %d with --repos\n%s", code, named)
+	}
+	if !strings.Contains(named, "go-widgets/toolkit\n") {
+		t.Errorf("--repos does not name the declaring repository:\n%s", named)
+	}
+	if !strings.Contains(named, "third-party/app   (another org)") {
+		t.Errorf("--repos does not mark the other org's repository:\n%s", named)
+	}
+	if !strings.Contains(named, "(no origin read)") {
+		t.Errorf("--repos does not separate the unattributable checkout:\n%s", named)
+	}
+	if strings.Contains(named, "go-freedesktop/notifications\n") {
+		t.Errorf("--repos names a repository that only INHERITS the pin:\n%s", named)
+	}
+}
+
+// ⛔ wasmdesk was missing from the fleet list until pinscan's own --repos
+// output called wasmdesk/wasmaqua and wasmdesk/wasmbox "not ours". A name list
+// cannot tell "not in the list" from "not ours", which is why the report now
+// says "another org" and keeps the unattributable ones apart.
+func TestTheFleetListKnowsItsOwnOrgs(t *testing.T) {
+	for _, repo := range []string{
+		"github.com/go-images/images",
+		"github.com/wasmdesk/wasmaqua",
+		"github.com/cloud-boot/init",
+		"github.com/openweft/weft",
+		"github.com/deskplan/deskplan",
+		"github.com/nano-container-linux/ncl",
+	} {
+		if !ours(repo) {
+			t.Errorf("ours(%q) = false: the fleet list does not know its own org", repo)
+		}
+	}
+	for _, repo := range []string{
+		"github.com/third-party/app",
+		"example.com/go-images/images",
+		"github.com/",
+		"",
+	} {
+		if ours(repo) {
+			t.Errorf("ours(%q) = true", repo)
+		}
+	}
+}
+
 // ⭐ One repository named four ways must come out once, or the count is of
 // spellings rather than of repositories.
 func TestOwnerNameAgreesAcrossRemoteForms(t *testing.T) {
