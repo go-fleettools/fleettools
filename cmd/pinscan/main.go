@@ -108,6 +108,11 @@ type Pin struct {
 	Latest string // the newest tag the proxy serves, "" if never released
 	TagAt  time.Time
 	PinAt  time.Time
+
+	// GitRepo is the repository that would receive the pull request, which is
+	// NOT [Pin.Repo]: a worktree and a nested module each have their own
+	// go.mod and consumer name, and share one repository. See [gitRepoOf].
+	GitRepo string
 }
 
 // Behind reports whether the pinned commit predates the release.
@@ -196,6 +201,20 @@ func scan(stdout, stderr io.Writer, verbose bool, roots []string) int {
 	if len(behind) == 0 {
 		return 0
 	}
+
+	// ⛔ A CAMPAIGN IS COSTED IN PULL REQUESTS, NOT IN go.mod FILES. A worktree
+	// and a module nested inside a repository each have their own go.mod, and
+	// share one pull request: measured in go-pdfkit, five consumers of
+	// go-images/images are three repositories. Printing only the pin count
+	// invites a plan about 40% too large.
+	repos := map[string]bool{}
+	for _, p := range behind {
+		repos[p.GitRepo] = true
+	}
+	fmt.Fprintf(stdout, "  %d repositor%s would receive a pull request — "+
+		"worktrees and nested modules share one\n",
+		len(repos), plural(len(repos), "y", "ies"))
+
 	byModule(stdout, behind)
 	if verbose {
 		sort.Slice(behind, func(i, j int) bool { return behind[i].Repo < behind[j].Repo })
@@ -213,9 +232,16 @@ func byModule(w io.Writer, pins []Pin) {
 	n := map[string]int{}
 	oldest := map[string]time.Time{}
 	tag := map[string]string{}
+	// The repositories per module, which is what that module's remedy costs in
+	// pull requests: two go.mod files in one checkout are one of them.
+	repos := map[string]map[string]bool{}
 	for _, p := range pins {
 		n[p.Module]++
 		tag[p.Module] = p.Latest
+		if repos[p.Module] == nil {
+			repos[p.Module] = map[string]bool{}
+		}
+		repos[p.Module][p.GitRepo] = true
 		if t, ok := oldest[p.Module]; !ok || p.PinAt.Before(t) {
 			oldest[p.Module] = p.PinAt
 		}
@@ -231,8 +257,8 @@ func byModule(w io.Writer, pins []Pin) {
 		return keys[i] < keys[j]
 	})
 	for _, k := range keys {
-		fmt.Fprintf(w, "  %3d consumer(s)  %-44s oldest pin %s, released %s\n",
-			n[k], k, oldest[k].Format("2006-01-02"), tag[k])
+		fmt.Fprintf(w, "  %3d consumer(s) in %3d repo(s)  %-44s oldest pin %s, released %s\n",
+			n[k], len(repos[k]), k, oldest[k].Format("2006-01-02"), tag[k])
 	}
 }
 
@@ -258,6 +284,7 @@ func distinct(pins []Pin) []string {
 func walk(roots []string) ([]Pin, int, error) {
 	var out []Pin
 	files := 0
+	repoCache := map[string]string{}
 	for _, root := range roots {
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -294,7 +321,12 @@ func walk(roots []string) ([]Pin, int, error) {
 				if strings.Contains(r.Mod.Version, noCommit) {
 					continue
 				}
-				pin := Pin{Repo: repo, Module: r.Mod.Path, Pinned: r.Mod.Version}
+				pin := Pin{
+					Repo:    repo,
+					GitRepo: gitRepoOf(filepath.Dir(p), repoCache),
+					Module:  r.Mod.Path,
+					Pinned:  r.Mod.Version,
+				}
 				if t, err := module.PseudoVersionTime(r.Mod.Version); err == nil {
 					pin.PinAt = t
 				}
@@ -307,6 +339,120 @@ func walk(roots []string) ([]Pin, int, error) {
 		}
 	}
 	return out, files, nil
+}
+
+// plural picks a suffix, so the count and the noun agree.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// gitRepoOf names the REPOSITORY a go.mod belongs to, which is the unit of a
+// pull request — and is not the same as the unit [consumer] reports.
+//
+// ⛔ MEASURED 2026-11-01, go-pdfkit: five "consumers" of go-images/images are
+// THREE pull requests. `app` and `app.wt-verbs2` are one repository and one of
+// its worktrees; `html2pdf` and `html2pdf/corpus` are one repository and a
+// module nested inside it. A per-file count therefore overstates a campaign by
+// about 40% in that sample, and a campaign is costed in pull requests.
+//
+// It walks up to the nearest `.git`. A linked worktree has a `.git` FILE whose
+// `gitdir:` line points into the main checkout's `.git/worktrees/`, so a
+// worktree resolves to the repository it belongs to rather than to itself. The
+// identity is origin's owner/name when there is one, because that is what a
+// pull request is opened against; otherwise the resolved directory, so a
+// checkout with no remote still counts once rather than disappearing.
+func gitRepoOf(dir string, cache map[string]string) string {
+	if id, ok := cache[dir]; ok {
+		return id
+	}
+	id := dir
+	for d := dir; ; {
+		if fi, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			root := d
+			if !fi.IsDir() {
+				if main := mainWorktreeOf(filepath.Join(d, ".git")); main != "" {
+					root = main
+				}
+			}
+			id = root
+			if owner := originOf(root); owner != "" {
+				id = owner
+			}
+			break
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			break // no repository above it: the directory is its own identity
+		}
+		d = parent
+	}
+	cache[dir] = id
+	return id
+}
+
+// mainWorktreeOf reads the `gitdir:` line of a linked worktree's .git file and
+// returns the main checkout's root, or "" when the file is not one.
+func mainWorktreeOf(gitFile string) string {
+	b, err := os.ReadFile(gitFile)
+	if err != nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+	gitDir := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+	if gitDir == line {
+		return "" // no gitdir: prefix
+	}
+	sep := string(filepath.Separator)
+	if i := strings.Index(gitDir, sep+".git"+sep+"worktrees"+sep); i >= 0 {
+		return gitDir[:i]
+	}
+	return ""
+}
+
+// originOf reads origin's URL from a repository's config and renders it as
+// owner/name. It parses the file rather than running git: this walks thousands
+// of checkouts, and a process each would dominate the scan.
+func originOf(root string) string {
+	b, err := os.ReadFile(filepath.Join(root, ".git", "config"))
+	if err != nil {
+		return ""
+	}
+	inOrigin := false
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			inOrigin = strings.HasPrefix(line, `[remote "origin"]`)
+			continue
+		}
+		if !inOrigin {
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(name) != "url" {
+			continue
+		}
+		return ownerName(strings.TrimSpace(value))
+	}
+	return ""
+}
+
+// ownerName takes the last two segments of a remote URL, without `.git`, so
+// that https://, ssh:// and scp-style remotes of one repository agree.
+func ownerName(url string) string {
+	url = strings.TrimSuffix(strings.TrimSuffix(url, "/"), ".git")
+	url = strings.ReplaceAll(url, ":", "/")
+	parts := strings.Split(url, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	owner, name := parts[len(parts)-2], parts[len(parts)-1]
+	if owner == "" || name == "" {
+		return ""
+	}
+	return owner + "/" + name
 }
 
 // consumer names the checkout a go.mod belongs to, as owner/name when the
