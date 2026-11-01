@@ -50,7 +50,10 @@ Flag parsing stops at the first URL, so a -- after it is a separator and not a
 terminator.
 
 By default the match is on the page's TEXT (tags dropped, entities decoded,
-whitespace collapsed, script and style ignored); --raw matches the raw bytes. A
+whitespace collapsed, script and style ignored, and the typographic punctuation
+a Markdown renderer substitutes folded back on BOTH sides, so that a want
+holding an apostrophe matches the curly one Hugo prints); --raw matches the raw
+bytes. A
 cache-busting query parameter is added unless --no-cache-bust, because Pages'
 CDN can serve the previous build for a while after a deploy. --retry N polls up
 to N more times, --wait apart, until the page is 200 and has every string.
@@ -248,16 +251,47 @@ func check(target string, wants []string, o options) result {
 	}
 	hay := string(body)
 	if !o.raw {
-		hay = textOf(body)
+		hay = plain(textOf(body))
 	}
 	for _, w := range wants {
 		if !o.raw {
-			w = collapse(w)
+			w = plain(collapse(w))
 		}
 		r.found = append(r.found, strings.Contains(hay, w))
 	}
 	return r
 }
+
+// plain folds the punctuation a Markdown renderer SUBSTITUTES back to the
+// characters we typed.
+//
+// ⛔ IT COST SIX RETRIES ON A PAGE THAT WAS ALREADY CORRECT, on 2026-11-01. The
+// landing said `262 of this fleet's own`, Hugo printed `fleet’s` with a
+// typographic apostrophe, and this command -- which decodes entities and drops
+// tags -- reported the string MISSING and kept polling until it gave up. A
+// verification tool answering "not published yet" about something published is
+// worse than no tool: the next person reads a real failure the same way.
+//
+// Goldmark's typographer, on by default in Hugo, substitutes the apostrophe and
+// both quote pairs, and `--`/`---` become en and em dashes, so ANY English
+// possessive or contraction in a want string was a false negative.
+//
+// Both sides are folded, which deliberately makes an em dash match a hyphen:
+// this is a presence check over prose, and conflating two dashes is the price of
+// matching what the renderer prints. `--raw` stays exact for anything that must
+// be compared byte for byte.
+var plainer = strings.NewReplacer(
+	"‘", "'", "’", "'", // ‘ ’
+	"‚", "'", "‛", "'", // ‚ ‛
+	"“", `"`, "”", `"`, // “ ”
+	"„", `"`, "‟", `"`, // „ ‟
+	"′", "'", "″", `"`, // ′ ″ (primes, which some pages use for quotes)
+	"‐", "-", "‑", "-", // ‐ ‑
+	"‒", "-", "–", "-", "—", "-", "―", "-", // ‒ – — ―
+	"…", "...", // …
+)
+
+func plain(s string) string { return plainer.Replace(s) }
 
 // unbust shows a URL without the parameter this command added.
 func unbust(u *url.URL, bust bool) string {
