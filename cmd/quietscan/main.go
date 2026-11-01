@@ -333,6 +333,10 @@ func readRepo(org, name string) (quiet.Runner, bool) {
 		fmt.Sprintf("repos/%s/%s/contents/%s", org, name, wf.Path)); err == nil {
 		sched, errs := quiet.ParseSchedule(string(b))
 		r.Schedule = sched
+		// The same body already in hand says which secrets the workflow needs,
+		// so knowing that costs no request at all. Only the two listings it is
+		// compared against do.
+		r.SecretsWanted = quiet.SecretsReferenced(string(b))
 		if len(sched) == 0 && len(errs) > 0 {
 			r.ReadError = errs[0].Error()
 			return r, true
@@ -340,6 +344,10 @@ func readRepo(org, name string) (quiet.Runner, bool) {
 	} else {
 		r.ReadError = "workflow file: " + err.Error()
 		return r, true
+	}
+
+	if len(r.SecretsWanted) > 0 {
+		r.RepoSecrets, r.OrgSecrets, r.SecretsNote = readSecretNames(org, name)
 	}
 
 	// event=schedule, because a manual dispatch is not evidence the schedule
@@ -382,6 +390,59 @@ func readRepo(org, name string) (quiet.Runner, bool) {
 		r.ConsecutiveFailures, r.SawSuccess = quiet.Streak(rec)
 	}
 	return r, true
+}
+
+// readSecretNames lists the NAMES of the secrets a repository and its
+// organisation hold.
+//
+// ⛔ NO VALUE IS READ, AND NONE CAN BE. GitHub's own words for this endpoint are
+// that it lists secrets "without revealing their encrypted values": the response
+// carries `name`, `created_at` and `updated_at` and nothing else. A secret is
+// verified by its properties, never by printing it.
+//
+// ⚠ EITHER REFUSAL SUPPRESSES THE FINDING, which is why the note is returned
+// rather than swallowed. Reading repository secrets needs collaborator access
+// and organisation secrets need more, so a token that cannot see them gets a
+// 403 or a 404 -- and "I was not allowed to look" must never be reported as
+// "the secret is not there". That mistake would invent the one finding this
+// check exists to make.
+func readSecretNames(org, repo string) (repoSecrets, orgSecrets []string, note string) {
+	var list struct {
+		Secrets []struct {
+			Name string `json:"name"`
+		} `json:"secrets"`
+	}
+	names := func(path string) ([]string, error) {
+		b, err := counted("api", path+"?per_page=100")
+		if err != nil {
+			return nil, err
+		}
+		list.Secrets = nil
+		if json.Unmarshal(b, &list) != nil {
+			return nil, fmt.Errorf("unparseable")
+		}
+		out := make([]string, 0, len(list.Secrets))
+		for _, s := range list.Secrets {
+			out = append(out, s.Name)
+		}
+		return out, nil
+	}
+
+	rs, err := names(fmt.Sprintf("repos/%s/%s/actions/secrets", org, repo))
+	if err != nil {
+		return nil, nil, "repository secrets: " + err.Error()
+	}
+	// ⛔ THE ORGANISATION LISTING IS NOT READ, AND THAT IS A DELIBERATE REFUSAL
+	// TO ESCALATE. `GET /orgs/{org}/actions/secrets` answers 403 for this
+	// token -- "You must be an org admin or have the actions secrets
+	// fine-grained permission", "needs the admin:org scope" -- measured across
+	// the fleet on 2026-11-01. Widening a token to admin:org so that a
+	// read-only health check can enumerate every organisation's credentials is
+	// a bad trade, and it is not needed: a runner that SUCCEEDS has already
+	// proved its secret resolves, from wherever it comes. So the absence of a
+	// name from this listing is only ever reported on a runner that is
+	// failing, where it is a diagnosis rather than a guess. See quiet.Classify.
+	return rs, nil, ""
 }
 
 // readApp asks whether the Renovate App is installed on an organisation.
@@ -493,6 +554,10 @@ type fixtureFile struct {
 		Crons          []string `json:"crons"`
 		LastRun        string   `json:"last_run"`
 		LastConclusion string   `json:"last_conclusion"`
+		SecretsWanted  []string `json:"secrets_wanted"`
+		RepoSecrets    []string `json:"repo_secrets"`
+		OrgSecrets     []string `json:"org_secrets"`
+		SecretsNote    string   `json:"secrets_note"`
 		Repo           string   `json:"repo"`
 		Covers         []string `json:"covers"`
 		FilterNote     string   `json:"filter_note"`
@@ -527,7 +592,9 @@ func loadFixture(path string) ([]quiet.Runner, time.Time, map[string]quiet.AppCo
 			WorkflowState: in.WorkflowState, Born: parseTime(in.Born),
 			BornSource: "fixture", LastRun: parseTime(in.LastRun),
 			LastConclusion: in.LastConclusion,
-			Repo:           in.Repo, Covers: in.Covers, FilterNote: in.FilterNote,
+			SecretsWanted:  in.SecretsWanted, RepoSecrets: in.RepoSecrets,
+			OrgSecrets: in.OrgSecrets, SecretsNote: in.SecretsNote,
+			Repo: in.Repo, Covers: in.Covers, FilterNote: in.FilterNote,
 			ReadError: in.ReadError,
 		}
 		for _, c := range in.Crons {
@@ -604,6 +671,17 @@ a dependency update — because it asked WHEN the last run started and never wha
 became of it. The ` + "`broken`" + ` bucket, the conclusion printed on each line and the
 failure streak ("9 of the 9 scheduled runs read, NONE successful") are that
 lesson. A runner that fails fast is the most active-looking failure there is.
+
+⛔ AND IT NAMES THE SECRET INSTEAD OF POINTING AT A LOG. The workflow says which
+secrets it needs, so missing_secret reports the name of the fix. Three
+deliberate choices, two of them refusals: secrets.GITHUB_TOKEN is excluded
+(GitHub injects it, it is in no listing, and counting it would report every
+runner in the fleet as missing a secret); the ORGANISATION listing is not read,
+because it answers 403 without the admin:org scope, and widening a token so a
+read-only check can enumerate every organisation's credentials is a bad trade;
+and so a missing name is a verdict only on a runner that is FAILING or has never
+run — a scheduled run that succeeded has already proved its secret resolves. No
+value is ever read, only names.
 
 ⛔ THE EVIDENCE IS THE SCHEDULED PATH ONLY. Runs are read with
 event=schedule, because a manual dispatch is not evidence that the cron still
@@ -805,8 +883,12 @@ func sweep(stdout, stderr io.Writer) int {
 		v   quiet.Verdict
 		fix string
 	}{
-		// Broken leads, because it is the only bucket whose members look like
-		// they are working: they run on time, every night, and fail.
+		// missing_secret leads Broken, because it is the CAUSE of a broken
+		// runner and the only verdict here that does not need a run to have
+		// happened first. It names the fix instead of pointing at a log.
+		{quiet.MissingSecret, "the workflow asks for a secret that DOES NOT EXIST; an unset secret expands to the empty string, so it runs and fails"},
+		// Broken leads the rest, because it is the only bucket whose members
+		// look like they are working: they run on time, every night, and fail.
 		{quiet.Broken, "it RUNS AND FAILS -- the schedule is fine, the run is not; read that run's logs and check the secret"},
 		{quiet.Overdue, "the runner has stopped; look at the last run's logs and the token"},
 		{quiet.NeverFired, "it has never run at all; the schedule or the token is wrong"},
@@ -959,6 +1041,19 @@ func detail(r quiet.Result) string {
 		return "cron " + r.Schedule.String() + " has no reachable occurrence"
 	case quiet.NotYetDue:
 		return fmt.Sprintf("born %s   first due %s   cron %s", stamp(r.Born), stamp(r.Due), r.Schedule)
+	case quiet.MissingSecret:
+		// The name of what is missing IS the fix, so it leads. The runs are
+		// still named, because "and every run has failed" is what turns this
+		// from a tidiness remark into the cause of a silence.
+		s := fmt.Sprintf("the workflow needs %s and NOTHING holds it (not the repository, not the organisation)",
+			quiet.SecretsSummary(r.MissingSecrets))
+		if r.ConsecutiveFailures > 0 && !r.SawSuccess {
+			s += fmt.Sprintf("   %d of the %d scheduled runs read, NONE successful",
+				r.ConsecutiveFailures, r.RunsRead)
+		} else if r.LastRun.IsZero() {
+			s += "   no scheduled run has ever completed"
+		}
+		return s + "   cron " + r.Schedule.String()
 	case quiet.Broken:
 		// The verdict is about the conclusion, so the conclusion leads -- and
 		// the lateness still comes along, because a runner can be failing AND
@@ -984,6 +1079,23 @@ func detail(r quiet.Result) string {
 			// Not a failure by Failed()'s allowlist -- a cancellation or a skip.
 			// Worth seeing, not worth paging on.
 			s += "   ended " + r.LastConclusion
+		}
+		// ⭐ SAY WHAT WAS CHECKED, not only what was found. A secret check that
+		// reports nothing looks identical whether every secret is present or
+		// the reader is broken and asked about none -- so the line names the
+		// secrets it verified. That is what makes a clean pass evidence.
+		switch {
+		case r.SecretsNote != "":
+			s += "   secrets UNREAD (" + r.SecretsNote + ")"
+		case len(r.MissingSecrets) > 0:
+			// Not a page: this runner works, so the secret resolves from the
+			// organisation, which cannot be listed without admin:org. Said
+			// anyway, because it is the one thing that would explain a sudden
+			// failure here later.
+			s += "   " + quiet.SecretsSummary(r.MissingSecrets) +
+				" is not a REPOSITORY secret (the runner works, so it comes from the organisation)"
+		case len(r.SecretsWanted) > 0:
+			s += "   secrets present: " + quiet.SecretsSummary(r.SecretsWanted)
 		}
 		if r.HasLag {
 			s += fmt.Sprintf("   lag %s", hm(r.Lag))
