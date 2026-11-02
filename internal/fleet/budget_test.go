@@ -118,22 +118,103 @@ func TestARetryIsOneUnitOfBudget(t *testing.T) {
 	}
 }
 
-// TestWithoutStartBudgetNothingIsCharged: a command that never asked for the
-// guard keeps working exactly as before, so adding this cannot break the
-// sweeps that do not use it yet.
-func TestWithoutStartBudgetNothingIsCharged(t *testing.T) {
+// ⛔⛔ TestASweepThatNeverAskedIsGuardedAnyway replaces
+// TestWithoutStartBudgetNothingIsCharged, whose assertion was the opposite.
+//
+// That test was right for its moment and said so: "a command that never asked
+// for the guard keeps working exactly as before, so adding this cannot break
+// the sweeps that do not use it YET." The migration it was waiting for never
+// came. Measured 2026-11-02: eighteen files under cmd/ call GH and exactly ONE
+// calls StartBudget, so the floor and the reserve protected one sweep out of
+// fifteen -- and on 2026-11-01 one of the other fourteen spent the shared
+// budget and came back with 82 of 363 organisations unreadable.
+//
+// An opt-in control protects the callers who already knew.
+func TestASweepThatNeverAskedIsGuardedAnyway(t *testing.T) {
 	calls := 0
-	withRun(t, answers("5000", &calls))
+	withRun(t, answers("1003", &calls))
+
+	// 1003 left, 1000 reserved: three calls may go, the fourth must not.
+	for i := 0; i < 3; i++ {
+		if _, err := GH("api", "repos/x/y"); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	_, err := GH("api", "repos/x/y")
+	if !errors.Is(err, ErrBudgetReserve) {
+		t.Fatalf("the fourth call gave %v, want ErrBudgetReserve", err)
+	}
+	if left, tracking := BudgetLeft(); !tracking || left != 1000 {
+		t.Errorf("left=%d tracking=%v, want 1000 and true", left, tracking)
+	}
+	// One rate_limit read plus the three calls that were allowed. The guard
+	// must not re-read its own counter per call: that doubles the cost of the
+	// thing it protects.
+	if calls != 4 {
+		t.Errorf("%d calls reached the seam, want 4 (one budget read + three allowed)", calls)
+	}
+}
+
+// The old behaviour stays reachable, because a tool that must not spend a call
+// on rate_limit -- or a test -- needs it.
+func TestAutoBudgetCanBeTurnedOff(t *testing.T) {
+	calls := 0
+	withRun(t, answers("1003", &calls))
+	AutoBudget = false
+	t.Cleanup(func() { AutoBudget = true })
+
 	for i := 0; i < 20; i++ {
 		if _, err := GH("api", "repos/x/y"); err != nil {
 			t.Fatalf("call %d: %v", i, err)
 		}
 	}
-	if left, tracking := BudgetLeft(); tracking || left != 0 {
-		t.Errorf("left=%d tracking=%v, want 0 and false", left, tracking)
+	if _, tracking := BudgetLeft(); tracking {
+		t.Error("tracking with AutoBudget off")
 	}
 	if calls != 20 {
 		t.Errorf("%d calls reached the seam, want 20", calls)
+	}
+}
+
+// ⚠ THE AUTOMATIC START FAILS OPEN, AND SAYS SO -- the one asymmetry with
+// StartBudget, which refuses. Nobody asked for this guard, so refusing would
+// turn every fleet tool into a broken one the moment rate_limit is unreadable.
+// Proceeding SILENTLY, though, is the exact failure this file is about: a sweep
+// nobody knew was unprotected.
+func TestAnUnguardedSweepIsAnnounced(t *testing.T) {
+	var warned strings.Builder
+	withRun(t, func(args []string) ([]byte, string, error) {
+		if len(args) > 1 && args[1] == "rate_limit" {
+			return nil, "could not resolve host", errors.New("exit 1")
+		}
+		return []byte("ok"), "", nil
+	})
+	BudgetWarn = &warned
+	t.Cleanup(func() { BudgetWarn = nil })
+
+	if _, err := GH("api", "repos/x/y"); err != nil {
+		t.Fatalf("the sweep was refused rather than proceeding: %v", err)
+	}
+	if _, tracking := BudgetLeft(); tracking {
+		t.Error("tracking after a failed read")
+	}
+	if !strings.Contains(warned.String(), "UNGUARDED") {
+		t.Errorf("said %q, want it to announce the sweep is unguarded", warned.String())
+	}
+}
+
+// An explicit StartBudget must win, and must not pay for a second read.
+func TestAnExplicitStartIsNotDoubled(t *testing.T) {
+	calls := 0
+	withRun(t, answers("4000", &calls))
+	if err := StartBudget(2000, 500); err != nil {
+		t.Fatalf("StartBudget: %v", err)
+	}
+	if left, tracking := BudgetLeft(); !tracking || left != 4000 {
+		t.Fatalf("left=%d tracking=%v, want 4000 and true", left, tracking)
+	}
+	if calls != 1 {
+		t.Errorf("%d calls reached the seam, want 1 (the explicit read only)", calls)
 	}
 }
 
