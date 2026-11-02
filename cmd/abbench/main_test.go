@@ -49,6 +49,11 @@ func helper(role string) {
 		os.Exit(3)
 	}
 	fmt.Printf("%s round=%d GOMAXPROCS=%q args=%s\n", role, prior+1, os.Getenv("GOMAXPROCS"), strings.Join(os.Args[1:], " "))
+	for _, a := range os.Args[1:] {
+		if name, ok := strings.CutPrefix(a, "-test.bench="); ok {
+			fmt.Printf("Benchmark%s-8\t100\t%d ns/op\n", name, 10*(prior+1))
+		}
+	}
 	os.Exit(0)
 }
 
@@ -193,8 +198,8 @@ func TestAFailingChildStopsTheRun(t *testing.T) {
 	if got, want := read(t, b.log), "base\nhead\nbase\nhead\n"; got != want {
 		t.Errorf("ran %q after the failure, want it to stop at %q", got, want)
 	}
-	if n := strings.Count(read(t, filepath.Join(out, "base.txt")), "\n"); n != 2 {
-		t.Errorf("base.txt has %d lines, want 2", n)
+	if n := strings.Count(read(t, filepath.Join(out, "base.txt")), "\n"); n != 1 {
+		t.Errorf("base.txt has %d lines, want 1 (round 2 failed, so it is kept on neither side)", n)
 	}
 }
 
@@ -367,6 +372,194 @@ func TestMaxBusyRefusesALoadedHost(t *testing.T) {
 	}
 	if code, _, stderr := drive(args()...); code != 1 || !strings.Contains(stderr, "no /proc") {
 		t.Errorf("second read: exit %d: %s", code, stderr)
+	}
+}
+
+// loads makes readLoad return the given readings in turn, the last one forever.
+func loads(t *testing.T, vals ...float64) *int {
+	t.Helper()
+	oldRead, oldPoll := readLoad, loadPoll
+	t.Cleanup(func() { readLoad, loadPoll = oldRead, oldPoll })
+	loadPoll = time.Millisecond
+	calls := 0
+	readLoad = func() (float64, error) {
+		v := vals[min(calls, len(vals)-1)]
+		calls++
+		return v, nil
+	}
+	return &calls
+}
+
+func TestAHighLoadAfterARoundDiscardsTheWholePair(t *testing.T) {
+	b := setup(t)
+	out := t.TempDir()
+	// Reads: before 1, after 1 | before 1, after 99 (planted) | before 1, after 1.
+	loads(t, 1, 1, 1, 99, 1, 1)
+	code, stdout, stderr := drive("-b", b.base, "-H", b.head, "-n", "2", "--max-load", "4", "--wait", "1m", "-o", out)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if got, want := read(t, b.log), strings.Repeat("base\nhead\n", 3); got != want {
+		t.Fatalf("ran %q, want 3 rounds (one discarded)", got)
+	}
+	for _, f := range []string{"base.txt", "head.txt"} {
+		got := read(t, filepath.Join(out, f))
+		if !strings.Contains(got, "round=1") || !strings.Contains(got, "round=3") || strings.Contains(got, "round=2") {
+			t.Errorf("%s must hold rounds 1 and 3, not the discarded 2: %q", f, got)
+		}
+		if n := strings.Count(got, "\n"); n != 2 {
+			t.Errorf("%s has %d lines, want 2", f, n)
+		}
+	}
+	if !strings.Contains(stderr, "round 2 discarded: load 1.00 before, 99.00 after, limit 4.00") {
+		t.Errorf("discard not logged with both loads: %s", stderr)
+	}
+	if !strings.HasSuffix(stdout, "(1 discarded)\n") {
+		t.Errorf("summary %q", stdout)
+	}
+}
+
+func TestMaxLoadWaitsBeforeARound(t *testing.T) {
+	b := setup(t)
+	calls := loads(t, 9, 8, 2, 2) // two waits, then before=2, after=2
+	code, _, stderr := drive("-b", b.base, "-H", b.head, "-n", "1", "--max-load", "4", "--wait", "1m", "-o", t.TempDir())
+	if code != 0 || strings.Count(stderr, "waiting") != 2 || *calls != 4 {
+		t.Fatalf("exit %d, %d reads: %s", code, *calls, stderr)
+	}
+}
+
+func TestMaxLoadBudgetSpentKeepsWhatItHas(t *testing.T) {
+	b := setup(t)
+	out := t.TempDir()
+	// Round 1 is clean, then the host never quiets down.
+	loads(t, 1, 1, 50)
+	code, _, stderr := drive("-b", b.base, "-H", b.head, "-n", "3", "--max-load", "4", "--wait", "30ms", "-o", out)
+	if code != 1 || !strings.Contains(stderr, "1 of 3 rounds kept") {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if n := strings.Count(read(t, filepath.Join(out, "base.txt")), "\n"); n != 1 {
+		t.Errorf("base.txt has %d lines, want the 1 kept round", n)
+	}
+
+	// Without --wait a loaded host is refused at once, nothing runs.
+	if err := os.WriteFile(b.log, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loads(t, 50)
+	code, _, stderr = drive("-b", b.base, "-H", b.head, "-n", "2", "--max-load", "4", "-o", t.TempDir())
+	if code != 1 || !strings.Contains(stderr, "0 of 2 rounds kept") || read(t, b.log) != "" {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+
+	// A host that is quiet before each round but loaded after never finishes:
+	// the discarded rounds spend the budget.
+	loads(t, 1, 50)
+	code, _, stderr = drive("-b", b.base, "-H", b.head, "-n", "2", "--max-load", "4", "--wait", "1ms", "-o", t.TempDir())
+	if code != 1 || !strings.Contains(stderr, "0 of 2 rounds kept") {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+}
+
+func TestMaxLoadReadErrorsAreFailures(t *testing.T) {
+	b := setup(t)
+	oldRead := readLoad
+	defer func() { readLoad = oldRead }()
+	boom := errors.New("no load here")
+	readLoad = func() (float64, error) { return 0, boom }
+	if code, _, stderr := drive("-b", b.base, "-H", b.head, "--max-load", "4", "-o", t.TempDir()); code != 1 || !strings.Contains(stderr, "no load here") {
+		t.Errorf("before: exit %d: %s", code, stderr)
+	}
+	n := 0
+	readLoad = func() (float64, error) {
+		n++
+		if n == 2 {
+			return 0, boom
+		}
+		return 1, nil
+	}
+	if code, _, stderr := drive("-b", b.base, "-H", b.head, "--max-load", "4", "-o", t.TempDir()); code != 1 || !strings.Contains(stderr, "no load here") {
+		t.Errorf("after: exit %d: %s", code, stderr)
+	}
+}
+
+func TestMaxLoadWorksAlongsideMaxBusy(t *testing.T) {
+	b := setup(t)
+	oldGoos, oldRead, oldSleep := goos, readStat, sleep
+	goos, sleep = "linux", func(time.Duration) {}
+	defer func() { goos, readStat, sleep = oldGoos, oldRead, oldSleep }()
+	readStat = func() (procstat.Snapshot, error) { return procstat.Snapshot{All: procstat.Times{Idle: 100}}, nil }
+	calls := loads(t, 1)
+	if code, _, stderr := drive("-b", b.base, "-H", b.head, "-n", "1", "-m", "25", "--max-load", "4", "-o", t.TempDir()); code != 0 || *calls != 2 {
+		t.Fatalf("exit %d, %d reads: %s", code, *calls, stderr)
+	}
+}
+
+func TestPerSideArgumentsFollowTheSharedOnes(t *testing.T) {
+	b := setup(t)
+	out := t.TempDir()
+	// The same binary on both sides, two sub-benchmarks.
+	code, _, stderr := drive("-b", b.base, "-H", b.base, "-n", "2", "-o", out,
+		"--base-arg=-test.bench=Sign/ours", "--head-arg=-test.bench=Sign/sdk", "--head-arg=-extra",
+		"--", "-test.run", "^$")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	baseTxt, headTxt := read(t, filepath.Join(out, "base.txt")), read(t, filepath.Join(out, "head.txt"))
+	if !strings.Contains(baseTxt, "args=-test.run ^$ -test.bench=Sign/ours\n") || strings.Contains(baseTxt, "sdk") || strings.Contains(baseTxt, "-extra") {
+		t.Errorf("base.txt: %q", baseTxt)
+	}
+	if !strings.Contains(headTxt, "args=-test.run ^$ -test.bench=Sign/sdk -extra\n") || strings.Contains(headTxt, "ours") {
+		t.Errorf("head.txt: %q", headTxt)
+	}
+}
+
+func TestRenameMakesTheTwoSeriesComparable(t *testing.T) {
+	b := setup(t)
+	out := t.TempDir()
+	code, _, stderr := drive("-b", b.base, "-H", b.base, "-n", "1", "-o", out,
+		"--base-arg=-test.bench=Sign/ours", "--head-arg=-test.bench=Sign/sdk",
+		"--rename-base", "ours=impl", "--rename-head", "sdk=impl")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	// Both sides carry one name; the rest of the lines is untouched.
+	for _, f := range []string{"base.txt", "head.txt"} {
+		got := read(t, filepath.Join(out, f))
+		if !strings.Contains(got, "BenchmarkSign/impl-8\t100\t") || strings.Contains(got, "BenchmarkSign/ours") || strings.Contains(got, "BenchmarkSign/sdk") {
+			t.Errorf("%s: %q", f, got)
+		}
+	}
+	if !strings.Contains(read(t, filepath.Join(out, "base.txt")), "-test.bench=Sign/ours") {
+		t.Error("a non-benchmark line was rewritten")
+	}
+}
+
+func TestRenameOnlyTouchesTheNameField(t *testing.T) {
+	in := "BenchmarkA/ours-8 \t5\t1 ns/op ours\nPASS ours\nBenchmarkB/ours-8\n"
+	got := string(rename([]byte(in), renames([]string{"ours=impl"})))
+	want := "BenchmarkA/impl-8 \t5\t1 ns/op ours\nPASS ours\nBenchmarkB/impl-8\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if got := rename([]byte("x"), nil); string(got) != "x" {
+		t.Fatal("no rules changed the text")
+	}
+}
+
+func TestNewFlagsAreValidated(t *testing.T) {
+	b := setup(t)
+	good := []string{"-b", b.base, "-H", b.head, "-o", t.TempDir()}
+	for name, extra := range map[string][]string{
+		"max-load zero":     {"--max-load", "0"},
+		"max-load negative": {"--max-load", "-1"},
+		"wait alone":        {"--wait", "1m"},
+		"negative wait":     {"--max-load", "4", "--wait", "-1s"},
+		"bad rename":        {"--rename-head", "noequals"},
+		"empty old":         {"--rename-base", "=x"},
+	} {
+		if code, _, stderr := drive(append(append([]string{}, good...), extra...)...); code != 2 {
+			t.Errorf("%s: exit %d: %s", name, code, stderr)
+		}
 	}
 }
 
