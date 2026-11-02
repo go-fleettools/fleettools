@@ -25,7 +25,16 @@ func moveBody(f finding, want, from string) string {
 		fmt.Fprintf(&b, "This repository pins Go **%s** in `%s` — **%d** occurrence(s). "+
 			"This moves them to **%s**.\n\n", from, strings.Join(f.MoveFiles, "`, `"), f.Moves, want)
 	}
-	if len(f.GoModFiles) > 0 {
+	if len(f.GoModFiles) > 0 && f.Directive {
+		fmt.Fprintf(&b, "`go.mod`'s `go` directive is **%s**, and this raises it to **%s**, running "+
+			"`go mod tidy`; only `go.mod` and `go.sum` are committed.\n\n"+
+			"⛔ That is a **different change from moving the CI pin**, and the reason it is here: "+
+			"the directive is the floor a CONSUMER honours. A module published with `go %s` builds "+
+			"against an unpatched standard library for anyone running `go install` with "+
+			"`GOTOOLCHAIN=local`, however new the toolchain this repository's own CI uses. "+
+			"⚠ **And it is not finished until this is RELEASED** — the proxy serves the published "+
+			"`go.mod`, not this branch.\n\n", from, want, from)
+	} else if len(f.GoModFiles) > 0 {
 		fmt.Fprintf(&b, "CI reads its Go version from `%s` (`go-version-file`), whose `go` directive is **%s**. "+
 			"This raises it to **%s** and runs `go mod tidy`; only `go.mod` and `go.sum` are committed.\n\n",
 			strings.Join(f.GoModFiles, "`, `"), from, want)
@@ -54,7 +63,15 @@ func moveCommitMessage(f finding, want, from string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "ci: move the Go pin from %s to %s\n\n", from, want)
 	fmt.Fprintf(&b, "%d occurrence(s) in %s.\n\n", f.Moves, strings.Join(f.MoveFiles, ", "))
-	if len(f.GoModFiles) > 0 {
+	if len(f.GoModFiles) > 0 && f.Directive {
+		fmt.Fprintf(&b, "Raises go.mod's go directive from %s to %s and tidies. That is a\n"+
+			"DIFFERENT change from moving the CI pin: the directive is the floor a\n"+
+			"CONSUMER honours, so a module published with go %s builds against an\n"+
+			"unpatched standard library for anyone running `go install` with\n"+
+			"GOTOOLCHAIN=local, however new this repository's own CI is. It is not\n"+
+			"finished until this is RELEASED: the proxy serves the published go.mod.\n\n",
+			from, want, from)
+	} else if len(f.GoModFiles) > 0 {
 		fmt.Fprintf(&b, "go-version-file: raises the go directive of %s to %s and tidies.\n\n",
 			strings.Join(f.GoModFiles, ", "), want)
 	}

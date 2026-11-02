@@ -49,6 +49,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -126,6 +127,21 @@ type finding struct {
 	// (`go-version-file:`) whose go directive is EXACTLY the -from version.
 	// gopin cannot see those through a `go-version:` line; --gomod looks.
 	GoModFiles []string `json:"gomodfiles,omitempty"`
+
+	// Directive says the root go.mod was added to GoModFiles by --directive
+	// rather than by --gomod: its `go` line is exactly -from, and no workflow
+	// reads it through go-version-file.
+	//
+	// ⛔ THIS IS A DIFFERENT ACT FROM MOVING A PIN, and it gets a different
+	// sentence in the pull request. --gomod raises a directive CI itself reads,
+	// so moving the pin IS raising it; --directive raises the minimum a
+	// CONSUMER honours, which the body of a -from pull request otherwise
+	// explicitly says it does not touch. Measured 2026-11-01 on the Go 1.27.3
+	// campaign: of the first 80 repositories whose PUBLISHED go.mod declared
+	// 1.27.1, 79 were reported "already explicit" and their directive was never
+	// looked at, because their CI names a version instead of reading go.mod.
+	// One in eighty was actionable, and the exposure is in the directive.
+	Directive bool `json:"directive,omitempty"`
 }
 
 // moveCount is every place this repository names the version being left:
@@ -133,14 +149,14 @@ type finding struct {
 func (f finding) moveCount() int { return f.Moves + len(f.GoModFiles) }
 
 // inspect reads a repository's default branch and says what it needs.
-func inspect(repo, want, from string) finding { return inspectWith(repo, want, from, false) }
+func inspect(repo, want, from string) finding { return inspectWith(repo, want, from, false, false) }
 
 // reVersionFile finds the go.mod a workflow reads its Go version from.
 var reVersionFile = regexp.MustCompile(`go-version-file:\s*['"]?([^\s'"#]+)`)
 
 // inspectWith is inspect, optionally also following go-version-file to the
 // go.mod it names (gomod), which the go-version lines cannot show.
-func inspectWith(repo, want, from string, gomod bool) finding {
+func inspectWith(repo, want, from string, gomod, directive bool) finding {
 	f := finding{Repo: repo}
 	modPaths := map[string]bool{}
 	names, err := workflowNames(repo)
@@ -206,6 +222,19 @@ func inspectWith(repo, want, from string, gomod bool) finding {
 	if body, err := getFile(repo, "go.mod"); err == nil {
 		if m := reGoDirective.FindStringSubmatch(body); m != nil {
 			f.GoMod = m[1]
+		}
+	}
+	// --directive: raise the root go.mod's `go` line when it is EXACTLY -from,
+	// whatever the workflows read their version from.
+	//
+	// ⛔ The hold rule still decides. A workflow naming a version OLDER than
+	// the target breaks the moment the directive goes past it, because setup-go
+	// sets GOTOOLCHAIN=local and the pin is then enforced rather than
+	// re-downloaded; such a repository is reported held, never raised.
+	if directive && from != "" && f.GoMod == from && !slices.Contains(f.GoModFiles, "go.mod") {
+		if _, isHeld := heldBackBy(f.Literals, mustParse(want)); !isHeld {
+			f.GoModFiles = append(f.GoModFiles, "go.mod")
+			f.Directive = true
 		}
 	}
 	return f

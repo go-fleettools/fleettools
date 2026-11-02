@@ -18,7 +18,7 @@ var osExit = os.Exit
 type config struct {
 	version, from, list, state         string
 	apply, claim, follow, guard, gomod bool
-	prefilter, noAlias                 bool
+	prefilter, noAlias, directive      bool
 	pause, quotaWait, ciTimeout        time.Duration
 	limit, passes                      int
 }
@@ -113,6 +113,7 @@ func RootCmd() *cobra.Command {
 	fl.BoolVar(&cfg.follow, "follow", false, "after opening, wait for checks like prwait (no checks is not a pass) and merge with ghmerge when green")
 	fl.StringVar(&cfg.state, "state", "", "resumable state file (repository -> status); a rerun skips finished repositories")
 	fl.BoolVar(&cfg.gomod, "gomod", false, "with --from: also raise a go.mod read through go-version-file whose go directive is exactly --from, and tidy")
+	fl.BoolVar(&cfg.directive, "directive", false, "with --from: raise the ROOT go.mod's go directive when it is exactly --from, whatever the workflows read their version from. A different act from moving a pin — it raises the minimum a CONSUMER honours — so it gets its own sentence in the pull request, and it is held back when a workflow pins older than --version")
 	fl.BoolVar(&cfg.prefilter, "prefilter", false, "print only the listed repositories whose workflows name something to move, read through GraphQL (its own budget, 20 repositories a call) instead of ~6 REST calls each; a repository it cannot read is passed through, never dropped")
 	fl.BoolVar(&cfg.noAlias, "no-alias", false, "leave `stable` aliases alone: a security-release campaign moves explicit pins, and pinning an alias is a different change with a different review")
 	fl.BoolVar(&noTidy, "no-tidy", false, "with --gomod: raise the directive without go mod tidy, for modules whose replace directives point at sibling directories a lone clone does not have")
@@ -186,6 +187,9 @@ func runConfig(cfg config, stdin io.Reader, stdout, stderr io.Writer) error {
 	}
 	if cfg.gomod && cfg.from == "" {
 		return usage("--gomod needs --from: it raises a go directive that is exactly that version")
+	}
+	if cfg.directive && cfg.from == "" {
+		return usage("--directive needs --from: it raises a go directive that is exactly that version")
 	}
 	if (cfg.claim || cfg.follow) && !cfg.apply {
 		return usage("--claim and --follow act on pull requests: they need --apply")
