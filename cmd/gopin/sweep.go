@@ -295,7 +295,7 @@ func (s *sweeper) handle(repo string) result {
 			return s.deferred(repo, err.Error())
 		}
 	}
-	f := inspectWith(repo, s.cfg.version, s.cfg.from, s.cfg.gomod)
+	f := inspectWith(repo, s.cfg.version, s.cfg.from, s.cfg.gomod, s.cfg.directive)
 	if s.cfg.noAlias {
 		f.Aliases, f.Files = 0, nil
 	}
@@ -319,12 +319,30 @@ func (s *sweeper) handle(repo string) result {
 			s.printf(" %d × %s -> %s in %s", f.Moves, s.cfg.from, s.cfg.version, strings.Join(f.MoveFiles, " "))
 		}
 		if len(f.GoModFiles) > 0 {
-			s.printf(" go-version-file %s (go %s -> %s)", strings.Join(f.GoModFiles, " "), s.cfg.from, s.cfg.version)
+			// Named for the act, not the mechanism: --directive raises the
+			// minimum a CONSUMER honours, and calling that "go-version-file"
+			// would describe a file nothing here reads.
+			what := "go-version-file"
+			if f.Directive {
+				what = "directive"
+			}
+			s.printf(" %s %s (go %s -> %s)", what, strings.Join(f.GoModFiles, " "), s.cfg.from, s.cfg.version)
 		}
 		s.printf("\n")
 	case f.Aliases == 0:
 		if len(f.Literals) > 0 {
-			s.printf("pinned  %s (%s)\n", repo, strings.Join(f.Literals, " "))
+			s.printf("pinned  %s (%s)", repo, strings.Join(f.Literals, " "))
+			// ⛔ "pinned" said nothing about the DIRECTIVE, and that silence is
+			// how 79 of 80 repositories whose published go.mod was below the
+			// floor read as clean. Say it, even when nothing will be done.
+			if held, isHeld := heldBackBy(f.Literals, s.target); olderGoMod(f.GoMod, s.target) {
+				if isHeld {
+					s.printf(" ; go.mod %s HELD by the %s pin", f.GoMod, held)
+				} else if !s.cfg.directive {
+					s.printf(" ; go.mod %s is below %s — --directive raises it", f.GoMod, s.cfg.version)
+				}
+			}
+			s.printf("\n")
 		}
 		return s.record(repo, result{st: stClean})
 	default:

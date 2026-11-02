@@ -93,6 +93,20 @@ func prefilter(cfg config, repos []string, out, errw io.Writer) error {
 
 // wantsMove says whether any workflow text names something this run would move.
 func wantsMove(texts []string, rootMod string, cfg config) bool {
+	// ⛔ --directive is decided by the go.mod and NOT by any workflow, so it is
+	// answered before the loop: a repository whose CI names an explicit version
+	// has nothing in its workflows to match, and skipping it here is exactly how
+	// 79 of 80 repositories below the floor were filtered out before the REST
+	// read ever saw them. A root go.mod GraphQL did not return is passed on,
+	// never dropped — saving calls must not cost a candidate.
+	if cfg.directive && cfg.from != "" {
+		if rootMod == "" {
+			return true
+		}
+		if d := reGoDirective.FindStringSubmatch(rootMod); d == nil || d[1] == cfg.from {
+			return true
+		}
+	}
 	for _, t := range texts {
 		if !cfg.noAlias && reStable.MatchString(t) {
 			return true
