@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"sync"
 )
 
@@ -45,6 +47,72 @@ var ErrBudgetFloor = errors.New("fleet: the hourly REST budget is below the floo
 // answer and the reason stopping is better than failing.
 var ErrBudgetReserve = errors.New("fleet: stopped at the budget reserve")
 
+// ⛔⛔ AND THE GUARD WAS INERT IN FOURTEEN OF THE FIFTEEN SWEEPS IT WAS WRITTEN
+// FOR. Measured 2026-11-02: eighteen files under cmd/ call [GH], and exactly
+// ONE -- redscan -- ever called [StartBudget]. Everywhere else budgetTracking
+// stayed false, spend returned nil on every call, and the floor and the reserve
+// protected nothing at all.
+//
+// That was a deliberate transition, and its own test said so: "a command that
+// never asked for the guard keeps working exactly as before, so adding this
+// cannot break the sweeps that do not use it YET". The migration never
+// happened, and on 2026-11-01 a full quietscan pass -- one of the fourteen --
+// made 1592 calls, drove the shared budget down and came back with 82 of 363
+// organisations UNREADABLE. Fifth occurrence of the incident this file exists
+// to prevent, in a sweep the file could not see.
+//
+// ⭐ SO THE GUARD IS NOW THE DEFAULT RATHER THAN A THING TO REMEMBER. A sweep
+// that never calls StartBudget gets a projection on its first call anyway. That
+// is the same lesson as the note which said "the control must be in the TOOL,
+// not in a note": an opt-in control protects the callers who already knew.
+var AutoBudget = true
+
+// BudgetWarn is where an unguarded sweep is announced. A test redirects it.
+var BudgetWarn io.Writer = os.Stderr
+
+var (
+	budgetStartMu sync.Mutex
+	budgetTried   bool // an automatic start has been attempted
+)
+
+// autoStart gives a projection to a caller that never asked for one.
+//
+// ⚠ IT FAILS OPEN, AND SAYS SO. [StartBudget] refuses when it cannot read the
+// budget, because a caller that ASKED for a guard must not be told it has one;
+// here nobody asked, so refusing would turn every fleet tool into a broken one
+// the moment rate_limit is unreadable. It therefore leaves the sweep exactly as
+// it was before this change -- unguarded -- and writes one line saying so,
+// because the failure mode this whole file is about is a sweep nobody knew was
+// unprotected.
+func autoStart() {
+	budgetStartMu.Lock()
+	defer budgetStartMu.Unlock()
+	if budgetTried {
+		return
+	}
+	budgetTried = true
+
+	// ⛔ READ THROUGH THE EXEC SEAM, NOT THROUGH GH: GH accounts for its calls
+	// with spend, which is what called us, and a projection that charged itself
+	// for being created would recurse.
+	out, _, err := run([]string{"api", "rate_limit", "--jq", ".resources.core.remaining"})
+	var left int
+	if err == nil {
+		err = json.Unmarshal(trimSpaceBytes(out), &left)
+	}
+	if err != nil {
+		if BudgetWarn != nil {
+			fmt.Fprintf(BudgetWarn, "fleet: the hourly budget could not be read (%v); "+
+				"this sweep is UNGUARDED and may spend the share the fleet's Renovate runners need\n", err)
+		}
+		return
+	}
+
+	budgetMu.Lock()
+	defer budgetMu.Unlock()
+	budgetLeft, budgetReserve, budgetTracking = left, DefaultReserve, true
+}
+
 // DefaultReserve is how much of the hourly budget a sweep leaves behind.
 //
 // ⛔ It is a CHOSEN number, not a measured one, and the difference matters:
@@ -74,6 +142,12 @@ func StartBudget(floor, reserve int) error {
 	// floor. Found by a witness that asked for "below the floor" and was handed
 	// "stopped at the reserve: 7 left, 7 reserved".
 	StopBudget()
+	// Claim the automatic start before making a call, or the read below goes
+	// through spend, finds nothing tracking, and starts a SECOND projection
+	// from its own extra request.
+	budgetStartMu.Lock()
+	budgetTried = true
+	budgetStartMu.Unlock()
 
 	b, err := GH("api", "rate_limit", "--jq", ".resources.core.remaining")
 	if err != nil {
@@ -105,6 +179,10 @@ func BudgetLeft() (left int, tracking bool) {
 // StopBudget forgets the projection. A test uses it; a long-lived process that
 // starts a second sweep in a new hour would too.
 func StopBudget() {
+	budgetStartMu.Lock()
+	budgetTried = false
+	budgetStartMu.Unlock()
+
 	budgetMu.Lock()
 	defer budgetMu.Unlock()
 	budgetLeft, budgetReserve, budgetTracking = 0, 0, false
@@ -114,6 +192,13 @@ func StopBudget() {
 // It is consulted BEFORE the call, so the reserve is a floor the sweep stops
 // at rather than one it crosses.
 func spend() error {
+	budgetMu.Lock()
+	tracking := budgetTracking
+	budgetMu.Unlock()
+	if !tracking && AutoBudget {
+		autoStart()
+	}
+
 	budgetMu.Lock()
 	defer budgetMu.Unlock()
 	if !budgetTracking {
