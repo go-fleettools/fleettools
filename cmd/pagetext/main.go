@@ -58,12 +58,31 @@ cache-busting query parameter is added unless --no-cache-bust, because Pages'
 CDN can serve the previous build for a while after a deploy. --retry N polls up
 to N more times, --wait apart, until the page is 200 and has every string.
 
+--raw streams, so it reads a file of any size -- a published .wasm, a PDF, a
+disk image. The text match tokenises the whole document, so it keeps a 16 MiB
+cap and says so when a page is past it.
+
 Exit status: 0 every page is 200 and has every string, 1 one does not, 2 a usage
 error.`
 
-// maxBody bounds what is read from one response: a page with a data URL in it
-// can be megabytes, and a hostile or broken server can send forever.
+// maxBody bounds what the TEXT match holds: it tokenises the whole document, so
+// it has to have the whole document, and a page with a data URL in it can be
+// megabytes while a hostile or broken server can send forever.
+//
+// ⛔ It used to bound --raw too, and --raw is the mode that checks a published
+// application: every `GOOS=js GOARCH=wasm` binary this fleet publishes is past
+// this cap (go-pdfkit/app's main.wasm was 21 680 698 bytes on 2026-11-05), so
+// the one check that tells a deploy which built the new code from one that
+// silently re-served the old one refused exactly the artefacts that ARE the
+// application. --raw now streams: see scanFor.
 const maxBody = 16 << 20
+
+// scanWindow is how much of a streamed body is held at once. Nothing is gained
+// by making it the size of the file: --raw only has to answer "does this
+// contain this string". It is a var because the fuzz target shrinks it to a
+// handful of bytes -- at 64 KiB a fuzzer's inputs never reach a window boundary,
+// which is the only interesting case.
+var scanWindow = 64 << 10
 
 // sleep and now are the seams a test replaces.
 var (
@@ -242,24 +261,96 @@ func check(target string, wants []string, o options) result {
 	}
 	defer resp.Body.Close()
 	r := result{status: resp.StatusCode, final: unbust(resp.Request.URL, o.bust)}
+	if o.raw {
+		found, err := scanFor(resp.Body, wants)
+		if err != nil {
+			return result{err: err}
+		}
+		r.found = found
+		return r
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return result{err: err}
 	}
 	if len(body) > maxBody {
-		return result{err: fmt.Errorf("the page is larger than %d bytes; refusing to read on", maxBody)}
+		return result{err: fmt.Errorf(
+			"the text match needs the whole page and this one is larger than %d bytes; use --raw, which streams",
+			maxBody)}
 	}
-	hay := string(body)
-	if !o.raw {
-		hay = plain(textOf(body))
-	}
+	hay := plain(textOf(body))
 	for _, w := range wants {
-		if !o.raw {
-			w = plain(collapse(w))
-		}
-		r.found = append(r.found, strings.Contains(hay, w))
+		r.found = append(r.found, strings.Contains(hay, plain(collapse(w))))
 	}
 	return r
+}
+
+// scanFor says, for each want, whether the stream contains it, without ever
+// holding more than a window and the carry.
+//
+// ⛔ THE CARRY IS THE WHOLE POINT. A window test that reads 64 KiB, looks, and
+// throws it away misses every needle that straddles two reads -- and a test that
+// only ever plants the needle in the middle of a window passes without it. The
+// last len(want)-1 bytes of each window are moved to the front of the next one,
+// so every byte pair that is adjacent in the stream is adjacent in some window.
+//
+// Memory is bounded by the window and the longest want; the number of bytes read
+// is bounded by the client's --timeout, which covers the body as well as the
+// headers.
+func scanFor(body io.Reader, wants []string) ([]bool, error) {
+	found := make([]bool, len(wants))
+	needles := make([][]byte, len(wants))
+	longest := 0
+	left := 0
+	for i, w := range wants {
+		if w == "" {
+			found[i] = true // strings.Contains(anything, "") is true
+			continue
+		}
+		needles[i] = []byte(w)
+		left++
+		if len(w) > longest {
+			longest = len(w)
+		}
+	}
+	if left == 0 {
+		return found, nil
+	}
+
+	size := scanWindow
+	if size < 2*longest {
+		// ⛔ Not an optimisation: the carry is longest-1, so a window smaller
+		// than that is entirely carried, the next read is handed an empty slice,
+		// io.ReadFull returns (0, nil), and the loop spins forever. Keeping the
+		// window at twice the longest want makes the carry strictly less than
+		// the window, so every pass reads at least half a window.
+		size = 2 * longest
+	}
+	buf := make([]byte, size)
+	n := 0
+	for {
+		m, err := io.ReadFull(body, buf[n:])
+		n += m
+		for i, needle := range needles {
+			if !found[i] && bytes.Contains(buf[:n], needle) {
+				found[i] = true
+				left--
+			}
+		}
+		switch {
+		case left == 0:
+			return found, nil // every want is settled; the rest of the body cannot change it
+		case err == io.EOF, err == io.ErrUnexpectedEOF:
+			return found, nil
+		case err != nil:
+			return nil, err
+		}
+		// Reaching here means io.ReadFull filled the window, so n == len(buf)
+		// and n > carry.
+		carry := longest - 1
+		copy(buf, buf[n-carry:n])
+		n = carry
+	}
 }
 
 // plain folds the punctuation a Markdown renderer SUBSTITUTES back to the
