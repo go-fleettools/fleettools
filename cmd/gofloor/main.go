@@ -54,7 +54,7 @@ import (
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 const longHelp = `gofloor reads, through the REST API and the default branch, every go.mod and
