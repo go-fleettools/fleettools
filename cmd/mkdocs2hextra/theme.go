@@ -168,6 +168,39 @@ jobs:
           path: public
           retention-days: 7
 
+  # The offline check above proves the site's own links and anchors; an
+  # https:// URL is text to it. linkcheck fetches each one the pages name, with
+  # retries and Retry-After, github.com repo and path links through the REST
+  # API (the HTML page answers 504 and 429 to a runner under load), and tells a
+  # DEAD link from a FLAKY host without ever passing the second.
+  #
+  # ⛔ THE ONE DELIBERATE EXCEPTION to "no secret on a command line or in the
+  # environment": the job's ephemeral, read-only github.token (contents: read)
+  # reaches the tool as a 0600 file written by the shell builtin printf, removed
+  # on exit, and is sent to api.github.com only.
+  links:
+    name: every external link resolves
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+      - name: Check
+        run: |
+          umask 077
+          token="${RUNNER_TEMP}/linkcheck-token"
+          trap 'rm -f "${token}"' EXIT
+          printf '%%s' '${{ github.token }}' > "${token}"
+          go run github.com/go-fleettools/fleettools/cmd/linkcheck@%s \
+            --token-file "${token}" \
+            --skip %s \
+            --skip "github.com/${{ github.repository }}/" \
+            content/ README.md
+
   deploy:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
@@ -236,5 +269,5 @@ jobs:
           fi
           git commit -q -m "Deployed ${GITHUB_SHA::7} to ${{ needs.build.outputs.version }} with Hugo ${HUGO_VERSION}"
           git push origin HEAD:gh-pages
-`, base, base, pagespublishPin)
+`, base, base, linkcheckPin, strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"), pagespublishPin)
 }

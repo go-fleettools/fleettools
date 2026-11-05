@@ -749,6 +749,26 @@ func TestEveryHeadingKeepsItsOldAnchor(t *testing.T) {
 	}
 }
 
+// The external-link job is linkcheck, pinned, with the site's own pages skipped
+// and the token handed over as a file, never in the command line.
+func TestTheWorkflowChecksExternalLinksWithLinkcheck(t *testing.T) {
+	w := workflow(readMkdocs("site_name: x\nsite_url: https://x.github.io/docs/\n"), "main")
+	for _, want := range []string{
+		"every external link resolves",
+		"cmd/linkcheck@" + linkcheckPin,
+		"--skip x.github.io/docs",
+		`--token-file "${token}"`,
+		"umask 077",
+	} {
+		if !strings.Contains(w, want) {
+			t.Errorf("the generated workflow lacks %q", want)
+		}
+	}
+	if strings.Contains(w, "linkcheck@latest") || strings.Contains(w, "curl -sS") {
+		t.Error("the links job is unpinned or back to shell curl")
+	}
+}
+
 // ⛔ THE PUBLISH STEP MUST NOT WRITE UNDER docs/. The first version of the
 // generated workflow copied the built site to docs/<version>/ inside gh-pages
 // — and a project repository named "docs" is already served at /docs/, so the
