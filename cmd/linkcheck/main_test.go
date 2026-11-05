@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,14 +18,102 @@ import (
 )
 
 func TestExtractKeepsTheOldExclusions(t *testing.T) {
-	text := "[a](https://github.com/o/r/blob/main/x.md). <https://ok.test/p>, `https://trail.test/q`.\n" +
+	text := "[a](https://github.com/o/r/blob/main/x.md). <https://ok.dev/p>, `https://trail.dev/q`.\n" +
 		"https://img.shields.io/badge/x https://example.com/a http://localhost:8080/ http://127.0.0.1/ " +
 		"http://web/ping https://x.invalid/ https://me.github.io/docs/page https://github.com/me/docs/blob/main/a " +
-		"\"https://quoted.test/z\" https://ok.test/p"
+		"\"https://quoted.dev/z\" https://ok.dev/p"
 	got := Extract([]byte(text), []string{"me.github.io/docs", "github.com/me/docs/"})
-	want := []string{"https://github.com/o/r/blob/main/x.md", "https://ok.test/p", "https://quoted.test/z", "https://trail.test/q"}
+	want := []string{"https://github.com/o/r/blob/main/x.md", "https://ok.dev/p", "https://quoted.dev/z", "https://trail.dev/q"}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestEmptyHostIsSkippedAndCounted(t *testing.T) {
+	// A scheme in backticks reaches the checker bare: the extractor keeps the
+	// closing backtick and the trailing-punctuation trim then removes it.
+	text := "`https://`, `http://` and `https://<host>/...`\n" +
+		"http://`-Aussteller https://`、`http://`。 https://$HOST/x https://$HOST/x\n" +
+		"real https://real.dev/ok\n"
+	urls, sk := Scan([]byte(text), nil)
+	if strings.Join(urls, " ") != "https://real.dev/ok" {
+		t.Fatalf("checked %q", urls)
+	}
+	if len(sk) == 0 {
+		t.Fatal("nothing reported as skipped")
+	}
+	for _, s := range sk {
+		if s.Reason != reasonNoHost {
+			t.Errorf("%q skipped as %q, want %q", s.URL, s.Reason, reasonNoHost)
+		}
+	}
+	for _, want := range []string{"http://", "https://", "http://`-Aussteller", "https://$HOST/x"} {
+		found := false
+		for _, s := range sk {
+			found = found || s.URL == want
+		}
+		if !found {
+			t.Errorf("%q not among the skipped %v", want, sk)
+		}
+	}
+}
+
+func TestPlaceholderHostsAreSkippedAndARealHostIsNot(t *testing.T) {
+	skippedHosts := []string{
+		"https://idp.univ-example.example/idp", "https://a.b.example", "https://example.com/x",
+		"https://www.example.org/", "https://sub.example.net:8443/p", "https://x.invalid/",
+		"https://host.test/", "http://mirror.cluster.local:8080/univ-b-ssh", "http://localhost:3000/",
+		"http://127.0.0.1:8080/", "http://[::1]:8080/", "https://EXAMPLE.COM./",
+	}
+	realHosts := []string{
+		"https://notexample.com/", "https://example.com.evil.dev/", "https://real.dev/ok",
+		"https://localhost.dev/", "https://contest.dev/", "https://github.com/o/r",
+	}
+	text := strings.Join(skippedHosts, " ") + " " + strings.Join(realHosts, " ")
+	urls, sk := Scan([]byte(text), nil)
+	if strings.Join(urls, " ") != strings.Join(sortedCopy(realHosts), " ") {
+		t.Fatalf("checked %q, want %q", urls, realHosts)
+	}
+	if len(sk) != len(skippedHosts) {
+		t.Fatalf("%d skipped, want %d: %v", len(sk), len(skippedHosts), sk)
+	}
+	for _, s := range sk {
+		if s.Reason != reasonPlaceholder {
+			t.Errorf("%q skipped as %q", s.URL, s.Reason)
+		}
+	}
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
+}
+
+func TestSkippedURLsArePrintedAndCounted(t *testing.T) {
+	md := "https://github.com/o/fine https://idp.x.example/a `http://`\n" +
+		"https://img.shields.io/b https://me.github.io/docs/p\n"
+	code, out, errOut := drive(t, "http://unused", md, "--skip", "me.github.io/docs")
+	// The one real URL is a github.com repo decided by the (here absent)
+	// API; what matters is the report of the skipped ones.
+	_ = code
+	for _, want := range []string{
+		"skip placeholder host", "https://idp.x.example/a",
+		"skip no host", "skipped 4 distinct URLs: 1 no host, 1 placeholder host, 1 built-in, 1 --skip",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s%s", want, out, errOut)
+		}
+	}
+	if strings.Contains(out, "me.github.io") {
+		t.Errorf("a --skip match is listed:\n%s", out)
+	}
+}
+
+func TestOnlySkippableURLsIsNotACleanResult(t *testing.T) {
+	code, _, errOut := drive(t, "http://x", "only https://a.example/ and `http://`\n")
+	if code != 2 || !strings.Contains(errOut, "no links found") {
+		t.Fatalf("code %d %s", code, errOut)
 	}
 }
 
