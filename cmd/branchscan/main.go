@@ -195,7 +195,7 @@ func listBranches(repo string) ([]branch, error) {
 	if err != nil {
 		return nil, fmt.Errorf("branches: %w", err)
 	}
-	out, err := decodeArrays[branch](b)
+	out, err := fleet.DecodeArrays[branch](b)
 	if err != nil {
 		return nil, fmt.Errorf("branches: %w", err)
 	}
@@ -216,7 +216,7 @@ func listPRHeads(repo string) (map[string]bool, error) {
 			Ref string `json:"ref"`
 		} `json:"head"`
 	}
-	prs, err := decodeArrays[pr](b)
+	prs, err := fleet.DecodeArrays[pr](b)
 	if err != nil {
 		return nil, fmt.Errorf("pulls: %w", err)
 	}
@@ -242,23 +242,6 @@ func compare(repo, base, head string) (comparison, error) {
 		return c, fmt.Errorf("compare: no status in the answer")
 	}
 	return c, nil
-}
-
-// decodeArrays reads what `gh --paginate` writes, which is a STREAM of JSON
-// arrays rather than one array: the pages are concatenated, not merged.
-func decodeArrays[T any](b []byte) ([]T, error) {
-	dec := json.NewDecoder(strings.NewReader(string(b)))
-	var out []T
-	for {
-		var page []T
-		if err := dec.Decode(&page); err != nil {
-			if err == io.EOF {
-				return out, nil
-			}
-			return nil, err
-		}
-		out = append(out, page...)
-	}
 }
 
 // report prints every bucket with its total.
