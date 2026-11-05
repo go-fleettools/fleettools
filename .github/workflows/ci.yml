@@ -59,6 +59,15 @@ jobs:
       - name: test
         run: go test -race -timeout 15m ./...
 
+      # ⛔ pagetext --raw STREAMS, so it is a scanner over a body nobody here
+      # controls, and its one hard part is the carry between windows. The seed
+      # corpus alone passes with the carry removed only because the seeds are
+      # short; the fuzz target shrinks the window to a few bytes so that every
+      # input straddles a boundary, and holds the answer to bytes.Contains over
+      # the whole body. Thirty seconds is a regression gate, not a campaign.
+      - name: fuzz the streaming scan
+        run: go test -run '^$' -fuzz FuzzScanForAgreesWithContains -fuzztime 30s ./cmd/pagetext
+
       # The planted xz bomb (1.5 GiB declared over a few bytes) runs as a
       # compiled binary under a virtual memory limit and GOMEMLIMIT, so a
       # regression fails by itself instead of allocating gigabytes of the runner.

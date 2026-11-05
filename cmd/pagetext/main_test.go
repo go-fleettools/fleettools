@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -215,7 +217,7 @@ func TestGroupsAreIndependent(t *testing.T) {
 	}
 }
 
-func TestAnOversizedPageIsRefused(t *testing.T) {
+func TestAnOversizedPageIsRefusedByTheTextMatchAndSaysWhichModeToUse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write(bytes.Repeat([]byte("a"), maxBody+10))
 	}))
@@ -224,6 +226,137 @@ func TestAnOversizedPageIsRefused(t *testing.T) {
 	if code != 1 || !strings.HasPrefix(out, "FAIL ") {
 		t.Fatalf("code %d, out %.80q", code, out)
 	}
+	// The refusal has to name the way out, or the next person reads it as "this
+	// page cannot be checked" -- which is how it was read, for every wasm the
+	// fleet publishes.
+	if !strings.Contains(out, "--raw") {
+		t.Fatalf("the refusal does not say which mode reads a file this size: %.200q", out)
+	}
+}
+
+// ⛔ THE CHECK THAT COULD NOT CHECK AN APPLICATION, 2026-11-05. Every published
+// `GOOS=js GOARCH=wasm` binary is past maxBody, so --raw -- the mode that says
+// whether a deploy carried the new build -- refused exactly the files that are
+// the application, and the release had to be verified by hand.
+//
+// The needle is planted ACROSS a window boundary, which is the case a streaming
+// scan gets wrong when it forgets the carry; a needle in the middle of a window
+// is found with or without it.
+func TestRawReadsAPageLargerThanTheTextCapAndFindsANeedleAcrossAWindow(t *testing.T) {
+	const needle = "v0.19.1-across-the-boundary"
+	// Put the needle so that scanWindow falls inside it: the first window ends
+	// mid-needle and the second begins mid-needle.
+	at := scanWindow - len(needle)/2
+	body := bytes.Repeat([]byte("a"), maxBody+scanWindow)
+	copy(body[at:], needle)
+
+	var served atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, _ := w.Write(body)
+		served.Add(int64(n))
+	}))
+	defer srv.Close()
+
+	code, out, _ := drive(t, "--raw", srv.URL, needle)
+	if code != 0 || !strings.Contains(out, "true \""+needle+"\"") {
+		t.Fatalf("a %d-byte body hid a needle at offset %d: code %d, out %.200q",
+			len(body), at, code, out)
+	}
+
+	// The negative control, on the same oversized body: a string that is NOT
+	// there must come back ABSENT (exit 1), never REFUSED (exit 1 with FAIL) --
+	// and it is the absent case that reads the whole body, so this is also the
+	// reading that proves the cap no longer applies.
+	code, out, _ = drive(t, "--raw", srv.URL, "v0.19.2")
+	if code != 1 || strings.Contains(out, "FAIL") || !strings.Contains(out, "false ") {
+		t.Fatalf("an absent string in a streamed body: code %d, out %.200q", code, out)
+	}
+	if n := served.Load(); n <= maxBody {
+		t.Fatalf("only %d bytes were read past the %d-byte cap; the test is not exercising it",
+			n, maxBody)
+	}
+}
+
+// A needle longer than the window has to work too: the window grows to hold it.
+func TestRawFindsANeedleLongerThanTheWindow(t *testing.T) {
+	needle := strings.Repeat("abcdefgh", scanWindow/4) // 2x scanWindow
+	body := append(bytes.Repeat([]byte("."), scanWindow+3), needle...)
+	body = append(body, bytes.Repeat([]byte("."), scanWindow)...)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(body)
+	}))
+	defer srv.Close()
+	if code, out, _ := drive(t, "--raw", srv.URL, needle); code != 0 {
+		t.Fatalf("code %d, out %.120q", code, out)
+	}
+}
+
+func TestScanForIsBoundedByTheWindowNotTheBody(t *testing.T) {
+	// 64 MiB of body, read through a reader that refuses to hand out more than
+	// one window at a time: if scanFor buffered the body, this would allocate it.
+	const total = 64 << 20
+	before := heapInUse()
+	found, err := scanFor(io.LimitReader(constantReader{'z'}, total), []string{"zz", "nope"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found[0] || found[1] {
+		t.Fatalf("found %v", found)
+	}
+	if grew := heapInUse() - before; grew > total/8 {
+		t.Fatalf("the heap grew by %d bytes reading a %d-byte body", grew, total)
+	}
+}
+
+// FuzzScanForAgreesWithContains holds the streaming scan to the answer the
+// whole-body version gives. bytes.Contains over the complete body is the oracle:
+// it is the behaviour --raw had before it streamed, and the one users read the
+// output as.
+//
+// The window is shrunk to a few bytes, so every input of any length straddles
+// boundaries -- at 64 KiB a fuzzer would spend the whole run inside one window
+// and never test the carry at all.
+func FuzzScanForAgreesWithContains(f *testing.F) {
+	f.Add([]byte("abcdef"), "cd")
+	f.Add([]byte("aaaaaaaaaaaa"), "aaa")
+	f.Add([]byte(""), "")
+	f.Add([]byte("x"), "xx")
+	f.Add([]byte("\x00\xff\x00\xff"), "\xff\x00")
+
+	f.Fuzz(func(t *testing.T, body []byte, want string) {
+		for _, win := range []int{1, 2, 3, 8, 64} {
+			old := scanWindow
+			scanWindow = win
+			got, err := scanFor(bytes.NewReader(body), []string{want, "unrelated-needle"})
+			scanWindow = old
+			if err != nil {
+				t.Fatalf("window %d: %v", win, err)
+			}
+			if oracle := bytes.Contains(body, []byte(want)); got[0] != oracle {
+				t.Fatalf("window %d: scanFor said %v, bytes.Contains says %v for want %q in %q",
+					win, got[0], oracle, want, body)
+			}
+			if got[1] != bytes.Contains(body, []byte("unrelated-needle")) {
+				t.Fatalf("window %d: the second want disagreed", win)
+			}
+		}
+	})
+}
+
+type constantReader struct{ b byte }
+
+func (c constantReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = c.b
+	}
+	return len(p), nil
+}
+
+func heapInUse() int64 {
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return int64(m.HeapInuse)
 }
 
 func TestUsageErrors(t *testing.T) {
