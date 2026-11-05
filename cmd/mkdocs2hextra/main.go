@@ -58,6 +58,10 @@ const hextraPin = "v0.16.0"
 // anybody choosing it.
 const pagespublishPin = "v0.26.0"
 
+// linkcheckPin is the release whose cmd/linkcheck the generated `links` job
+// runs, pinned for the same reason.
+const linkcheckPin = "v0.74.0"
+
 const longHelp = `Converts an MkDocs Material site (mkdocs.yml plus docs/*.md) to Hugo with the
 tannevaled/hextra fork, in place:
 
