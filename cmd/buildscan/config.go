@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // config is one build configuration: what GOOS, GOARCH and build tags some
