@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -34,9 +35,17 @@ github.com URLs naming a repository or a path in it (/owner/repo, /blob/…,
 contents at a ref), authenticated when --token-file is given, instead of the
 HTML page, which answers 504 and 429 to a runner under load.
 
-Never checked: img.shields.io, example.{com,org,net}, localhost, 127.0.0.1,
-*.invalid, http://web/..., and anything containing a --skip substring (the
-site's own pages, the repository's own files on a pull request).
+Never checked, and each one printed as skipped with its reason and counted:
+  no host            a bare http:// or https:// (prose such as https://<host>/),
+                     a scheme glued to a backtick, a shell variable as host;
+  placeholder host   the reserved names of RFC 2606 and RFC 6761 and everything
+                     under them: example, example.com/.org/.net, invalid, test,
+                     local, localhost, and loopback addresses (127.0.0.1, ::1);
+  built-in           img.shields.io and http://web/...;
+  --skip             anything containing a --skip substring (the site's own
+                     pages, the repository's own files on a pull request);
+                     counted, not listed.
+A real host is always checked.
 
 The token is read from the file named by --token-file, never from a flag
 value, the environment or a URL, and is sent to the API host only. It is never
@@ -49,6 +58,26 @@ timeout, run deadline) or the run could not be set up.`
 func main() {
 	fleet.WarnIfStale(os.Stderr)
 	cli.Run(RootCmd())
+}
+
+// reportSkipped prints every URL that was found and not checked, with its
+// reason, then a count per reason: a skip is a decision to be seen, never a
+// silent drop. --skip matches are counted but not listed (the caller wrote
+// them).
+func reportSkipped(out io.Writer, skipped []Skip) {
+	if len(skipped) == 0 {
+		return
+	}
+	n := map[string]int{}
+	for _, s := range skipped {
+		n[s.Reason]++
+		if s.Reason != reasonUser {
+			fmt.Fprintf(out, "  skip %-16s %s\n", s.Reason, s.URL)
+		}
+	}
+	fmt.Fprintf(out, "skipped %d distinct URLs: %d %s, %d %s, %d %s, %d %s\n", len(skipped),
+		n[reasonNoHost], reasonNoHost, n[reasonPlaceholder], reasonPlaceholder,
+		n[reasonBuiltin], reasonBuiltin, n[reasonUser], reasonUser)
 }
 
 // RootCmd builds the command. Tests drive it with SetArgs, SetOut and SetErr.
@@ -83,13 +112,14 @@ func RootCmd() *cobra.Command {
 			}
 		}
 		out := cli.Out(cmd)
-		urls, files, err := ReadURLs(args, skips)
+		urls, skipped, files, err := ReadURLs(args, skips)
 		if err != nil {
 			return cli.Wrap(err)
 		}
 		if len(urls) == 0 {
-			return cli.Unanswerable("no links found in %d files: are the pages still there?", files)
+			return cli.Unanswerable("no links found in %d files (%d skipped): are the pages still there?", files, len(skipped))
 		}
+		reportSkipped(out, skipped)
 		if token == "" {
 			fmt.Fprintln(cli.Err(cmd), "linkcheck: no --token-file: GitHub API requests are unauthenticated (60 per hour)")
 		}
