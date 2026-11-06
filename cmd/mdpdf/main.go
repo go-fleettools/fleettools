@@ -175,7 +175,7 @@ to the input's name without extension.`,
 	f.StringVar(&o.author, "author", "", "PDF Author")
 	f.StringVar(&o.paper, "paper", "a4", "paper size: a4 or letter")
 	f.StringVar(&o.css, "css", "", "extra stylesheet file, applied after the built-in one")
-	f.StringVar(&o.lang, "lang", "", "document language, a tag such as fr or en-GB: sets <html lang> and the default --toc-title (fr, en, de, es, it)")
+	f.StringVar(&o.lang, "lang", "", "document language, a tag such as fr or en-GB: sets <html lang> and the default --toc-title (fr, en, de, es, it); fr also binds numbers and high punctuation with no-break spaces")
 	f.StringVar(&o.tocTitle, "toc-title", "", `title of the table of contents (default: by --lang, "Contents" for en or no language)`)
 	f.BoolVar(&o.toc, "toc", false, "add a table of contents (h2 and h3, with page numbers); it goes where `<!-- toc -->` stands in the Markdown, else after the title block")
 	f.StringVar(&o.tocAfter, "toc-after", "", "place the table of contents at the end of the section with this heading (exact text, NFC, case-sensitive; else a slug or id match); implies --toc and wins over a `<!-- toc -->` marker")
@@ -266,6 +266,11 @@ func run(o options) error {
 	body, err := toBodyAfter(string(src), o.toc || o.tocAfter != "", tocTitleFor(o.tocTitle, o.lang), o.tocAfter)
 	if err != nil {
 		return err
+	}
+	if isFrench(o.lang) {
+		if body, err = frenchTypography(body); err != nil {
+			return err
+		}
 	}
 	page, err := buildPage(body, title, o.paper, string(extra), o.pageNumbers, o.lang)
 	if err != nil {
