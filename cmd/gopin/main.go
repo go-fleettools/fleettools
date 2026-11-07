@@ -90,6 +90,16 @@ var reLiteral = regexp.MustCompile(`go-version:\s*['"]?(\d+\.\d+(?:\.\d+)?)['"]?
 // prTitle names the job this pull request actually does. A repository that
 // never said `stable` must not receive a title claiming otherwise.
 func prTitle(f finding, want, from string) string {
+	// ⛔ --directive MOVES NO PIN, and the first three pull requests it opened
+	// were titled "ci: move the Go pin from 1.27.1 to 1.27.3" over a diff that
+	// touched go.mod and go.sum and nothing else. Found by running the pilot
+	// that opened them, on 2026-11-02 — v0.70.0 had fixed the body and the
+	// commit message for this case and missed the title, which is this very
+	// function's rule one level along: a title a reviewer can check and find
+	// false makes nothing else in the pull request worth their time.
+	if f.Directive && f.Moves == 0 && f.Aliases == 0 {
+		return "go.mod: raise the go directive from " + from + " to " + want
+	}
 	if f.Aliases == 0 && f.moveCount() > 0 {
 		return "ci: move the Go pin from " + from + " to " + want
 	}

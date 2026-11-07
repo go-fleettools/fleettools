@@ -114,6 +114,34 @@ func TestTheBodySaysItRaisesTheConsumersFloorAndNeedsARelease(t *testing.T) {
 		t.Error("the commit message outlives the body and must say it too:\n" + msg)
 	}
 
+	// ⛔⛔ AND THE TITLE, WHICH v0.70.0 MISSED. The first three pull requests
+	// --directive opened were titled "ci: move the Go pin from 1.27.1 to
+	// 1.27.3" over a diff holding go.mod and go.sum and nothing else — this
+	// function's own rule, one level along: a title a reviewer can check and
+	// find false makes nothing else worth their time. Found by the pilot.
+	if got := prTitle(f, "1.27.3", "1.27.1"); got != "go.mod: raise the go directive from 1.27.1 to 1.27.3" {
+		t.Errorf("title = %q", got)
+	}
+	if !strings.HasPrefix(msg, "go.mod: raise the go directive from 1.27.1 to 1.27.3") {
+		t.Errorf("the commit subject must say the same:\n%s", msg)
+	}
+	// Nor any heading or sentence about a pin, for the same reason.
+	for _, no := range []string{"Why move a pin", "a job held back", "occurrence(s) in ."} {
+		if strings.Contains(body, no) || strings.Contains(msg, no) {
+			t.Errorf("a --directive pull request still says %q", no)
+		}
+	}
+	// And a repository that DOES have a pin to move keeps the old title and
+	// headings: the control that this did not simply rename everything.
+	both := finding{Repo: "o/z", GoMod: "1.27.1", GoModFiles: []string{"go.mod"},
+		Directive: true, Moves: 2, MoveFiles: []string{"ci.yml"}}
+	if got := prTitle(both, "1.27.3", "1.27.1"); got != "ci: move the Go pin from 1.27.1 to 1.27.3" {
+		t.Errorf("a repository with pins to move lost its title: %q", got)
+	}
+	if !strings.Contains(moveBody(both, "1.27.3", "1.27.1"), "Why move a pin that is already explicit") {
+		t.Error("the pin heading vanished from a pull request that does move pins")
+	}
+
 	// And the go-version-file case keeps its own wording, unchanged.
 	vf := moveBody(finding{Repo: "o/y", GoModFiles: []string{"go.mod"}}, "1.27.3", "1.27.2")
 	if !strings.Contains(vf, "go-version-file") || strings.Contains(vf, "floor a CONSUMER honours") {
