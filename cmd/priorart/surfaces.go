@@ -67,6 +67,7 @@ type Branch struct {
 	Name    string
 	Subject string // its head commit's subject line
 	Hit     string // the term that matched
+	Default bool   // it is the repository's default branch
 }
 
 // branchQuery reads every head ref of a repository with its head-commit
@@ -88,6 +89,7 @@ type Branch struct {
 // checks whether it was reached.
 const branchQuery = `query($owner:String!,$name:String!,$after:String){
   repository(owner:$owner,name:$name){
+    defaultBranchRef{ name }
     refs(refPrefix:"refs/heads/",first:100,after:$after,orderBy:{field:ALPHABETICAL,direction:ASC}){
       pageInfo{ hasNextPage endCursor }
       nodes{ name target{ ... on Commit{ messageHeadline } } }
@@ -126,6 +128,9 @@ func Branches(repo string, terms []string) ([]Branch, error) {
 		var resp struct {
 			Data struct {
 				Repository *struct {
+					DefaultBranchRef *struct {
+						Name string `json:"name"`
+					} `json:"defaultBranchRef"`
 					Refs struct {
 						PageInfo struct {
 							HasNextPage bool   `json:"hasNextPage"`
@@ -156,10 +161,19 @@ func Branches(repo string, terms []string) ([]Branch, error) {
 		if resp.Data.Repository == nil {
 			return nil, fmt.Errorf("branches of %s: no repository in the answer", repo)
 		}
+		def := ""
+		if d := resp.Data.Repository.DefaultBranchRef; d != nil {
+			def = d.Name
+		}
 		refs := resp.Data.Repository.Refs
 		for _, n := range refs.Nodes {
 			if h := hit(terms, n.Name, n.Target.MessageHeadline); h != "" {
-				out = append(out, Branch{Name: n.Name, Subject: n.Target.MessageHeadline, Hit: h})
+				out = append(out, Branch{
+					Name:    n.Name,
+					Subject: n.Target.MessageHeadline,
+					Hit:     h,
+					Default: def != "" && n.Name == def,
+				})
 			}
 		}
 		if !refs.PageInfo.HasNextPage {

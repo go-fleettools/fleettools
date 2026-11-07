@@ -179,10 +179,30 @@ func run(w io.Writer, subject string, repoFlags []string, org string, withBranch
 		case len(brs) > 0:
 			found++
 			fmt.Fprintf(w, "\n⛔ %d branch(es) of %s cover this subject:\n", len(brs), repo)
+			side, merged := false, false
 			for _, b := range brs {
-				fmt.Fprintf(w, "    %-34s (%s) %s\n", b.Name, b.Hit, b.Subject)
+				// ⛔ THE DEFAULT BRANCH IS THE STRONGEST PRIOR ART AND THE WEAKEST
+				// WARNING, so it is labelled rather than lumped in. The first real
+				// run of the released binary matched `main`, whose head commit was
+				// the subject itself, and printed "a pushed branch with no pull
+				// request is INVISIBLE work" under it — which is exactly backwards:
+				// the work is merged and visible. A gate whose loudest line is
+				// wrong about the first hit it shows is a gate the reader learns to
+				// skim, and then it stops being a control at all.
+				mark := "    "
+				if b.Default {
+					mark, merged = "  ✓ ", true
+				} else {
+					side = true
+				}
+				fmt.Fprintf(w, "%s%-32s (%s) %s\n", mark, b.Name, b.Hit, b.Subject)
 			}
-			fmt.Fprintln(w, "   ⚠ A pushed branch with no pull request is INVISIBLE work: read its commit.")
+			if merged {
+				fmt.Fprintln(w, "   ✓ is the DEFAULT branch: that subject is already MERGED, not merely attempted.")
+			}
+			if side {
+				fmt.Fprintln(w, "   ⚠ A pushed branch with no pull request is INVISIBLE work: read its commit.")
+			}
 		default:
 			fmt.Fprintf(w, "   %s branches: clean (name and head-commit subject)\n", repo)
 		}

@@ -234,6 +234,46 @@ func TestMorePagesWithoutACursorIsAnUnreadSurface(t *testing.T) {
 	}
 }
 
+// ⛔ THE DEFAULT BRANCH IS THE STRONGEST PRIOR ART AND THE WEAKEST WARNING.
+//
+// The first real run of the released binary matched `main`, whose head commit was
+// the subject itself, and printed "a pushed branch with no pull request is
+// INVISIBLE work" under it — exactly backwards: that work is merged and visible.
+// A gate whose loudest line is wrong about the first hit it shows is one the
+// reader learns to skim, and then it is not a control.
+func TestTheDefaultBranchIsCalledMergedAndNotInvisible(t *testing.T) {
+	answerWith := func(nodes string) func([]string) ([]byte, error) {
+		return func(args []string) ([]byte, error) {
+			if args[1] != "graphql" {
+				return []byte(emptySearch), nil
+			}
+			return []byte(`{"data":{"repository":{"defaultBranchRef":{"name":"main"},
+				"refs":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[` + nodes + `]}}}}`), nil
+		}
+	}
+
+	// Only the default branch matched: no "invisible work" line at all.
+	stub(t, answerWith(`{"name":"main","target":{"messageHeadline":"priorart: the gate"}}`))
+	_, out, _ := drive(t, "--repo", "go-fleettools/fleettools", "priorart")
+	if !strings.Contains(out, "already MERGED") {
+		t.Errorf("the default branch is not called merged:\n%s", out)
+	}
+	if strings.Contains(out, "INVISIBLE") {
+		t.Errorf("a merged branch was called invisible work:\n%s", out)
+	}
+
+	// A side branch matched too: both lines, and only the default one marked.
+	stub(t, answerWith(`{"name":"main","target":{"messageHeadline":"priorart: the gate"}},
+		{"name":"priorart-wip","target":{"messageHeadline":"x"}}`))
+	_, out, _ = drive(t, "--repo", "go-fleettools/fleettools", "priorart")
+	if !strings.Contains(out, "already MERGED") || !strings.Contains(out, "INVISIBLE") {
+		t.Errorf("one of the two lines is missing:\n%s", out)
+	}
+	if !strings.Contains(out, "✓ main") || strings.Contains(out, "✓ priorart-wip") {
+		t.Errorf("the mark is on the wrong branch:\n%s", out)
+	}
+}
+
 func TestACleanSubjectPasses(t *testing.T) {
 	stub(t, answer)
 	code, out, _ := drive(t, "-repo", "go-tex/engine", "quaternion shading")
