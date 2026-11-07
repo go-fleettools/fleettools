@@ -19,6 +19,11 @@ var osWriteFile = os.WriteFile
 // Fixing one surface of three is worse than fixing none: the inconsistency
 // looks deliberate, and a reader who checks the commit against the title
 // cannot tell which to believe. The test now reads all three.
+// directiveOnly is the --directive case with no pin to move: the pull request
+// touches go.mod and go.sum and nothing else, so every sentence in it that
+// talks about a pin is a claim a reviewer can check and find false.
+func directiveOnly(f finding) bool { return f.Directive && f.Moves == 0 && f.Aliases == 0 }
+
 func moveBody(f finding, want, from string) string {
 	var b strings.Builder
 	if len(f.MoveFiles) > 0 {
@@ -39,17 +44,37 @@ func moveBody(f finding, want, from string) string {
 			"This raises it to **%s** and runs `go mod tidy`; only `go.mod` and `go.sum` are committed.\n\n",
 			strings.Join(f.GoModFiles, "`, `"), from, want)
 	}
-	b.WriteString("## Why move a pin that is already explicit\n\n")
-	b.WriteString("Pinning was the right thing: an alias has no version to review. " +
-		"But a pinned fleet cannot move, and a Go patch release is usually a " +
+	// ⛔ The headings have to match the act too. "Why move a pin that is
+	// already explicit" over a diff that touches only go.mod is the same false
+	// claim the title made, and a reader who checks one and finds it wrong
+	// stops reading the rest.
+	if directiveOnly(f) {
+		b.WriteString("## Why the directive and not the pin\n\n")
+		b.WriteString("The pin decides what builds the artefacts here; the directive decides what a " +
+			"consumer is allowed to build this module with. They are independent, and this fleet has had " +
+			"repositories green on a patched toolchain while publishing a floor two security releases old.\n\n")
+	} else {
+		b.WriteString("## Why move a pin that is already explicit\n\n")
+		b.WriteString("Pinning was the right thing: an alias has no version to review. " +
+			"But a pinned fleet cannot move.\n\n")
+	}
+	b.WriteString("A Go patch release is usually a " +
 		"**security** release — the standard library is compiled into every binary, " +
 		"so the toolchain that built it is the toolchain it carries.\n\n")
 	b.WriteString("Check what this one fixes with `govulncheck ./...` against both versions, " +
 		"rather than taking the release notes' word for whether it reaches this code.\n\n")
 	b.WriteString("## It moves an exact version, and only that one\n\n")
-	fmt.Fprintf(&b, "`-from %s` names the version to move. \"Anything older\" cannot tell a stale "+
-		"pin from a deliberate one, so a job held back on purpose at some other version is "+
-		"not a candidate here and is left exactly as it is.\n\n", from)
+	if directiveOnly(f) {
+		fmt.Fprintf(&b, "`--from %s` names the directive to change. \"Anything older\" cannot tell a "+
+			"stale floor from a deliberate one, so a module held back on purpose at some other version "+
+			"is not a candidate and is left exactly as it is. A workflow pinning *older* than %s would "+
+			"also hold this directive where it is, because raising it past the pin breaks that job "+
+			"under `GOTOOLCHAIN=local`.\n\n", from, want)
+	} else {
+		fmt.Fprintf(&b, "`-from %s` names the version to move. \"Anything older\" cannot tell a stale "+
+			"pin from a deliberate one, so a job held back on purpose at some other version is "+
+			"not a candidate here and is left exactly as it is.\n\n", from)
+	}
 	if len(f.GoModFiles) == 0 {
 		b.WriteString("`go.mod` is **not** raised. The directive is a minimum for consumers; " +
 			"the workflow pin is what builds the artefacts.\n\n")
@@ -61,8 +86,16 @@ func moveBody(f finding, want, from string) string {
 // moveCommitMessage is moveBody's counterpart, and the one that outlives it.
 func moveCommitMessage(f finding, want, from string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "ci: move the Go pin from %s to %s\n\n", from, want)
-	fmt.Fprintf(&b, "%d occurrence(s) in %s.\n\n", f.Moves, strings.Join(f.MoveFiles, ", "))
+	if directiveOnly(f) {
+		fmt.Fprintf(&b, "go.mod: raise the go directive from %s to %s\n\n", from, want)
+	} else {
+		fmt.Fprintf(&b, "ci: move the Go pin from %s to %s\n\n", from, want)
+	}
+	// "0 occurrence(s) in ." is what this printed for a --directive pull
+	// request: a line about workflow files on a change that touches none.
+	if f.Moves > 0 {
+		fmt.Fprintf(&b, "%d occurrence(s) in %s.\n\n", f.Moves, strings.Join(f.MoveFiles, ", "))
+	}
 	if len(f.GoModFiles) > 0 && f.Directive {
 		fmt.Fprintf(&b, "Raises go.mod's go directive from %s to %s and tidies. That is a\n"+
 			"DIFFERENT change from moving the CI pin: the directive is the floor a\n"+
