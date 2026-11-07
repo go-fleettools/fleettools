@@ -67,12 +67,12 @@ jobs:
       - name: check the assets
         env:
           # The repository is checked out alone, so the parent directory is
-          # not the organisation and -org has to say it.
+          # not the organisation and --org has to say it.
           ORG: ${{ inputs.org || github.repository_owner }}
         working-directory: scanner
         run: |
           set -o pipefail
-          go run ./cmd/brandcheck -org "$ORG" "$GITHUB_WORKSPACE/brand" | tee report.txt
+          go run ./cmd/brandcheck --org "$ORG" "$GITHUB_WORKSPACE/brand" | tee report.txt
           {
             echo '## brand-complete'
             echo
