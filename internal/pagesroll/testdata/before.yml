@@ -1,0 +1,171 @@
+name: docs
+
+# Every documentation version is a separate Hugo build, published under
+# https://go-redfish.github.io/docs/<version>/ on the gh-pages branch, where <version> is
+# the minor version of the code the pages describe (params.docs.version in
+# hugo.yaml: v0.3.1 -> 0.3), or "main" while no release is tagged. Each push to
+# main replaces that version's path and leaves the others alone. Pull requests
+# build and check, and publish nothing.
+#
+# ⛔ This replaced MkDocs Material plus mike: a Python toolchain, a
+# requirements.txt and a pip install to render a static site for a pure-Go
+# organisation.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HUGO_VERSION: "0.167.0"
+  # sha256 of hugo_${HUGO_VERSION}_linux-amd64.tar.gz, from the release's checksums.txt.
+  HUGO_SHA256: "4d84519b9f619e6d4c3fb45a50157abeabeb724f859c60605f44c23def6e1169"
+  DOCS_URL: "https://go-redfish.github.io/docs"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # themes/hextra is the tannevaled/hextra fork, pinned to a release tag;
+          # branding is the landing, whose logo and favicon the site mounts.
+          submodules: recursive
+          # The whole history: each page's date comes from git.
+          fetch-depth: 0
+
+      - name: Install Hugo ${{ env.HUGO_VERSION }}
+        run: |
+          curl -fsSL -o /tmp/hugo.tar.gz \
+            "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_${HUGO_VERSION}_linux-amd64.tar.gz"
+          echo "${HUGO_SHA256}  /tmp/hugo.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/hugo.tar.gz -C /usr/local/bin hugo
+          hugo version
+
+      - name: Version
+        id: version
+        run: |
+          documented=$(hugo config --format json | jq -r '.params.docs.version')
+          if [ "${documented}" = main ]; then
+            version=main
+          else
+            version=$(printf '%s\n' "${documented}" | sed -nE 's/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/\1.\2/p')
+          fi
+          if [ -z "${version}" ]; then
+            echo "::error::params.docs.version in hugo.yaml is \"${documented}\", not vMAJOR.MINOR.PATCH or main"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "documented ${documented}: documentation version ${version}"
+
+      # Each page's creation (first commit, followed across renames) and its
+      # author, for the page history at its foot (params.page.history).
+      - name: Page history
+        run: |
+          mkdir -p data
+          go run github.com/tannevaled/hextra/cmd/pagehistory@v0.21.0 > data/pagehistory.json
+
+      # --panicOnWarning: a relref to a page that is not there, a deprecated
+      # setting or a template warning fails the build rather than scrolling by.
+      - name: Build
+        env:
+          HUGO_ENVIRONMENT: production
+        run: >-
+          hugo --gc --minify --panicOnWarning --printPathWarnings
+          --baseURL "${DOCS_URL}/${{ steps.version.outputs.version }}/"
+
+      - name: Lay out the site for the link check
+        run: |
+          mkdir -p _check/docs
+          cp -R public "_check/docs/${{ steps.version.outputs.version }}"
+
+      - name: Check links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --offline --no-progress --include-fragments
+            --index-files index.html
+            --root-dir ${{ github.workspace }}/_check
+            '_check/docs/**/*.html'
+          fail: true
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: site
+          path: public
+          retention-days: 7
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    # Never two deploys at once: both would push gh-pages and the second would
+    # be rejected. cancel-in-progress stays false — killing a publish half way
+    # through is worse than making it wait.
+    concurrency:
+      group: gh-pages-deploy
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: gh-pages
+          fetch-depth: 0
+
+      - name: Switch to gh-pages
+        working-directory: gh-pages
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git fetch -q origin gh-pages
+            git checkout -q -B gh-pages FETCH_HEAD
+          else
+            echo "no gh-pages branch yet: starting one"
+            git checkout -q --orphan gh-pages
+            git rm -rqf .
+            git clean -fdxq
+          fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: site
+          path: site
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.3'
+
+      # ⛔ THE VERSION GOES AT THE BRANCH ROOT. This step used to write
+      # docs/<version>/ — but a project repository named "docs" is ALREADY
+      # served at /docs/, so the site landed at /docs/docs/<version>/ while
+      # /docs/latest/ went on serving the MkDocs build mike had left there.
+      # Both URLs answered 200, which is why the green deploy said nothing.
+      #
+      # pagespublish replaces that version and nothing else, writes
+      # versions.json in mike's format (what the Hextra fork's version selector
+      # reads), points latest at the newest release, leaves the root
+      # redirecting to it, and removes the misplaced docs/ directory once.
+      - name: Publish ${{ needs.build.outputs.version }}
+        run: >-
+          go run github.com/go-fleettools/fleettools/cmd/pagespublish@v0.26.0
+          "${{ needs.build.outputs.version }}" site gh-pages
+
+      - name: Push gh-pages
+        working-directory: gh-pages
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "nothing changed"
+            exit 0
+          fi
+          git commit -q -m "Deployed ${GITHUB_SHA::7} to ${{ needs.build.outputs.version }} with Hugo ${HUGO_VERSION}"
+          git push origin HEAD:gh-pages
