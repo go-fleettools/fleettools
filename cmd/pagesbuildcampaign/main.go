@@ -13,7 +13,8 @@
 // --min-core. Every outcome is appended to --state, and a re-run skips what
 // finished (merged, already, refused-shape).
 //
-// Outcomes: merged, already, skipped-claimed, refused-shape, failed-ci, failed.
+// Outcomes: merged, already, skipped-claimed, refused-shape, failed-ci,
+// unobserved (the checks were never seen to finish; PR left open), failed.
 package main
 
 import (
@@ -44,6 +45,8 @@ const (
 	RefusedShape  = "refused-shape"
 	FailedCI      = "failed-ci"
 	Failed        = "failed"
+	Unobserved    = "unobserved" // checks never seen to finish; PR left open
+	cloneAttempts = 3
 	branchName    = "pagesbuild-after-push"
 	evidenceRun   = "https://github.com/go-redfish/docs/actions/runs/42268708918"
 	referencePR   = "go-redfish/docs#11"
@@ -231,8 +234,28 @@ func prepare(cfg Config, repo string) (Result, *pending) {
 	if _, err := os.Stat(dir); err == nil {
 		return fail(repo, "%s already exists; look at it and remove it", dir), nil
 	}
-	if out, code, err := cfg.Run("", "git", "clone", "-q", "https://github.com/"+repo, dir); err != nil || code != 0 {
-		return fail(repo, "clone: %s", out), nil
+	// `gh repo clone` is authenticated (unauthenticated git reads get
+	// intermittent HTTP 403 here); a failure is retried with a pause, from a
+	// clean directory.
+	var cloneOut string
+	cloned := false
+	for attempt := 1; attempt <= cloneAttempts && !cloned; attempt++ {
+		out, code, err := cfg.Run("", "gh", "repo", "clone", repo, dir, "--", "-q")
+		if err == nil && code == 0 {
+			cloned = true
+			break
+		}
+		cloneOut = out
+		if err != nil {
+			cloneOut = err.Error()
+		}
+		_ = os.RemoveAll(dir)
+		if attempt < cloneAttempts {
+			cfg.Sleep(time.Duration(attempt) * 10 * time.Second)
+		}
+	}
+	if !cloned {
+		return fail(repo, "clone: %s", cloneOut), nil
 	}
 	head, code, err := cfg.Run(dir, "git", "rev-parse", "HEAD")
 	if err != nil || code != 0 || strings.TrimSpace(head) != sha {
@@ -295,24 +318,70 @@ func prNumber(out string) (int, bool) {
 // and only if, they all passed.
 func finish(cfg Config, p pending) Result {
 	n := strconv.Itoa(p.pr)
-	// Let GitHub register the checks: `gh pr checks` reports "no checks"
-	// (exit 1) in the first seconds, which is not a failure.
-	var out string
-	var code int
-	for attempt := 0; attempt < 6; attempt++ {
-		var err error
-		out, code, err = cfg.Run("", "gh", "pr", "checks", n, "--repo", p.repo, "--watch", "--fail-fast")
+	// The merge needs a watch that SAW the checks finish green. Anything
+	// else (no checks yet, a transport error, an unreadable answer) is
+	// retried with a growing pause, then recorded as "unobserved" and the
+	// pull request is left open: not seeing is not passing.
+	var last string
+	for attempt := 1; attempt <= watchAttempts; attempt++ {
+		out, code, err := cfg.Run("", "gh", "pr", "checks", n, "--repo", p.repo, "--watch", "--fail-fast")
 		if err != nil {
-			return fail(p.repo, "gh pr checks: %v", err)
+			last = fmt.Sprintf("gh pr checks: %v", err)
+		} else {
+			switch v := verdict(out, code); v {
+			case seenGreen:
+				return merge(cfg, p)
+			case seenRed:
+				return Result{Repo: p.repo, Status: FailedCI, PR: p.pr, Detail: "checks not green: " + lastLines(out, 4)}
+			default:
+				last = fmt.Sprintf("exit %d: %s", code, lastLines(out, 4))
+			}
 		}
-		if code != 1 || !strings.Contains(out, "no checks reported") {
-			break
+		if attempt < watchAttempts {
+			cfg.Sleep(time.Duration(attempt) * 20 * time.Second)
 		}
-		cfg.Sleep(20 * time.Second)
 	}
-	if code != 0 {
-		return Result{Repo: p.repo, Status: FailedCI, PR: p.pr, Detail: "checks not green: " + lastLines(out, 4)}
+	return Result{Repo: p.repo, Status: Unobserved, PR: p.pr,
+		Detail: fmt.Sprintf("could not observe the checks after %d attempts, PR left open: %s", watchAttempts, last)}
+}
+
+const watchAttempts = 6
+
+const (
+	unseen = iota // no check seen, or the watch did not answer
+	seenGreen
+	seenRed
+)
+
+// verdict reads `gh pr checks` output (tab-separated: name, bucket, ...).
+// Green needs exit 0 AND at least one recorded pass; red needs a recorded
+// fail or cancel. Anything else, including exit 1 with a network error text
+// and "no checks reported", was not an observation of the checks.
+func verdict(out string, code int) int {
+	pass, bad := 0, 0
+	for _, l := range strings.Split(out, "\n") {
+		f := strings.Split(strings.TrimSpace(l), "\t")
+		if len(f) < 2 {
+			continue
+		}
+		switch f[1] {
+		case "pass":
+			pass++
+		case "fail", "cancel":
+			bad++
+		}
 	}
+	switch {
+	case bad > 0:
+		return seenRed
+	case code == 0 && pass > 0:
+		return seenGreen
+	}
+	return unseen
+}
+
+func merge(cfg Config, p pending) Result {
+	n := strconv.Itoa(p.pr)
 	if out, code, err := cfg.Run("", "ghmerge", p.repo, n); err != nil || code != 0 {
 		return Result{Repo: p.repo, Status: Failed, PR: p.pr, Detail: "ghmerge: " + lastLines(out, 4)}
 	}
@@ -371,8 +440,8 @@ func Summary(rs []Result) string {
 			fmt.Fprintf(&b, "  %s: %s (PR %d) %s\n", r.Repo, r.Status, r.PR, r.Detail)
 		}
 	}
-	return fmt.Sprintf("merged %d, already %d, skipped-claimed %d, refused-shape %d, failed-ci %d, failed %d\n%s",
-		count[Merged], count[Already], count[SkippedClaim], count[RefusedShape], count[FailedCI], count[Failed], b.String())
+	return fmt.Sprintf("merged %d, already %d, skipped-claimed %d, refused-shape %d, failed-ci %d, unobserved %d, failed %d\n%s",
+		count[Merged], count[Already], count[SkippedClaim], count[RefusedShape], count[FailedCI], count[Unobserved], count[Failed], b.String())
 }
 
 // RootCmd builds the command; tests drive it with SetArgs/SetOut/SetErr.

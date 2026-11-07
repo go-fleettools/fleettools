@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,6 +21,143 @@ type fake struct {
 	red     map[string]bool   // repos whose checks fail
 	core    int
 	clonedN int
+
+	cloneFails map[string]int     // repo -> clones that answer 403 first
+	watch      map[string][]reply // repo -> scripted `gh pr checks` answers, then the default
+}
+
+type reply struct {
+	out  string
+	code int
+	err  error
+}
+
+const netErr = `Post "https://api.github.com/graphql": dial tcp 20.250.119.72:443: connect: can't assign requested address`
+
+func (f *fake) merges() int {
+	n := 0
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "ghmerge ") {
+			n++
+		}
+	}
+	return n
+}
+
+func runOne(t *testing.T, f *fake, repo string) Result {
+	t.Helper()
+	cfg := cfgFor(t, f)
+	cfg.State = filepath.Join(cfg.Workdir, "state.jsonl")
+	rs, err := Campaign(cfg, []string{repo})
+	if err != nil || len(rs) != 1 {
+		t.Fatal(err, rs)
+	}
+	return rs[0]
+}
+
+func TestCloneRetriesAfter403ThroughGhRepoClone(t *testing.T) {
+	f := &fake{t: t, yml: map[string]string{"a/docs": readGolden(t, "before.yml")}, core: 4000,
+		cloneFails: map[string]int{"a/docs": 2}}
+	if r := runOne(t, f, "a/docs"); r.Status != Merged {
+		t.Fatalf("%+v", r)
+	}
+	if !f.has("gh repo clone a/docs ") {
+		t.Error("did not clone through gh repo clone")
+	}
+}
+
+func TestCloneFailsAfterBoundedAttempts(t *testing.T) {
+	f := &fake{t: t, yml: map[string]string{"a/docs": readGolden(t, "before.yml")}, core: 4000,
+		cloneFails: map[string]int{"a/docs": 99}}
+	if r := runOne(t, f, "a/docs"); r.Status != Failed || !strings.Contains(r.Detail, "403") {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestWatchTransportErrorThenGreenMerges(t *testing.T) {
+	f := &fake{t: t, yml: map[string]string{"a/docs": readGolden(t, "before.yml")}, core: 4000,
+		watch: map[string][]reply{"a/docs": {
+			{out: netErr, code: 1},
+			{err: errors.New("exec failed")},
+			{out: "docs build\tpass\t1m\turl", code: 0},
+		}}}
+	if r := runOne(t, f, "a/docs"); r.Status != Merged || f.merges() != 1 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestWatchWithZeroChecksIsNotGreen(t *testing.T) {
+	// Exit 0 and no check line, every time: nothing was observed.
+	f := &fake{t: t, yml: map[string]string{"a/docs": readGolden(t, "before.yml")}, core: 4000,
+		watch: map[string][]reply{"a/docs": {{}, {}, {}, {}, {}, {}}}}
+	r := runOne(t, f, "a/docs")
+	if r.Status != Unobserved || r.PR != 7 || f.merges() != 0 {
+		t.Fatalf("%+v merges=%d", r, f.merges())
+	}
+}
+
+func TestPersistentWatchErrorIsUnobservedAndPROpen(t *testing.T) {
+	q := make([]reply, 6)
+	for i := range q {
+		q[i] = reply{out: netErr, code: 1}
+	}
+	f := &fake{t: t, yml: map[string]string{"a/docs": readGolden(t, "before.yml")}, core: 4000,
+		watch: map[string][]reply{"a/docs": q}}
+	r := runOne(t, f, "a/docs")
+	if r.Status != Unobserved || r.PR != 7 || f.merges() != 0 || !strings.Contains(r.Detail, "can't assign") {
+		t.Fatalf("%+v", r)
+	}
+	if f.has("gh pr close") {
+		t.Error("the pull request must stay open")
+	}
+}
+
+func TestNoChecksYetThenRedIsFailedCI(t *testing.T) {
+	f := &fake{t: t, yml: map[string]string{"a/docs": readGolden(t, "before.yml")}, core: 4000,
+		watch: map[string][]reply{"a/docs": {{out: "no checks reported on the 'x' branch", code: 1},
+			{out: "docs build\tfail\t1m\turl", code: 1}}}}
+	if r := runOne(t, f, "a/docs"); r.Status != FailedCI || f.merges() != 0 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestVerdict(t *testing.T) {
+	for _, c := range []struct {
+		out  string
+		code int
+		want int
+	}{
+		{"", 0, unseen},
+		{"a\tpass\t1s\tu", 0, seenGreen},
+		{"a\tpass\t1s\tu", 1, unseen},
+		{"a\tskipping\t0\tu", 0, unseen},
+		{"a\tpass\t1s\tu\nb\tfail\t1s\tu", 1, seenRed},
+		{"a\tcancel\t1s\tu", 1, seenRed},
+		{netErr, 1, unseen},
+	} {
+		if got := verdict(c.out, c.code); got != c.want {
+			t.Errorf("verdict(%q,%d)=%d want %d", c.out, c.code, got, c.want)
+		}
+	}
+}
+
+func TestStateFormatBackwardCompatible(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	old := `{"repo":"cloud-boot/docs","status":"failed-ci","pr":25,"detail":"checks not green: x"}` + "\n"
+	if err := os.WriteFile(p, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := loadState(p)
+	if err != nil || m["cloud-boot/docs"].Status != FailedCI || m["cloud-boot/docs"].PR != 25 {
+		t.Fatal(m, err)
+	}
+	if err := appendState(p, Result{Repo: "x/docs", Status: Unobserved, PR: 3}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.Contains(string(b), `{"repo":"x/docs","status":"unobserved","pr":3}`) {
+		t.Fatal(string(b))
+	}
 }
 
 func (f *fake) run(dir, name string, args ...string) (string, int, error) {
@@ -38,8 +176,15 @@ func (f *fake) run(dir, name string, args ...string) (string, int, error) {
 	case name == "gh" && args[0] == "api":
 		return sha + "\n", 0, nil
 	case name == "git" && args[0] == "clone":
-		repo := strings.TrimPrefix(args[len(args)-2], "https://github.com/")
-		d := args[len(args)-1]
+		f.t.Errorf("unauthenticated git clone: %s", line)
+		return "", 1, nil
+	case name == "gh" && args[0] == "repo" && args[1] == "clone":
+		repo := args[2]
+		if f.cloneFails[repo] > 0 {
+			f.cloneFails[repo]--
+			return "fatal: unable to access: The requested URL returned error: 403", 128, nil
+		}
+		d := args[3]
 		p := filepath.Join(d, pagesrollWorkflow)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			f.t.Fatal(err)
@@ -53,6 +198,10 @@ func (f *fake) run(dir, name string, args ...string) (string, int, error) {
 	case name == "gh" && args[0] == "pr" && args[1] == "create":
 		return "https://github.com/" + args[3] + "/pull/7\n", 0, nil
 	case name == "gh" && args[0] == "pr" && args[1] == "checks":
+		if q := f.watch[args[4]]; len(q) > 0 {
+			f.watch[args[4]] = q[1:]
+			return q[0].out, q[0].code, q[0].err
+		}
 		if f.red[args[4]] {
 			return "docs build\tfail", 1, nil
 		}
@@ -144,7 +293,7 @@ func TestCampaignOutcomes(t *testing.T) {
 			t.Errorf("claim of %s not released", r)
 		}
 	}
-	if s := Summary(rs); !strings.Contains(s, "merged 1, already 1, skipped-claimed 1, refused-shape 1, failed-ci 1, failed 0") ||
+	if s := Summary(rs); !strings.Contains(s, "merged 1, already 1, skipped-claimed 1, refused-shape 1, failed-ci 1, unobserved 0, failed 0") ||
 		!strings.Contains(s, "red/docs: failed-ci") {
 		t.Errorf("summary:\n%s", s)
 	}
