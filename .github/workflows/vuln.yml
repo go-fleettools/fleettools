@@ -86,7 +86,13 @@ jobs:
           # in CI the binary IS this checkout, so the question has no content.
           # Handing it GH_TOKEN would spend a call from the shared hourly budget
           # per run to learn nothing.
-          /tmp/vulngate -go "$(go env GOVERSION)" /tmp/vuln.json
+          # ⛔ TWO DASHES. Every command here went to cobra in v0.53.0, and the
+          # single-dash spelling only still works through the compatibility
+          # shim in internal/cli — which prints a warning on every run and
+          # announces its own removal. A warning inside a GREEN lane is a
+          # warning nobody reads, and it surfaces later as a red night for a
+          # reason unrelated to anything this lane measures.
+          /tmp/vulngate --go "$(go env GOVERSION)" /tmp/vuln.json
 
   # The second half, and the one nothing did before: our own Go dependencies,
   # across the repositories whose compromise would be worst, on a clock.
@@ -125,7 +131,7 @@ jobs:
       # that cannot read reports zero findings, which is indistinguishable from
       # a clean fleet.
       - name: the scanner must see what it is looking for
-        run: /tmp/vulnscan -selftest
+        run: /tmp/vulnscan --selftest
 
       # ⛔ THE SMOKE LIST IS THIS REPOSITORY, AND THAT IS THE POINT. The full
       # sweep below runs only on a schedule or by hand, because an advisory in
@@ -136,7 +142,7 @@ jobs:
       # one-line list naming this repository, whose state the gate job above is
       # already about.
       - name: the sweep's command line must work on every event
-        run: /tmp/vulnscan -list .github/vulnscan-smoke.txt -go "$(go env GOVERSION)"
+        run: /tmp/vulnscan --list .github/vulnscan-smoke.txt --go "$(go env GOVERSION)"
 
       # ⛔ EXIT STATUS: 0 all read and clean, 1 something REACHABLE, 2 something
       # UNREAD -- and 2 is not a lesser 1. A repository govulncheck could not
@@ -149,7 +155,7 @@ jobs:
       # reachable advisory" call for different work.
       - name: the fleet's own tools, swept on a clock
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: /tmp/vulnscan -list .github/vulnscan-tools.txt -go "$(go env GOVERSION)" -json /tmp/vulnscan.json
+        run: /tmp/vulnscan --list .github/vulnscan-tools.txt --go "$(go env GOVERSION)" --json /tmp/vulnscan.json
 
       - name: keep the report even when the sweep failed
         if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
@@ -210,7 +216,7 @@ jobs:
       # clean fleet -- so a binary that gets one of the three recorded streams
       # wrong must stop the sweep rather than report on 50 repositories.
       - name: the scanner must see what it is looking for
-        run: /tmp/vulnscan -selftest
+        run: /tmp/vulnscan --selftest
 
       # ⛔ THE ONE THING BELOW THAT NO OTHER EVENT EXERCISES IS THE PATH. The
       # binary is proven by -selftest above and the -list mechanism by the smoke
@@ -239,7 +245,7 @@ jobs:
       # database does, which is the whole reason this runs on a clock.
       - name: the network-facing repositories, swept on a clock
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: /tmp/vulnscan -list .github/vulnscan-exposed.txt -go "$(go env GOVERSION)" -state /tmp/exposed.state -json /tmp/vulnscan-exposed.json
+        run: /tmp/vulnscan --list .github/vulnscan-exposed.txt --go "$(go env GOVERSION)" --state /tmp/exposed.state --json /tmp/vulnscan-exposed.json
 
       # ⛔ THESE RAN ON REQUEST ONLY UNTIL 2026-11-01, AND THE REASON WAS A
       # MEASUREMENT TAKEN IN THE WRONG PLACE. A 58-repository sweep from the
@@ -264,7 +270,7 @@ jobs:
       # partial run with -retry-unread; #150 is the in-tool fix.
       - name: the local-byte decoders, swept on a clock
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: /tmp/vulnscan -list .github/vulnscan-decoders.txt -go "$(go env GOVERSION)" -state /tmp/decoders.state -json /tmp/vulnscan-decoders.json
+        run: /tmp/vulnscan --list .github/vulnscan-decoders.txt --go "$(go env GOVERSION)" --state /tmp/decoders.state --json /tmp/vulnscan-decoders.json
 
       - name: keep the reports even when a sweep failed
         if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
