@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/go-fleettools/fleettools/internal/fleet"
+	"golang.org/x/mod/modfile"
 )
 
 // ⛔⛔ EVERY CASE BELOW IS A MISTAKE THE SHELL VERSION OF THIS MEASUREMENT MADE.
@@ -385,6 +390,110 @@ func TestDirectAndInheritedAreCountedApart(t *testing.T) {
 	}
 	if strings.Contains(named, "go-freedesktop/notifications\n") {
 		t.Errorf("--repos names a repository that only INHERITS the pin:\n%s", named)
+	}
+}
+
+// ⛔⛔ THE DISK IS NOT THE FLEET, and this is the test for it. Measured
+// 2026-11-07: of 13 repositories this command named as declaring a stale pin,
+// EIGHT were false — four already at the released tag upstream, two declaring
+// no pseudo-version at all, one whose only one was `// indirect`, one whose
+// three were not fleet modules. ~25 sessions hold clones of very different
+// ages here, so a six-day-old clone writes the same bytes as a stale pin.
+//
+// The case that matters is the first one: the disk says stale, origin says
+// fixed, and the verdict must CHANGE. A verification that cannot overturn the
+// disk is decoration.
+func TestVerifyAgainstOriginOverturnsTheDisk(t *testing.T) {
+	dir := t.TempDir()
+	fakeProxy(t,
+		map[string][]string{"github.com/go-images/images": {"v0.3.0"}},
+		map[string]string{"github.com/go-images/images v0.3.0": "2026-10-01T00:00:00Z"},
+		nil)
+
+	const old = "v0.0.0-20260620120000-aaaaaaaaaaaa"
+	for _, name := range []string{"fixed-upstream", "still-stale", "gone"} {
+		write(t, dir, "go-widgets/"+name+"/go.mod",
+			"module github.com/go-widgets/"+name+"\n\ngo 1.27\n\n"+
+				"require github.com/go-images/images "+old+"\n")
+		write(t, dir, "go-widgets/"+name+"/.git/config",
+			"[remote \"origin\"]\n\turl = https://github.com/go-widgets/"+name+".git\n")
+	}
+
+	var asked []string
+	ghAPI = func(args ...string) ([]byte, error) {
+		asked = append(asked, strings.Join(args, " "))
+		switch {
+		case strings.Contains(args[1], "fixed-upstream"):
+			// Already raised to the tag: the disk was simply old.
+			return []byte("module x\n\ngo 1.27\n\nrequire github.com/go-images/images v0.3.0\n"), nil
+		case strings.Contains(args[1], "still-stale"):
+			return []byte("module x\n\ngo 1.27\n\nrequire github.com/go-images/images " + old + "\n"), nil
+		}
+		return nil, errors.New("404 Not Found")
+	}
+	t.Cleanup(func() {
+		ghAPI = func(args ...string) ([]byte, error) { return fleet.GH(args...) }
+	})
+
+	out, code := pinscan(t, "--verify-origin", dir)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "3 declared by the consumer") {
+		t.Errorf("the disk pass did not find all three:\n%s", out)
+	}
+	if !strings.Contains(out, "verified against origin: 1 still declare one, 1 already fixed, 1 unreadable") {
+		t.Errorf("the verification did not overturn the disk:\n%s", out)
+	}
+	if !strings.Contains(out, "go-widgets/still-stale") {
+		t.Errorf("the real one is not named:\n%s", out)
+	}
+	if strings.Contains(out, "go-widgets/fixed-upstream\n") {
+		t.Errorf("a repository already fixed upstream is still named:\n%s", out)
+	}
+	// ⭐ One request per declaring repository, and the raw accept header, or it
+	// would parse GitHub's JSON wrapper as a go.mod.
+	if len(asked) != 3 {
+		t.Errorf("made %d request(s) for 3 repositories: %v", len(asked), asked)
+	}
+	for _, a := range asked {
+		if !strings.Contains(a, "contents/go.mod") || !strings.Contains(a, "vnd.github.raw") {
+			t.Errorf("request does not ask for the raw go.mod: %q", a)
+		}
+	}
+}
+
+// ⛔ An indirect requirement is not a DECLARATION, and a non-fleet module is
+// not ours to raise: go-macos/appdmg and go-slides/slides were both named by
+// the disk pass for exactly these two reasons.
+func TestOriginStaleIgnoresIndirectAndForeignModules(t *testing.T) {
+	fakeProxy(t,
+		map[string][]string{"github.com/go-images/images": {"v0.3.0"}},
+		map[string]string{"github.com/go-images/images v0.3.0": "2026-10-01T00:00:00Z"},
+		nil)
+	const old = "v0.0.0-20260620120000-aaaaaaaaaaaa"
+	latest := map[string]string{}
+	when := map[string]time.Time{}
+
+	for _, tc := range []struct {
+		name  string
+		body  string
+		stale bool
+	}{
+		{"declared directly", "module x\nrequire github.com/go-images/images " + old + "\n", true},
+		{"only indirect", "module x\nrequire github.com/go-images/images " + old + " // indirect\n", false},
+		{"not a fleet module", "module x\nrequire github.com/srwiley/rasterx " + old + "\n", false},
+		{"a tag, not a pseudo-version", "module x\nrequire github.com/go-images/images v0.1.0\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := modfile.Parse("go.mod", []byte(tc.body), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := originDeclaresStale(f, latest, when); got != tc.stale {
+				t.Errorf("originDeclaresStale = %v, want %v", got, tc.stale)
+			}
+		})
 	}
 }
 

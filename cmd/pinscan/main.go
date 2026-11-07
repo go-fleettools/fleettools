@@ -147,16 +147,18 @@ func main() { cli.Run(RootCmd()) }
 
 // RootCmd builds the command. Tests drive it through run, below.
 func RootCmd() *cobra.Command {
-	var verbose, named bool
+	var verbose, named, verifyOrigin bool
 	c := cli.New("pinscan [flags] DIR...",
 		"Pins of a fleet module older than a release the consumer cannot reach", longHelp)
 	c.RunE = func(cmd *cobra.Command, args []string) error {
-		return cli.FromStatus(scan(cli.Out(cmd), cli.Err(cmd), verbose, named, args))
+		return cli.FromStatus(scan(cli.Out(cmd), cli.Err(cmd), verbose, named, verifyOrigin, args))
 	}
 	c.Flags().BoolVarP(&verbose, "verbose", "v", false,
 		"name every pair rather than only counting")
 	c.Flags().BoolVar(&named, "repos", false,
 		"name the repositories that DECLARE a stale pin, which is the campaign's set")
+	c.Flags().BoolVar(&verifyOrigin, "verify-origin", false,
+		"re-read the declaring repositories' go.mod from GitHub: a stale CLONE reads as a stale pin")
 	return c
 }
 
@@ -165,7 +167,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return cli.Drive(RootCmd(), args, stdout, stderr)
 }
 
-func scan(stdout, stderr io.Writer, verbose, named bool, roots []string) int {
+func scan(stdout, stderr io.Writer, verbose, named, verifyOrigin bool, roots []string) int {
 	// On stderr and inside the work, as it was: the staleness note is not part
 	// of the answer, and a reader of the table must not have to filter it out.
 	fleet.WarnIfStale(stderr)
@@ -295,6 +297,10 @@ func scan(stdout, stderr io.Writer, verbose, named bool, roots []string) int {
 		}
 	}
 
+	if verifyOrigin {
+		verifyAgainstOrigin(stdout, stderr, sortedStrings(direct), latest, when)
+	}
+
 	byModule(stdout, behind)
 	if verbose {
 		sort.Slice(behind, func(i, j int) bool { return behind[i].Repo < behind[j].Repo })
@@ -420,6 +426,98 @@ func walk(roots []string) ([]Pin, int, error) {
 		}
 	}
 	return out, files, nil
+}
+
+// ghAPI is a variable so a test can answer without a network. It goes through
+// [fleet.GH], which carries the shared retry policy AND the request budget: 65
+// calls is a sweep, and a sweep that is not accounted for starves the Renovate
+// runners that share the same hourly allowance.
+var ghAPI = func(args ...string) ([]byte, error) { return fleet.GH(args...) }
+
+// verifyAgainstOrigin re-reads each declaring repository's go.mod from GitHub
+// and says which of them STILL declares a stale pin.
+//
+// ⛔⛔ WITHOUT THIS, THIS COMMAND REPORTS THE AGE OF THE CLONES ON ONE DISK.
+// Measured 2026-11-07, and it is the defect that made the whole report
+// untrustworthy: of 13 repositories it named as declaring a stale pin, EIGHT
+// were false. Four were already at the released tag upstream
+// (go-news-reader/reader, go-thumbnail/thumbnail, go-pdfkit/ops,
+// go-pdfkit/convert); two declared no pseudo-version at all (go-avkit/h264,
+// go-compressions/lz4c); one's only pseudo-version was `// indirect`
+// (go-macos/appdmg); one's three were not fleet modules at all
+// (go-slides/slides). About 25 sessions hold clones of very different ages
+// here, so "stale pin" and "stale clone" write the same bytes.
+//
+// ⛔ ONLY THE DECLARING SET IS VERIFIED, on purpose. It is the campaign's unit
+// and it is small — 65 repositories, one request each. Verifying all 1208 pins
+// would be a different order of spend for an answer nobody acts on per-pin.
+func verifyAgainstOrigin(w, errw io.Writer, repos []string, latest map[string]string, when map[string]time.Time) {
+	var stale, fixed, unreadable []string
+	for _, repo := range repos {
+		if !strings.Contains(repo, "/") || strings.HasPrefix(repo, "/") {
+			// A path, not owner/name: no origin was read on disk either.
+			unreadable = append(unreadable, repo)
+			continue
+		}
+		body, err := ghAPI("api", "repos/"+repo+"/contents/go.mod",
+			"--header", "Accept: application/vnd.github.raw")
+		if err != nil {
+			fmt.Fprintf(errw, "  ? %s: %v\n", repo, err)
+			unreadable = append(unreadable, repo)
+			continue
+		}
+		f, err := modfile.Parse("go.mod", body, nil)
+		if err != nil {
+			fmt.Fprintf(errw, "  ? %s: %v\n", repo, err)
+			unreadable = append(unreadable, repo)
+			continue
+		}
+		if originDeclaresStale(f, latest, when) {
+			stale = append(stale, repo)
+		} else {
+			fixed = append(fixed, repo)
+		}
+	}
+	sort.Strings(stale)
+	fmt.Fprintf(w, "\nverified against origin: %d still declare one, %d already fixed, %d unreadable\n",
+		len(stale), len(fixed), len(unreadable))
+	for _, r := range stale {
+		fmt.Fprintf(w, "    %s\n", r)
+	}
+}
+
+// originDeclaresStale applies [Pin.Behind]'s own test to a go.mod read from
+// GitHub: a fleet module, required DIRECTLY, at a pseudo-version older than a
+// release that exists.
+func originDeclaresStale(f *modfile.File, latest map[string]string, when map[string]time.Time) bool {
+	for _, r := range f.Require {
+		if r.Indirect || !ours(r.Mod.Path) || !module.IsPseudoVersion(r.Mod.Version) {
+			continue
+		}
+		if strings.Contains(r.Mod.Version, noCommit) {
+			continue
+		}
+		// A module seen only on origin was never queried by the disk pass.
+		if _, ok := latest[r.Mod.Path]; !ok {
+			v, err := latestVersion(r.Mod.Path)
+			if err != nil || v == "" {
+				continue // never released: a pseudo-version is correct
+			}
+			latest[r.Mod.Path] = v
+			if t, err := releasedAt(r.Mod.Path, v); err == nil {
+				when[r.Mod.Path] = t
+			}
+		}
+		p := Pin{Module: r.Mod.Path, Pinned: r.Mod.Version,
+			Latest: latest[r.Mod.Path], TagAt: when[r.Mod.Path]}
+		if t, err := module.PseudoVersionTime(r.Mod.Version); err == nil {
+			p.PinAt = t
+		}
+		if p.Behind() {
+			return true
+		}
+	}
+	return false
 }
 
 // sortedStrings is the set in a stable order, so two runs of the same corpus
