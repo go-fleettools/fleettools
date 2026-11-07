@@ -66,6 +66,13 @@ It reads two surfaces and exits 1 if either carries anything:
   priorart -repo go-tex/engine "running head"
   priorart -org go-tex "running head"        # tracker across the whole org
 
+⛔ GIVE THE DISTINCTIVE NAME, NOT A SENTENCE. Measured on go-tex/engine:
+"@themark" returns ONE entry — the issue that holds the work — while
+"@themark mark pair read from the class" returns 538 entries and 13 branches,
+because "read", "class", "mark" and "pair" match everything that repository
+does. The terms are printed before the findings so a useless one is visible
+first.
+
 Two calls per repository: one GraphQL (branches, separate budget) and one
 search (tracker). With -org the tracker is ONE search call for the whole
 organisation; its branches are read only with -branches, one call per
