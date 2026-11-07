@@ -1,0 +1,126 @@
+# A reusable gate: this branch does not declare a Go floor below the fleet's.
+#
+# Called BY the repository being guarded, so it fails at the moment somebody
+# lowers the directive — not in a report nobody opened. Nine lines in the
+# caller:
+#
+#   name: go-floor
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#   jobs:
+#     floor:
+#       uses: go-fleettools/fleettools/.github/workflows/go-floor.yml@main
+#       with:
+#         floor: '1.27.3'
+#
+# ⛔ NOT `on: [push, pull_request]`. Both fire for a branch with a pull request
+# open, so every push runs this twice — the doubled bill `docs-current.yml`
+# measured on three organisations, against an hourly API budget Renovate also
+# draws on. Narrowing push to main keeps the default branch watched and costs
+# one run per pull request.
+#
+# ⛔ IT EXISTS BECAUSE THE SWEEP CANNOT CATCH THIS CASE. `modfloor --baseline`
+# answers "did anything get worse" across the fleet, and a repository CREATED
+# below the floor is invisible to it: it arrives as "new to the population", and
+# nothing in a baseline says whether it was ever clean. Measured 2026-11-07 over
+# five days: 0 modules regressed, 14 were fixed, and **61 arrived exposed** —
+# the exposure went from 262 to 314 without a single regression. A gate that
+# runs in the repository is the only place that number can be held down, which
+# is what modfloor's own report says in as many words when it prints them.
+#
+# ⛔ IT NEEDS NO SECRET AND NO API CALL. `--offline` judges the working tree, so
+# the whole check is a checkout and a `go run`. Nothing is read from the proxy
+# and nothing is charged to the budget Renovate shares.
+name: go-floor
+
+on:
+  workflow_call:
+    inputs:
+      floor:
+        description: >-
+          the lowest Go version this repository's `go` directive may declare,
+          e.g. 1.27.3. REQUIRED, deliberately: a default would move under every
+          caller with no commit to review, which is the `go-version: stable`
+          defect this fleet spent a campaign removing.
+        required: true
+        type: string
+      modfloor:
+        description: >-
+          the modfloor tag to judge with. Pinned rather than `main`, because
+          this gate FAILS BUILDS: a floor check that follows a branch can change
+          what 200 repositories are held to without anybody reviewing it.
+        required: false
+        default: v0.8.0
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  floor:
+    name: the go directive is at or above the fleet floor
+    runs-on: ubuntu-latest
+    steps:
+      # ⛔ THE BRANCH UNDER REVIEW. modfloor's other modes read the PUBLISHED
+      # go.mod from the proxy, which is the right question for a sweep and the
+      # wrong one here: the proxy has no copy of a pull request. A gate that
+      # read the published module would pass a branch that lowers the directive
+      # and only notice after the release — which is the gap, not the check.
+      - name: check out the branch under review
+        uses: actions/checkout@v7
+        with:
+          path: caller
+
+      - name: check out the judge
+        uses: actions/checkout@v7
+        with:
+          repository: go-fleettools/modfloor
+          ref: ${{ inputs.modfloor }}
+          path: judge
+
+      # ⛔ The JUDGE's go.mod, never the caller's. The caller's directive is the
+      # thing under test and may be below what modfloor itself needs to build;
+      # using it would make the gate fail to run on exactly the repositories it
+      # exists to catch, and "could not look" would arrive as a red cross
+      # indistinguishable from "found something".
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: judge/go.mod
+          cache: false
+      # ⛔ SAY WHICH TOOLCHAIN RAN. A green check that does not record the
+      # compiler behind it makes every figure measured under it unattributable.
+      - run: go version
+
+      - name: judge the floor
+        working-directory: judge
+        env:
+          FLOOR: ${{ inputs.floor }}
+        run: |
+          set -o pipefail
+          go run . --dir "$GITHUB_WORKSPACE/caller" --offline --floor "$FLOOR" | tee report.txt
+          {
+            echo '## go-floor'
+            echo
+            echo '```'
+            cat report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: what a failure means
+        if: failure()
+        run: |
+          echo "::notice::A module in this repository declares a \`go\` directive below" \
+               "${{ inputs.floor }}. That directive is the floor a CONSUMER honours: with" \
+               "GOTOOLCHAIN=local, anyone running \`go install\` builds this module against" \
+               "the standard library of the version it names, however new the toolchain" \
+               "this repository's own CI uses."
+          echo "::notice::Raise it, run \`go mod tidy\`, and remember the published module" \
+               "is what a consumer reads — merging is not finishing, releasing is."
+          echo "::notice::Held back on purpose? Say so where a reviewer sees it: lower the" \
+               "\`floor:\` input in this repository's own caller, with a comment giving the" \
+               "reason. That keeps the hold visible and reviewable in the file that asks" \
+               "for the check, rather than in a list somewhere else that nobody reads."
+          echo "::notice::Exit 2 rather than 1 means the measurement could not be made —" \
+               "no module of this tree was read at all. That is not a clean repository."
