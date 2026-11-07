@@ -174,6 +174,66 @@ func TestAGraphqlErrorIsNotAnEmptyBranchList(t *testing.T) {
 	}
 }
 
+// ⛔⛔ A CAP IS ONLY SAFE WHEN SOMETHING CHECKS WHETHER IT WAS REACHED.
+//
+// The first repository this gate was pointed at, go-tex/engine, has 93 branches
+// against a page size of 100. At 101 a single-page query would have answered
+// cleanly and seven branches short, and the gate would have opened on a surface
+// it had not finished reading. Both halves are pinned here: the second page is
+// fetched, and a page that claims more without handing back a cursor is an
+// unread surface rather than the end of one.
+func TestTheBranchListIsReadToItsEnd(t *testing.T) {
+	calls := stub(t, func(args []string) ([]byte, error) {
+		if args[1] != "graphql" {
+			return []byte(emptySearch), nil
+		}
+		for _, a := range args {
+			if a == "after=CURSOR1" {
+				return []byte(`{"data":{"repository":{"refs":{
+					"pageInfo":{"hasNextPage":false,"endCursor":""},
+					"nodes":[{"name":"space-refresh","target":{"messageHeadline":"x"}}]}}}}`), nil
+			}
+		}
+		return []byte(`{"data":{"repository":{"refs":{
+			"pageInfo":{"hasNextPage":true,"endCursor":"CURSOR1"},
+			"nodes":[{"name":"unrelated","target":{"messageHeadline":"y"}}]}}}}`), nil
+	})
+	code, out, _ := drive(t, "--repo", "go-tex/engine", "space")
+	if code != 1 {
+		t.Fatalf("status %d, want 1 — the branch on the SECOND page was missed\n%s", code, out)
+	}
+	if !strings.Contains(out, "space-refresh") {
+		t.Errorf("the second page was not read:\n%s", out)
+	}
+	graph := 0
+	for _, c := range *calls {
+		if len(c) > 1 && c[1] == "graphql" {
+			graph++
+		}
+	}
+	if graph != 2 {
+		t.Errorf("%d GraphQL calls, want 2 (one per page)", graph)
+	}
+}
+
+func TestMorePagesWithoutACursorIsAnUnreadSurface(t *testing.T) {
+	stub(t, func(args []string) ([]byte, error) {
+		if args[1] != "graphql" {
+			return []byte(emptySearch), nil
+		}
+		return []byte(`{"data":{"repository":{"refs":{
+			"pageInfo":{"hasNextPage":true,"endCursor":""},
+			"nodes":[{"name":"unrelated","target":{"messageHeadline":"y"}}]}}}}`), nil
+	})
+	code, out, _ := drive(t, "--repo", "go-tex/engine", "space")
+	if code != 2 {
+		t.Fatalf("status %d, want 2; a list that could not be finished read as finished\n%s", code, out)
+	}
+	if !strings.Contains(out, "no cursor") {
+		t.Errorf("the reason is not reported:\n%s", out)
+	}
+}
+
 func TestACleanSubjectPasses(t *testing.T) {
 	stub(t, answer)
 	code, out, _ := drive(t, "-repo", "go-tex/engine", "quaternion shading")

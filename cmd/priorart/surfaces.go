@@ -79,13 +79,26 @@ type Branch struct {
 // run. And GraphQL has its own hourly budget, separate from REST (measured when
 // a sweep of mine starved the fleet's Renovate runners), so a gate placed in
 // front of every piece of work does not eat the budget the work itself needs.
-const branchQuery = `query($owner:String!,$name:String!){
+//
+// ⛔ IT PAGINATES, and the reason is a near miss rather than a hypothesis: the
+// first repository this gate was pointed at, go-tex/engine, has 93 branches
+// against the page size of 100. At 101 a `first:100` query would have returned
+// a clean, confident, SEVEN-BRANCH-SHORT answer, and the gate would have opened
+// on the surface it had not finished reading. A cap is only safe when something
+// checks whether it was reached.
+const branchQuery = `query($owner:String!,$name:String!,$after:String){
   repository(owner:$owner,name:$name){
-    refs(refPrefix:"refs/heads/",first:100,orderBy:{field:ALPHABETICAL,direction:ASC}){
+    refs(refPrefix:"refs/heads/",first:100,after:$after,orderBy:{field:ALPHABETICAL,direction:ASC}){
+      pageInfo{ hasNextPage endCursor }
       nodes{ name target{ ... on Commit{ messageHeadline } } }
     }
   }
 }`
+
+// branchPageLimit bounds the pagination. A repository with more than 5000
+// branches is not a case to answer quietly: the surface is reported unread
+// rather than half-read, which holds the gate shut.
+const branchPageLimit = 50
 
 // Branches reports the branches of a repository whose name or head-commit
 // subject carries one of the terms.
@@ -94,47 +107,71 @@ func Branches(repo string, terms []string) ([]Branch, error) {
 	if !ok {
 		return nil, fmt.Errorf("repository %q: want owner/name", repo)
 	}
-	raw, err := gh("api", "graphql",
-		"-f", "query="+branchQuery, "-f", "owner="+owner, "-f", "name="+name)
-	if err != nil {
-		return nil, err
-	}
-	var resp struct {
-		Data struct {
-			Repository *struct {
-				Refs struct {
-					Nodes []struct {
-						Name   string `json:"name"`
-						Target struct {
-							MessageHeadline string `json:"messageHeadline"`
-						} `json:"target"`
-					} `json:"nodes"`
-				} `json:"refs"`
-			} `json:"repository"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, fmt.Errorf("branches of %s: %w", repo, err)
-	}
-	// ⛔ A GraphQL refusal arrives with HTTP 200 and an `errors` array, so the
-	// call "succeeded". Reading past it would turn a refused query into an empty
-	// branch list — a clean gate on a surface never read.
-	if len(resp.Errors) > 0 {
-		return nil, fmt.Errorf("branches of %s refused: %s", repo, resp.Errors[0].Message)
-	}
-	if resp.Data.Repository == nil {
-		return nil, fmt.Errorf("branches of %s: no repository in the answer", repo)
-	}
 	var out []Branch
-	for _, n := range resp.Data.Repository.Refs.Nodes {
-		if h := hit(terms, n.Name, n.Target.MessageHeadline); h != "" {
-			out = append(out, Branch{Name: n.Name, Subject: n.Target.MessageHeadline, Hit: h})
+	after := ""
+	for page := 0; ; page++ {
+		if page >= branchPageLimit {
+			return nil, fmt.Errorf("branches of %s: more than %d, not read to the end",
+				repo, page*100)
 		}
+		args := []string{"api", "graphql",
+			"-f", "query=" + branchQuery, "-f", "owner=" + owner, "-f", "name=" + name}
+		if after != "" {
+			args = append(args, "-f", "after="+after)
+		}
+		raw, err := gh(args...)
+		if err != nil {
+			return nil, err
+		}
+		var resp struct {
+			Data struct {
+				Repository *struct {
+					Refs struct {
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
+						Nodes []struct {
+							Name   string `json:"name"`
+							Target struct {
+								MessageHeadline string `json:"messageHeadline"`
+							} `json:"target"`
+						} `json:"nodes"`
+					} `json:"refs"`
+				} `json:"repository"`
+			} `json:"data"`
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return nil, fmt.Errorf("branches of %s: %w", repo, err)
+		}
+		// ⛔ A GraphQL refusal arrives with HTTP 200 and an `errors` array, so the
+		// call "succeeded". Reading past it would turn a refused query into an
+		// empty branch list — a clean gate on a surface never read.
+		if len(resp.Errors) > 0 {
+			return nil, fmt.Errorf("branches of %s refused: %s", repo, resp.Errors[0].Message)
+		}
+		if resp.Data.Repository == nil {
+			return nil, fmt.Errorf("branches of %s: no repository in the answer", repo)
+		}
+		refs := resp.Data.Repository.Refs
+		for _, n := range refs.Nodes {
+			if h := hit(terms, n.Name, n.Target.MessageHeadline); h != "" {
+				out = append(out, Branch{Name: n.Name, Subject: n.Target.MessageHeadline, Hit: h})
+			}
+		}
+		if !refs.PageInfo.HasNextPage {
+			return out, nil
+		}
+		// A page that says there is more but hands back no cursor cannot be
+		// continued; that is an unread surface, not the end of one.
+		if refs.PageInfo.EndCursor == "" {
+			return nil, fmt.Errorf("branches of %s: more pages, but no cursor to reach them", repo)
+		}
+		after = refs.PageInfo.EndCursor
 	}
-	return out, nil
 }
 
 // An Item is a tracker entry: an issue or a pull request, open or closed.
