@@ -3,9 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/go-gitsafe/gitsafe/issuegate"
 )
 
 // Class is the verdict on one open issue.
@@ -80,19 +81,18 @@ func parseTimeline(raw []byte) ([]event, error) {
 // reference to issueRepo#n. Per GitHub's documented syntax a bare #N means the
 // pull request's own repository; another repository needs owner/name#N.
 func closingRef(body, prRepo, issueRepo string, n int) bool {
-	if body == "" {
-		return false
+	// ⛔ The parser is the merge gate's own (go-gitsafe/gitsafe issuegate), so
+	// the audit and the gate cannot disagree: the keyword must be on the SAME
+	// line, right before the one reference it closes; fenced code, code spans,
+	// HTML comments and URLs are not prose. A private regexp here once let
+	// `\s+` cross newlines, and a heading "## Also filed, not fixed" bound to
+	// a reference two lines below (go-fleettools/fleettools#205).
+	for _, r := range issuegate.Parse(body, prRepo) {
+		if r.Kind == issuegate.Closes && strings.EqualFold(r.Repo, issueRepo) && r.Number == n {
+			return true
+		}
 	}
-	q := regexp.QuoteMeta(issueRepo)
-	alts := []string{
-		q + fmt.Sprintf(`#%d\b`, n),
-		`https://github\.com/` + q + fmt.Sprintf(`/issues/%d\b`, n),
-	}
-	if strings.EqualFold(prRepo, issueRepo) {
-		alts = append(alts, fmt.Sprintf(`#%d\b`, n))
-	}
-	re := regexp.MustCompile(`(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(?:` + strings.Join(alts, "|") + `)`)
-	return re.MatchString(body)
+	return false
 }
 
 // Classify reads one issue's timeline. Pull requests that are not merged are
