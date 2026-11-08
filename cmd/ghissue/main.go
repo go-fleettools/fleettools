@@ -23,7 +23,9 @@
 //	https://docs.github.com/en/rest/issues/comments  POST /repos/{owner}/{repo}/issues/{issue_number}/comments, body field "body"
 //	https://docs.github.com/en/rest/issues/issues    PATCH /repos/{owner}/{repo}/issues/{issue_number}, "state" (open|closed) and "state_reason" (completed|not_planned|duplicate|reopened|null, ignored unless state changes)
 //	                                                 POST /repos/{owner}/{repo}/issues, "title" (required) and "body"; 201 with "number" and "html_url"
-//	https://docs.github.com/en/rest/repos/repos      GET /repos/{owner}/{repo}, "full_name", "html_url", "has_issues"
+//	                                                 PATCH also takes "title" and "body" (read 2026-11-08), which --edit uses
+//	https://docs.github.com/en/rest/issues/labels    POST /repos/{owner}/{repo}/issues/{n}/labels adds (200, returns the labels); DELETE .../labels/{name} removes one (200, 404 if absent, returns the remaining labels) (read 2026-11-08)
+//	https://docs.github.com/en/rest/repos/repos     GET /repos/{owner}/{repo}, "full_name", "html_url", "has_issues"
 package main
 
 import (
@@ -75,6 +77,19 @@ duplicate; GitHub ignores it unless the state changes). --reopen is its inverse.
 Either may be given without a body file, which changes the state and says
 nothing. --dry-run prints the issue and the exact comment and sends nothing.
 
+--edit changes an existing issue instead of commenting on it:
+
+  ghissue <owner/repo> <number> --edit [--title T] [--body-file F]
+          [--add-label L]... [--remove-label L]...
+
+--body-file REPLACES the whole body (the comment path appends a comment; here
+the file is the new body, so start from the current text). It shows the issue
+first, with its labels, and prints the title and labels the API reports after.
+Refused: --edit with --close/--reopen/--reason/--new, nothing to change, a
+label both added and removed, a label to remove that the issue does not carry.
+Adding a label the repository lacks creates it; adding one already present is
+a no-op on GitHub's side.
+
 Exit status: 0 done, 2 refused or failed.`
 
 // newClient is replaced by tests, which need to trust an httptest TLS server.
@@ -106,6 +121,9 @@ func RootCmd() *cobra.Command {
 		doClose  bool
 		doReopen bool
 		doNew    bool
+		doEdit   bool
+		addLab   []string
+		remLab   []string
 	)
 	cmd := &cobra.Command{
 		Use:          "ghissue <owner/repo> <number> | <owner/repo> --new --title <t> --body-file <f>",
@@ -117,12 +135,29 @@ func RootCmd() *cobra.Command {
 			o := opts{
 				base: base, tokFile: tokFile, bodyFile: bodyFile, reason: reason,
 				title: title, dryRun: dryRun, doClose: doClose, doReopen: doReopen,
+				addLabels: addLab, removeLabels: remLab,
+				edit: doEdit,
+			}
+			if doNew && doEdit {
+				return errors.New("--new opens an issue and --edit changes one; give one")
 			}
 			if doNew {
+				if len(addLab)+len(remLab) > 0 {
+					return errors.New("--add-label and --remove-label apply to --edit")
+				}
 				return runNew(cmd, args, o)
 			}
+			if doEdit {
+				if len(args) != 2 {
+					return errors.New("--edit wants <owner/repo> <number>")
+				}
+				return runEdit(cmd, args, o)
+			}
 			if title != "" {
-				return errors.New("--title applies to --new; an existing issue keeps its title")
+				return errors.New("--title applies to --new and --edit; a comment has no title")
+			}
+			if len(addLab)+len(remLab) > 0 {
+				return errors.New("--add-label and --remove-label apply to --edit")
 			}
 			if len(args) != 2 {
 				return errors.New("want <owner/repo> <number>, or --new to open an issue")
@@ -139,13 +174,18 @@ func RootCmd() *cobra.Command {
 	f.BoolVar(&doClose, "close", false, "close the issue after commenting")
 	f.BoolVar(&doReopen, "reopen", false, "reopen the issue after commenting")
 	f.BoolVar(&doNew, "new", false, "open a new issue (with --title and --body-file)")
-	f.StringVar(&title, "title", "", "title of the new issue (--new only)")
+	f.StringVar(&title, "title", "", "title of the new issue (--new) or the new title (--edit)")
+	f.BoolVar(&doEdit, "edit", false, "edit an existing issue: --title, --body-file (REPLACES the body), --add-label, --remove-label")
+	f.StringArrayVar(&addLab, "add-label", nil, "label to add (--edit; repeatable)")
+	f.StringArrayVar(&remLab, "remove-label", nil, "label to remove (--edit; repeatable)")
 	return cmd
 }
 
 type opts struct {
 	base, tokFile, bodyFile, reason, title string
 	dryRun, doClose, doReopen              bool
+	addLabels, removeLabels                []string
+	edit                                   bool
 }
 
 // runNew opens one issue. Everything that can be refused locally is refused
@@ -422,6 +462,9 @@ type issue struct {
 	State   string `json:"state"`
 	Title   string `json:"title"`
 	HTMLURL string `json:"html_url"`
+	Labels  []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
 }
 
 func getIssue(c *http.Client, base, tok, owner, repo string, num int) (issue, error) {
