@@ -1,0 +1,34 @@
+# This repository calling its own reusable floor gate.
+#
+# ⛔ IT EXISTS BECAUSE go-floor.yml HAD NEVER RUN. It shipped in v0.82.0 with
+# actionlint parsing it and its command proven against a planted tree locally,
+# and nothing had ever executed the workflow itself — which is the state this
+# fleet calls "documented, not deployed", and the same gap a planted positive
+# exists to close. A reusable workflow with no caller is a capability nobody has
+# seen work.
+#
+# ⛔ `uses: ./` AND NOT `@main`, deliberately. The local path runs THIS branch's
+# copy of the reusable workflow, so a pull request that breaks it fails its own
+# check; `@main` would run the merged copy and let a broken edit through green.
+# Every OTHER repository should call the `@main` form — the snippet in
+# go-floor.yml's own header — because it wants the reviewed version, not
+# whatever its branch happens to say.
+name: floor
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  floor:
+    # ⛔ The floor is named here rather than defaulted, which is the point of the
+    # input being required: this file is where a reader sees what this repository
+    # is held to, and a bump is a commit somebody reviews. 1.27.3 is the fleet
+    # floor since 2026-10-22 (GO-2026-6809, CVE-2026-111943, crypto/x509).
+    uses: ./.github/workflows/go-floor.yml
+    with:
+      floor: '1.27.3'
