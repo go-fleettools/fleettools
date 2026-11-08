@@ -18,6 +18,10 @@ const (
 	// Lychee runs lychee (the offline mode is the fine one; the detail says
 	// which this is).
 	Lychee Class = "LYCHEE"
+	// Other is another real link checker (landingkit links, markdown-link-check,
+	// muffet, htmltest, linkinator): not the shell loop, so not NONE either --
+	// counting it as NONE would hide that the repository does check links.
+	Other Class = "OTHER"
 	// None has no link-checking job this tool can recognise.
 	None Class = "NONE"
 )
@@ -27,6 +31,7 @@ type Verdict struct {
 	Class   Class
 	Version string   // LINKCHECK: the pinned ref ("unpinned" when there is none)
 	Offline bool     // LYCHEE: --offline was passed
+	Tool    string   // OTHER: which checker
 	Files   []string // the workflow files that matched the class
 	Also    []Class  // other classes present in the same repository
 }
@@ -41,6 +46,7 @@ var (
 	extract = regexp.MustCompile(`grep[^\n]*https?`)
 
 	linkcheckRef = regexp.MustCompile(`fleettools/cmd/linkcheck(?:@([^\s"'\\]+))?`)
+	otherRef     = regexp.MustCompile(`landingkit/cmd/landingkit\s+links|markdown-link-check|\bmuffet\b|\bhtmltest\b|\blinkinator\b`)
 	lycheeWord   = regexp.MustCompile(`\blychee\b`)
 	offlineFlag  = regexp.MustCompile(`--offline\b`)
 	trailingNote = regexp.MustCompile(`\s#\s.*$`)
@@ -74,8 +80,8 @@ func isShell(text string) bool {
 // SHELL > LINKCHECK > LYCHEE > NONE: a repository still carrying the loop is
 // the one to migrate, even if another job already uses linkcheck.
 func Classify(files map[string]string) Verdict {
-	var shell, lc, ly []string
-	version := ""
+	var shell, lc, ly, ot []string
+	version, tool := "", ""
 	offline := false
 	names := make([]string, 0, len(files))
 	for n := range files {
@@ -96,6 +102,18 @@ func Classify(files map[string]string) Verdict {
 				}
 			}
 		}
+		if m := otherRef.FindString(t); m != "" {
+			ot = append(ot, n)
+			if tool == "" {
+				tool = strings.Fields(m)[0]
+				if i := strings.LastIndex(tool, "/"); i >= 0 {
+					tool = tool[i+1:]
+				}
+				if strings.HasPrefix(m, "landingkit") {
+					tool = "landingkit-links"
+				}
+			}
+		}
 		if lycheeWord.MatchString(t) {
 			ly = append(ly, n)
 			if offlineFlag.MatchString(t) {
@@ -104,8 +122,8 @@ func Classify(files map[string]string) Verdict {
 		}
 	}
 	v := Verdict{Class: None}
-	present := map[Class][]string{Shell: shell, Linkcheck: lc, Lychee: ly}
-	for _, c := range []Class{Shell, Linkcheck, Lychee} {
+	present := map[Class][]string{Shell: shell, Linkcheck: lc, Other: ot, Lychee: ly}
+	for _, c := range []Class{Shell, Linkcheck, Other, Lychee} {
 		if len(present[c]) == 0 {
 			continue
 		}
@@ -117,6 +135,9 @@ func Classify(files map[string]string) Verdict {
 	}
 	if v.Class == Linkcheck || containsClass(v.Also, Linkcheck) {
 		v.Version = version
+	}
+	if v.Class == Other || containsClass(v.Also, Other) {
+		v.Tool = tool
 	}
 	v.Offline = offline && (v.Class == Lychee || containsClass(v.Also, Lychee))
 	return v

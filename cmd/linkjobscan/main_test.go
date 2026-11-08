@@ -115,6 +115,32 @@ func TestClassifyEachClassFromRealSnippets(t *testing.T) {
 	}
 }
 
+// The go-fleettools landing's own checker: a Go tool, not the shell loop.
+const landingkitJob = `jobs:
+  links:
+    name: every link and image resolves
+    steps:
+      - name: Check
+        env:
+          GOWORK: "off"
+        run: go run github.com/go-fleettools/landingkit/cmd/landingkit links public
+`
+
+func TestOtherCheckersAreNotNone(t *testing.T) {
+	v := Classify(map[string]string{"links.yml": landingkitJob})
+	if v.Class != Other || v.Tool != "landingkit-links" {
+		t.Fatalf("%+v", v)
+	}
+	v = Classify(map[string]string{"a.yml": "- uses: gaurav-nelson/github-action-markdown-link-check@v1\n  with: markdown-link-check\n"})
+	if v.Class != Other || v.Tool != "markdown-link-check" {
+		t.Fatalf("%+v", v)
+	}
+	v = Classify(map[string]string{"a.yml": linkcheckJob, "b.yml": landingkitJob})
+	if v.Class != Linkcheck || len(v.Also) != 1 || v.Also[0] != Other || v.Tool != "landingkit-links" {
+		t.Fatalf("%+v", v)
+	}
+}
+
 func TestACommentThatQuotesTheOldLoopIsNotTheLoop(t *testing.T) {
 	// linkcheckJob's comment names curl, http_code, while and grep -o http.
 	if v := Classify(map[string]string{"docs.yml": linkcheckJob}); v.Class != Linkcheck {
@@ -229,6 +255,7 @@ func writeInv(t *testing.T) string {
 	 {"org":"go-b","name":"gone"},
 	 {"org":"go-b","name":"ly"},
 	 {"org":"go-b","name":"misc"},
+	 {"org":"go-b","name":"ot"},
 	 {"org":"go-b","name":"old","archived":true}]}`
 	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
@@ -252,6 +279,8 @@ func fakeFleet(batch []string) (map[string]workflows, error) {
 			return nil, errors.New("go-b/gone: not visible to this account")
 		case "go-b/ly":
 			out[r] = workflows{"ci.yml": lycheeOnline}
+		case "go-b/ot":
+			out[r] = workflows{"links.yml": landingkitJob}
 		case "go-b/misc":
 			out[r] = workflows{"a.yml": linkcheckJob, "b.yml": lycheeOnline}
 		case "go-b/old":
@@ -289,8 +318,9 @@ func TestRunBisectsAFailedBatchAndNeverCountsUnreadAsNone(t *testing.T) {
 		"linkcheck@v0.74.0",
 		"LYCHEE    docs     go-b/docs",
 		" offline",
-		"7 repositories listed (inventory of 2026-11-07 11:27), 6 read, 1 UNREAD",
-		"classes: SHELL 1, LINKCHECK 2, LYCHEE 2, NONE 1",
+		"8 repositories listed (inventory of 2026-11-07 11:27), 7 read, 1 UNREAD",
+		"classes: SHELL 1, LINKCHECK 2, LYCHEE 2, OTHER 1, NONE 1",
+		"links.yml landingkit-links",
 		"linkcheck versions: v0.74.0 x2",
 		" online",
 		"(also LYCHEE)",
@@ -331,7 +361,7 @@ func TestRunStatusesAndFlags(t *testing.T) {
 	if code := run(options{inventory: writeInv(t), jobs: 1, batch: 5, owners: []string{"go-b"}, archived: true}, &out, &errb); code != 0 {
 		t.Fatalf("code %d\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "5 repositories listed") {
+	if !strings.Contains(out.String(), "6 repositories listed") {
 		t.Errorf("--archived:\n%s", out.String())
 	}
 }
@@ -365,7 +395,7 @@ func TestABudgetStopMarksTheRestUnreadWithoutBisecting(t *testing.T) {
 	}, okBudget)
 	var out, errb bytes.Buffer
 	code := run(options{inventory: writeInv(t), batch: 10, jobs: 1}, &out, &errb)
-	if code != 2 || calls != 1 || !strings.Contains(out.String(), "0 read, 7 UNREAD") {
+	if code != 2 || calls != 1 || !strings.Contains(out.String(), "0 read, 8 UNREAD") {
 		t.Fatal(code, calls, out.String())
 	}
 }

@@ -316,6 +316,9 @@ func run(o options, stdout, stderr io.Writer) int {
 		if r.v.Version != "" {
 			detail += " linkcheck@" + r.v.Version
 		}
+		if r.v.Tool != "" {
+			detail += " " + r.v.Tool
+		}
 		if r.v.Class == Lychee {
 			if r.v.Offline {
 				detail += " offline"
@@ -343,8 +346,8 @@ func run(o options, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "\n%d repositories listed (inventory of %s), %d read, %d UNREAD\n",
 		len(repos), inv.Taken.Format("2006-01-02 15:04"), len(read), len(unread))
-	fmt.Fprintf(stdout, "classes: SHELL %d, LINKCHECK %d, LYCHEE %d, NONE %d\n",
-		counts[Shell], counts[Linkcheck], counts[Lychee], counts[None])
+	fmt.Fprintf(stdout, "classes: SHELL %d, LINKCHECK %d, LYCHEE %d, OTHER %d, NONE %d\n",
+		counts[Shell], counts[Linkcheck], counts[Lychee], counts[Other], counts[None])
 	var vs []string
 	for v, n := range versions {
 		vs = append(vs, fmt.Sprintf("%s x%d", v, n))
