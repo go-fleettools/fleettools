@@ -144,6 +144,62 @@ func TestClassificationTable(t *testing.T) {
 	}
 }
 
+// The body of go-tex/engine#336, as quoted in #205: the only keyword-like word
+// is "fixed" in "not fixed", in a heading, two lines above the reference.
+const alsoFiledNotFixed = "## Also filed, not fixed\n\ngo-tex/math#22: `delimited()` asks a stretchy delimiter to cover `2*delta1` where TeX asks for less.\nThe rule cannot land until that is found."
+
+// A body shaped like go-richdoc/markdown#18: many headings and reference-shaped
+// text, no closing keyword adjacent to the reference.
+const headingsEverywhere = "### What this fixes\n\n#5 is the parser; o/r#5 is the renderer.\n\n### Resolves nothing yet\n\nSee also #5 and o/r#5.\n\n### Fix list\n\n- o/r#5\n- #6\n"
+
+func TestAKeywordOnAnotherLineDoesNotCloseTheIssue(t *testing.T) {
+	cases := []struct {
+		name string
+		repo string
+		body string
+		want Class
+	}{
+		// the negative controls: none of these may come out CLOSABLE ...
+		{"#205: heading, blank line, bare cross-repo reference", "o/engine", strings.Replace(alsoFiledNotFixed, "go-tex/math#22", "o/r#5", 1), Review},
+		{"heading keyword, reference on the next line", "o/r", "## Fixes\n#5", Review},
+		{"headings and reference-shaped text (markdown#18 shape)", "o/r", headingsEverywhere, Review},
+		{"keyword inside a code span", "o/r", "the `fixes #5` syntax is documented", Review},
+		{"keyword inside a fence", "o/r", "```\nCloses #5\n```", Review},
+		{"keyword inside an HTML comment", "o/r", "<!-- Closes #5 -->", Review},
+		{"only the first of a list closes", "o/r", "Closes #6, #5", Review},
+		{"Refs keeps it open", "o/r", "Refs #5", Review},
+		// ... and the positive controls, so the fix cannot pass by making
+		// everything REVIEW.
+		{"Closes #N on one line", "o/r", "Closes #5", Closable},
+		{"Closes owner/repo#N on one line", "o/other", "Closes o/r#5", Closable},
+		{"keyword after headings still closes", "o/r", headingsEverywhere + "\nFixes #5", Closable},
+		{"colon, same line", "o/other", "## Notes\n\nResolves: o/r#5", Closable},
+	}
+	for _, c := range cases {
+		evs, err := parseTimeline([]byte("[[" + xref(c.repo, 9, mergedAt, c.body) + "]]"))
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got, _ := Classify("o/r", 5, evs); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestACrossReferenceAloneIsNotConnected(t *testing.T) {
+	// The issue's own timeline: one cross-referenced event from a merged PR
+	// whose body does not close it. Without a `connected` event this is REVIEW.
+	evs, _ := parseTimeline([]byte("[[" + xref("o/engine", 9, mergedAt, alsoFiledNotFixed) + "]]"))
+	if got, _ := Classify("o/r", 5, evs); got != Review {
+		t.Fatalf("cross-referenced alone: %q", got)
+	}
+	// A real `connected` event is independent evidence and does close.
+	evs, _ = parseTimeline([]byte(`[[{"event":"connected"},` + xref("o/engine", 9, mergedAt, alsoFiledNotFixed) + `]]`))
+	if got, _ := Classify("o/r", 5, evs); got != Closable {
+		t.Fatalf("connected: %q", got)
+	}
+}
+
 func TestParseTimelineShapes(t *testing.T) {
 	if evs, err := parseTimeline([]byte(`[{"event":"labeled"}]`)); err != nil || len(evs) != 1 {
 		t.Errorf("bare events: %v %v", evs, err)
