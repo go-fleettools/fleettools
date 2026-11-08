@@ -1,6 +1,11 @@
 // Command ghissue posts one comment to a GitHub issue or pull request, and can
 // close or reopen it in the same pass, after showing which issue and which
-// account it is about to speak for.
+// account it is about to speak for. With --new it opens an issue instead.
+//
+// --new exists because `gh issue create` was the one tracker write the fleet
+// had no program for, so on 2026-11-08 three issues were opened by hand while
+// the standing rule said every GitHub write goes through a fleet program. A
+// rule with a hole in its toolbox is followed until the hole is reached.
 //
 // It exists for the same reason bzcomment does, one host over: so a session can
 // write to a tracker without the token ever passing through a URL, an argument
@@ -17,6 +22,8 @@
 //
 //	https://docs.github.com/en/rest/issues/comments  POST /repos/{owner}/{repo}/issues/{issue_number}/comments, body field "body"
 //	https://docs.github.com/en/rest/issues/issues    PATCH /repos/{owner}/{repo}/issues/{issue_number}, "state" (open|closed) and "state_reason" (completed|not_planned|duplicate|reopened|null, ignored unless state changes)
+//	                                                 POST /repos/{owner}/{repo}/issues, "title" (required) and "body"; 201 with "number" and "html_url"
+//	https://docs.github.com/en/rest/repos/repos      GET /repos/{owner}/{repo}, "full_name", "html_url", "has_issues"
 package main
 
 import (
@@ -41,11 +48,20 @@ const (
 	maxBody     = 64 << 10 // bytes read from the body file
 	maxResponse = 1 << 20  // bytes read from any response
 	maxTokFile  = 4 << 10
+	maxTitle    = 256 // GitHub's own limit on an issue title, in characters
 	timeout     = 30 * time.Second
 	apiBase     = "https://api.github.com"
 )
 
 const longHelp = `Posts a comment to a GitHub issue or pull request, and can close or reopen it.
+With --new, opens an issue instead:
+
+  ghissue <owner/repo> --new --title "<title>" --body-file <file>
+
+It shows the repository before sending, refuses one whose issues are turned
+off, and prints the new issue's number and URL as GitHub reports them.
+--new is a flag rather than "leave the number out" on purpose: a forgotten
+number must not turn a comment into a new issue.
 
 The token is read only from a file (default ~/.github-token, which must be a
 regular file readable by its owner alone) and is sent only in the Authorization
@@ -85,21 +101,33 @@ func RootCmd() *cobra.Command {
 		tokFile  string
 		bodyFile string
 		reason   string
+		title    string
 		dryRun   bool
 		doClose  bool
 		doReopen bool
+		doNew    bool
 	)
 	cmd := &cobra.Command{
-		Use:          "ghissue <owner/repo> <number>",
-		Short:        "Post a comment to a GitHub issue, and optionally close or reopen it",
+		Use:          "ghissue <owner/repo> <number> | <owner/repo> --new --title <t> --body-file <f>",
+		Short:        "Comment on, close or reopen a GitHub issue, or open a new one",
 		Long:         longHelp,
-		Args:         cobra.ExactArgs(2),
+		Args:         cobra.RangeArgs(1, 2),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(cmd, args, opts{
+			o := opts{
 				base: base, tokFile: tokFile, bodyFile: bodyFile, reason: reason,
-				dryRun: dryRun, doClose: doClose, doReopen: doReopen,
-			})
+				title: title, dryRun: dryRun, doClose: doClose, doReopen: doReopen,
+			}
+			if doNew {
+				return runNew(cmd, args, o)
+			}
+			if title != "" {
+				return errors.New("--title applies to --new; an existing issue keeps its title")
+			}
+			if len(args) != 2 {
+				return errors.New("want <owner/repo> <number>, or --new to open an issue")
+			}
+			return run(cmd, args, o)
 		},
 	}
 	f := cmd.Flags()
@@ -110,12 +138,128 @@ func RootCmd() *cobra.Command {
 	f.BoolVar(&dryRun, "dry-run", false, "print what would be sent and send nothing")
 	f.BoolVar(&doClose, "close", false, "close the issue after commenting")
 	f.BoolVar(&doReopen, "reopen", false, "reopen the issue after commenting")
+	f.BoolVar(&doNew, "new", false, "open a new issue (with --title and --body-file)")
+	f.StringVar(&title, "title", "", "title of the new issue (--new only)")
 	return cmd
 }
 
 type opts struct {
-	base, tokFile, bodyFile, reason string
-	dryRun, doClose, doReopen       bool
+	base, tokFile, bodyFile, reason, title string
+	dryRun, doClose, doReopen              bool
+}
+
+// runNew opens one issue. Everything that can be refused locally is refused
+// before the token is read, and the repository is shown before the POST: the
+// repository name is the only thing typed that decides who gets notified.
+func runNew(cmd *cobra.Command, args []string, o opts) error {
+	out := cmd.OutOrStdout()
+	if len(args) != 1 {
+		return errors.New("--new takes <owner/repo> only: the number is GitHub's to give")
+	}
+	if o.doClose || o.doReopen || o.reason != "" {
+		return errors.New("--new opens an issue; --close, --reopen and --reason act on an existing one")
+	}
+	owner, repo, err := splitRepo(args[0])
+	if err != nil {
+		return err
+	}
+	title, err := checkTitle(o.title)
+	if err != nil {
+		return err
+	}
+	if o.bodyFile == "" {
+		// An issue with no body is a title nobody can act on; the comment path
+		// refuses an empty body for the same reason.
+		return errors.New("--new needs --body-file: an issue says what and why")
+	}
+	body, err := readBody(o.bodyFile)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(o.base, "https://") && !isTestBase(o.base) {
+		return fmt.Errorf("base %q: must be https", o.base)
+	}
+	tok, err := readToken(o.tokFile)
+	if err != nil {
+		return err
+	}
+	c := newClient()
+
+	r, err := getRepo(c, o.base, tok, owner, repo)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "%s  %s\n", r.FullName, r.HTMLURL)
+	if !r.HasIssues {
+		return fmt.Errorf("%s has issues turned off", r.FullName)
+	}
+	if o.dryRun {
+		fmt.Fprintf(out, "\n-- new issue, NOT sent --\ntitle: %s\n\n%s\n", title, body)
+		return nil
+	}
+	iss, err := postIssue(c, o.base, tok, owner, repo, title, body)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "created: %s#%d %s\n", r.FullName, iss.Number, iss.HTMLURL)
+	return nil
+}
+
+// checkTitle refuses a title GitHub would refuse, and one that spans lines: a
+// newline in a title is a body pasted into the wrong flag.
+func checkTitle(t string) (string, error) {
+	t = strings.TrimSpace(t)
+	switch {
+	case t == "":
+		return "", errors.New("--new needs --title")
+	case strings.ContainsAny(t, "\r\n"):
+		return "", errors.New("--title: one line; the rest belongs in --body-file")
+	case len([]rune(t)) > maxTitle:
+		return "", fmt.Errorf("--title: over %d characters", maxTitle)
+	}
+	return t, nil
+}
+
+type repoInfo struct {
+	FullName  string `json:"full_name"`
+	HTMLURL   string `json:"html_url"`
+	HasIssues bool   `json:"has_issues"`
+}
+
+func getRepo(c *http.Client, base, tok, owner, repo string) (repoInfo, error) {
+	var r repoInfo
+	url := fmt.Sprintf("%s/repos/%s/%s", strings.TrimRight(base, "/"), owner, repo)
+	b, err := do(c, http.MethodGet, url, tok, nil, http.StatusOK)
+	if err != nil {
+		return r, err
+	}
+	if err := json.Unmarshal(b, &r); err != nil {
+		return r, fmt.Errorf("repository: %w", err)
+	}
+	if r.FullName == "" {
+		return r, errors.New("repository: the reply carried no name")
+	}
+	return r, nil
+}
+
+func postIssue(c *http.Client, base, tok, owner, repo, title, body string) (issue, error) {
+	var iss issue
+	payload, err := json.Marshal(map[string]string{"title": title, "body": body})
+	if err != nil {
+		return iss, err
+	}
+	url := fmt.Sprintf("%s/repos/%s/%s/issues", strings.TrimRight(base, "/"), owner, repo)
+	b, err := do(c, http.MethodPost, url, tok, payload, http.StatusCreated)
+	if err != nil {
+		return iss, err
+	}
+	if err := json.Unmarshal(b, &iss); err != nil {
+		return iss, fmt.Errorf("new issue: %w", err)
+	}
+	if iss.Number == 0 || iss.HTMLURL == "" {
+		return iss, errors.New("new issue: accepted with no number or URL, so nothing proves it landed")
+	}
+	return iss, nil
 }
 
 var closeReasons = map[string]bool{"completed": true, "not_planned": true, "duplicate": true}
