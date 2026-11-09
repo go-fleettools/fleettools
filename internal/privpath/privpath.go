@@ -1,0 +1,367 @@
+// Package privpath finds, and redacts, the paths, account names and document
+// names of a person's own file system in text that is about to be published.
+//
+// ⛔⛔ WHY IT EXISTS. On 2026-11-09 three issues were filed on go-tex/engine
+// whose bodies each carried `/Users/<account>/Documents/<project>/<file>.tex` —
+// the reporter's home directory, their account name, their directory layout and
+// the name of a document they had not published. Nobody noticed until the user
+// asked "did you leak my name". Editing the bodies does not undo it: GitHub
+// keeps the original under "edited" for anyone who opens the history, so the
+// only real remedy is to delete and re-create.
+//
+// The prose was accurate and useful; the path was decoration. That is the shape
+// to catch — a citation of WHERE a measurement was taken, on a machine nobody
+// else can reach, where the measurement itself is the content.
+//
+// ⛔ The rule it enforces, in the user's words: "pas de leak de nom ni de
+// chemin/nom de fichier sur un file system utilisateur". Three things, not one —
+// the account name, the path, AND the file name. Redacting only the home prefix
+// leaves `<path elided>/Documents/fairshare-b300/fairshare-b300.tex`, which
+// still publishes the project and the document. Each of the three also has to be
+// caught ON ITS OWN, away from the path that revealed it: the leak had the path
+// in the measurement section and the bare account in a session label below.
+//
+// ⛔ It is a GATE and not a lint, so its default is refusal. Every program that
+// sends a body to a forge asks this package first, before the call, because the
+// cost of a false negative is unrecallable and the cost of a false positive is
+// one flag.
+package privpath
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"regexp"
+)
+
+// Finding is one place a text names a person's own file system.
+type Finding struct {
+	Line  int    // 1-indexed
+	Col   int    // 1-indexed byte column, so an author can find it without being shown it
+	Match string // the exact text matched
+	Kind  string // "home path", "unc path", "account name", "document name"
+	Why   string // what a reader of the refusal needs to know
+}
+
+// String describes the finding WITHOUT reprinting what it found.
+//
+// ⛔ A refusal is printed where the body was going to go, and that is sometimes
+// a CI log on a public repository. A gate against publishing a path must not
+// publish the path in the course of refusing it. The line and column locate it
+// in a file the author already has; Reveal is for a local run that asks.
+func (f Finding) String() string {
+	return fmt.Sprintf("line %d, col %d: %s — %s", f.Line, f.Col, f.Kind, f.Why)
+}
+
+// Reveal is String with the matched text, for a local run on the author's own
+// machine (privscan --show). Never for a log.
+func (f Finding) Reveal() string {
+	return fmt.Sprintf("line %d, col %d: %s (%s) — %s", f.Line, f.Col, f.Match, f.Kind, f.Why)
+}
+
+// homePath matches a home directory with the account name inside it AND the rest
+// of the path after it: the account is the first capture because it identifies a
+// person, the tail is the second because it names their projects and documents.
+//
+// ⛔ The account is required. `/Users/` or `/home/` alone is a convention, not a
+// disclosure — "`/Users/runner` is the GitHub runner's home directory" is a
+// sentence a report may legitimately need, and refusing it would teach the
+// reader to pass the waiver by reflex, which is how a gate stops being one.
+var homePath = regexp.MustCompile(`(?i)(?:/Users|/home|\\Users|C:\\Users)[/\\]([A-Za-z0-9._-]+)((?:[/\\][A-Za-z0-9._-]+)*)`)
+
+// uncPath matches a Windows share, which names a machine as well as a person.
+var uncPath = regexp.MustCompile(`\\\\[A-Za-z0-9._-]+\\([A-Za-z0-9._$-]+)((?:\\[A-Za-z0-9._-]+)*)`)
+
+// genericAccounts are the home-directory names that identify a ROLE rather than
+// a person: a runner, a container, a documentation example. They are the reason
+// the account is captured rather than the prefix matched.
+//
+// ⛔ This list is the gate's only way to be wrong in the safe direction, so it
+// holds names that are generic BY CONSTRUCTION — a CI image's user, root, the
+// placeholders documentation uses — and never a name that merely looks generic.
+// "admin" and "user" are real account names on real machines.
+var genericAccounts = map[string]bool{
+	"runner": true, "root": true, "ubuntu": true, "vagrant": true,
+	"docker": true, "circleci": true, "travis": true, "jenkins": true,
+	"USERNAME": true, "username": true, "you": true, "me": true,
+	"<user>": true, "<name>": true, "example": true, "someone": true,
+}
+
+// genericComponents are path components that say nothing about a person: the
+// directories every account has, and the file names every repository has. A
+// component on this list is still redacted inside a path — the path as a whole
+// is the disclosure — but it is not hunted for on its own, because "Documents"
+// or "README.md" in a sentence is prose.
+var genericComponents = map[string]bool{
+	"Documents": true, "Desktop": true, "Downloads": true, "Library": true,
+	"Projects": true, "Developer": true, "Applications": true, "Public": true,
+	"go": true, "src": true, "bin": true, "lib": true, "pkg": true, "tmp": true,
+	"build": true, "dist": true, "target": true, "vendor": true, "node_modules": true,
+	"localhost": true, "repos": true, "code": true, "work": true, "git": true,
+	"README.md": true, "LICENSE": true, "go.mod": true, "go.sum": true,
+	"main.tex": true, "main.go": true, "Makefile": true, "index.html": true,
+}
+
+// minBareName is the shortest learned component this package will hunt for on
+// its own.
+//
+// ⛔ It exists so the bare-name pass cannot fire on prose. A path teaches it
+// tokens; short ones like "a", "doc" or "out" occur in English sentences, and a
+// gate that refuses those is one its author switches off. Anything shorter than
+// this is still redacted INSIDE its path — only the standalone hunt is skipped.
+const minBareName = 5
+
+// Scan reports every place text names a person's own file system.
+func Scan(text string) []Finding { return ScanKnown(text, nil) }
+
+// Names returns the account, project and document names text discloses through
+// a path, in the form the bare-name pass hunts for.
+//
+// ⛔⛔ IT EXISTS BECAUSE Scan CANNOT BE ITS OWN ORACLE. Scan learns that a word
+// is a name BY READING IT IN A PATH, so once a redaction has removed the path,
+// a surviving bare name is invisible to Scan — re-scanning redacted output
+// reports clean no matter what survived. Measured on 2026-11-09: with the
+// bare-name replacement deliberately disabled, a "nothing left for Scan to find"
+// test stayed GREEN on every body. Whatever checks a redaction must hold the
+// names from BEFORE it.
+func Names(text string) []string {
+	seen := map[string]bool{}
+	var out []string
+	keep := func(n string) {
+		if n == "" || genericAccounts[n] || seen[n] {
+			return
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	// ⛔ An ACCOUNT is hunted at any length, a component only from minBareName
+	// up. The asymmetry is the rule's: the account IS the person's name, so
+	// every occurrence of it is the disclosure the user asked to stop, however
+	// short it is — while a 3-letter directory is a word in English sentences.
+	add := func(n string) {
+		if genericComponents[n] || len(n) < minBareName {
+			return
+		}
+		keep(n)
+	}
+	for _, m := range homePath.FindAllStringSubmatch(text, -1) {
+		if genericAccounts[m[1]] {
+			continue
+		}
+		keep(m[1])
+		for _, c := range strings.Split(m[2], "/") {
+			for _, d := range strings.Split(c, `\`) {
+				add(d)
+			}
+		}
+	}
+	for _, m := range uncPath.FindAllStringSubmatch(text, -1) {
+		keep(strings.TrimSuffix(m[1], "$"))
+		for _, c := range strings.Split(m[2], `\`) {
+			add(c)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Accounts returns only the account names, for a caller that wants to say whose
+// machine a text named.
+func Accounts(text string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range homePath.FindAllStringSubmatch(text, -1) {
+		if a := m[1]; !genericAccounts[a] && !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ScanKnown is Scan with names supplied from outside.
+//
+// ⛔ The fleet sweep needs it: an issue body can name the account or the
+// document with no path anywhere in it — the 2026-11-09 leak had the path in one
+// section and the bare account in a session label further down, and a body
+// holding only the label is exactly as disclosed. A scanner that can only infer
+// names from paths finds nothing in such a body and reports it clean.
+func ScanKnown(text string, known []string) []Finding {
+	var out []Finding
+
+	// name → what the scanner can honestly call it.
+	//
+	// ⛔ A name supplied from outside is labelled "name", not "account name":
+	// the caller said to look for it, not what it is. Guessing the kind from the
+	// text being scanned is what the first version did, and on redacted text —
+	// where every path is already gone — it called every account a "document
+	// name". A refusal that misnames what it holds sends the author looking for
+	// the wrong thing.
+	names := map[string]string{}
+	for _, n := range known {
+		if n != "" && !genericAccounts[n] {
+			names[n] = "name"
+		}
+	}
+
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		for _, loc := range homePath.FindAllStringSubmatchIndex(line, -1) {
+			m := line[loc[0]:loc[1]]
+			account := line[loc[2]:loc[3]]
+			if genericAccounts[account] {
+				continue
+			}
+			for _, n := range Names(m) {
+				if n == account {
+					names[n] = "account name"
+				} else if names[n] == "" {
+					names[n] = "document name"
+				}
+			}
+			out = append(out, Finding{
+				Line: i + 1, Col: loc[0] + 1, Match: m, Kind: "home path",
+				Why: "a home directory names its account holder, their layout and their documents; the measurement is the content, the path is not",
+			})
+		}
+		for _, loc := range uncPath.FindAllStringIndex(line, -1) {
+			m := line[loc[0]:loc[1]]
+			for _, n := range Names(m) {
+				if names[n] == "" {
+					names[n] = "name"
+				}
+			}
+			out = append(out, Finding{
+				Line: i + 1, Col: loc[0] + 1, Match: m, Kind: "unc path",
+				Why: "a Windows share names a machine as well as a person",
+			})
+		}
+	}
+
+	// Second pass: the bare names, now that the paths have said which they are.
+	// A name is only hunted once a path has shown it, so this never guesses at
+	// which words are people or projects.
+	for i, line := range lines {
+		// No length or generic filter here: Names already applied it, and a name
+		// a caller supplied explicitly is one it means. One filter, one place —
+		// two copies of a predicate is how a gate and its fix drift apart.
+		for name, kind := range names {
+			for idx := 0; ; {
+				j := strings.Index(line[idx:], name)
+				if j < 0 {
+					break
+				}
+				at := idx + j
+				idx = at + len(name)
+				// Skip occurrences that sit inside a path already reported on
+				// this line, so one disclosure is not counted twice.
+				if inPath(line, at) {
+					continue
+				}
+				out = append(out, Finding{
+					Line: i + 1, Col: at + 1, Match: name, Kind: kind,
+					Why: "a name from a path, standing on its own",
+				})
+			}
+		}
+	}
+
+	sort.SliceStable(out, func(a, b int) bool {
+		if out[a].Line != out[b].Line {
+			return out[a].Line < out[b].Line
+		}
+		return out[a].Col < out[b].Col
+	})
+	return out
+}
+
+// inPath reports whether the byte at index sits inside a path match.
+func inPath(line string, index int) bool {
+	for _, re := range []*regexp.Regexp{homePath, uncPath} {
+		for _, loc := range re.FindAllStringIndex(line, -1) {
+			if index >= loc[0] && index < loc[1] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Placeholder is what a redaction leaves where a path was.
+//
+// ⛔ It is deliberately not an empty string: a sentence that said "measured on
+// /Users/alice/thesis/main.tex" must still read as a sentence afterwards, or the
+// redaction produces prose nobody can follow and the next person restores the
+// path to make it legible again.
+const Placeholder = "<path elided>"
+
+// NamePlaceholder replaces a bare name, and is distinct from Placeholder
+// because the two read differently in a sentence: one stood where a location
+// was, the other where a person or a document was.
+const NamePlaceholder = "<name elided>"
+
+// Redact rewrites text with every finding replaced, and reports how many.
+//
+// ⛔ It is a SEPARATE act from Scan, and both exist because neither is enough:
+// scanning without redacting leaves the author to edit prose by hand at the
+// moment they are most impatient, and redacting without scanning hides what was
+// there. The count is returned so a caller can say what it changed rather than
+// claim it was clean.
+//
+// ⛔⛔ IT MUST REMOVE EVERYTHING ScanKnown REFUSES, bare names included. The
+// first version replaced the paths only, which made the gate and its fix
+// disagree: `privscan --fix` would rewrite the body, the gate would refuse the
+// result over the account name still in a session label, and the author — who
+// had just run the fix — would reach for the waiver believing the gate broken.
+// TestRedactLeavesNothingToFind is that contract, and it is checked against the
+// names from before the redaction, because Scan goes blind once the path is
+// gone.
+func Redact(text string) (string, int) { return RedactKnown(text, nil) }
+
+// RedactKnown is Redact with names supplied from outside, so that the fix
+// covers exactly what ScanKnown refuses.
+func RedactKnown(text string, known []string) (string, int) {
+	n := 0
+	names := map[string]bool{}
+	for _, k := range known {
+		if k != "" && !genericAccounts[k] {
+			names[k] = true
+		}
+	}
+
+	out := homePath.ReplaceAllStringFunc(text, func(m string) string {
+		if sub := homePath.FindStringSubmatch(m); len(sub) > 1 && genericAccounts[sub[1]] {
+			return m
+		}
+		for _, k := range Names(m) {
+			names[k] = true
+		}
+		n++
+		return Placeholder
+	})
+	out = uncPath.ReplaceAllStringFunc(out, func(m string) string {
+		for _, k := range Names(m) {
+			names[k] = true
+		}
+		n++
+		return Placeholder
+	})
+
+	// The bare names, now that the paths have said which they are. Longest
+	// first, so a name that contains another is not half-replaced — the leak's
+	// own path held both `fairshare-b300` and `fairshare-b300.tex`.
+	ordered := make([]string, 0, len(names))
+	for k := range names {
+		ordered = append(ordered, k)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return len(ordered[i]) > len(ordered[j]) })
+	for _, k := range ordered {
+		if c := strings.Count(out, k); c > 0 {
+			out = strings.ReplaceAll(out, k, NamePlaceholder)
+			n += c
+		}
+	}
+	return out, n
+}
