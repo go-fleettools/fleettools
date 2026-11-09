@@ -23,12 +23,16 @@ func tree(t *testing.T, files map[string]string) string {
 	return root
 }
 
+// keepPats is the live-address exemption every classify() call carries, so the
+// default test classifier matches how the real sweep is run.
+var keepPats = []string{"ghcr.io/go-pkgx"}
+
 func classify(line string, codeVars ...string) []finding {
 	vars := map[string]bool{}
 	for _, v := range codeVars {
 		vars[v] = true
 	}
-	c := newClassifier("go-pkgx", "go-zpkg", []string{"pkgxdev", "pkgx.sh"}, vars)
+	c := newClassifier("go-pkgx", "go-zpkg", []string{"pkgxdev", "pkgx.sh"}, keepPats, vars)
 	return c.classifyLine("README.md", 1, line)
 }
 
@@ -104,6 +108,59 @@ func TestTheCodeDecidesAboutAnEnvironmentVariable(t *testing.T) {
 	}
 	if v := byText["PKGX_TARGET"].Verdict; v != citation {
 		t.Errorf("PKGX_TARGET is %s, want CITATION — the code still reads it", v)
+	}
+}
+
+// TestALiveAddressCarryingTheOldNameIsKept is the regression for a rewrite that
+// would have been DESTRUCTIVE.
+//
+// ⛔⛔ Every repository followed the `go-pkgx` → `go-zpkg` transfer; GitHub's
+// container packages are org-scoped and did NOT. Every bottle the project has
+// published still lives at `ghcr.io/go-pkgx/packages`. Renaming
+// `bottle.DistBase` on the assumption that packages follow a transfer is what
+// shipped an EMPTY registry in v0.64.0 through v0.68.0 — so an address can
+// carry the old name and be the live one, and nothing in its spelling says
+// which.
+//
+// It is reported as a CITATION with its own kind rather than dropped: an
+// exemption nobody can see is how the next person re-proposes the same rewrite.
+func TestALiveAddressCarryingTheOldNameIsKept(t *testing.T) {
+	for _, line := range []string{
+		`ARG DIST=oci://ghcr.io/go-pkgx/packages`,
+		`  ZPKG_DIST: oci://ghcr.io/go-pkgx/packages`,
+		`installed from <code>oci://ghcr.io/go-pkgx/packages</code>`,
+	} {
+		got := classify(line)
+		if len(got) == 0 {
+			t.Fatalf("%q: no finding at all", line)
+		}
+		for _, f := range got {
+			if f.Verdict != citation {
+				t.Errorf("%q: %s %+v — rewriting this empties the registry", line, f.Verdict, f)
+			}
+		}
+		if !strings.Contains(got[0].Kind, "--keep") {
+			t.Errorf("%q: the exemption is not visible in the kind: %q", line, got[0].Kind)
+		}
+	}
+}
+
+// TestKeepDoesNotSwallowAStaleAddressBesideIt: the exemption is a substring
+// match, so it must cover only its own span.
+func TestKeepDoesNotSwallowAStaleAddressBesideIt(t *testing.T) {
+	line := `pull from oci://ghcr.io/go-pkgx/packages, source at github.com/go-pkgx/zbk`
+	var sawKeep, sawStale bool
+	for _, f := range classify(line) {
+		if f.Verdict == citation && strings.Contains(f.Kind, "--keep") {
+			sawKeep = true
+		}
+		if f.Verdict == stale && f.Suggest == "github.com/go-zpkg/zbk" {
+			sawStale = true
+		}
+	}
+	if !sawKeep || !sawStale {
+		t.Errorf("keep=%v stale=%v — the live registry and the dead source link must be told apart on one line: %+v",
+			sawKeep, sawStale, classify(line))
 	}
 }
 
@@ -207,7 +264,7 @@ func TestOnlyDocumentationIsRead(t *testing.T) {
 		".git/config":    "url = github.com/go-pkgx/zbk",
 		"docs/page.html": "<p>go-pkgx/zbk</p>",
 	})
-	c := newClassifier("go-pkgx", "go-zpkg", nil, nil)
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil)
 	found, files, err := scanTree(root, c)
 	if err != nil {
 		t.Fatal(err)
@@ -227,7 +284,7 @@ func TestOnlyDocumentationIsRead(t *testing.T) {
 // that failed left an empty directory and the first sweep reported it clean.
 func TestATreeWithNoDocumentationSaysSo(t *testing.T) {
 	var out, errb bytes.Buffer
-	code := run(&out, &errb, "go-pkgx", "go-zpkg", nil, nil, false, true,
+	code := run(&out, &errb, "go-pkgx", "go-zpkg", nil, nil, nil, false, true,
 		[]string{t.TempDir()})
 	if code != 0 {
 		t.Fatalf("exit %d, want 0", code)
@@ -245,7 +302,7 @@ func TestATreeWithNoDocumentationSaysSo(t *testing.T) {
 func TestQuietPrintsCountsAndStillFails(t *testing.T) {
 	root := tree(t, map[string]string{"README.md": "github.com/go-pkgx/zbk\n"})
 	var out, errb bytes.Buffer
-	if code := run(&out, &errb, "go-pkgx", "go-zpkg", nil, nil, false, true, []string{root}); code != 1 {
+	if code := run(&out, &errb, "go-pkgx", "go-zpkg", nil, nil, nil, false, true, []string{root}); code != 1 {
 		t.Fatalf("exit %d with --quiet, want 1", code)
 	}
 	if strings.Contains(out.String(), "STALE  ") {
@@ -261,14 +318,14 @@ func TestQuietPrintsCountsAndStillFails(t *testing.T) {
 func TestCitationsAreCountedButNotListedUnlessAsked(t *testing.T) {
 	root := tree(t, map[string]string{"README.md": "pkgxdev/pantry\n"})
 	var out, errb bytes.Buffer
-	if code := run(&out, &errb, "go-pkgx", "go-zpkg", []string{"pkgxdev"}, nil, false, false, []string{root}); code != 0 {
+	if code := run(&out, &errb, "go-pkgx", "go-zpkg", []string{"pkgxdev"}, nil, nil, false, false, []string{root}); code != 0 {
 		t.Fatalf("exit %d, want 0 — a citation is not drift (%s)", code, out.String())
 	}
 	if strings.Contains(out.String(), "CITATION pkgxdev") {
 		t.Errorf("a citation was listed without --show-citations:\n%s", out.String())
 	}
 	out.Reset()
-	run(&out, &errb, "go-pkgx", "go-zpkg", []string{"pkgxdev"}, nil, true, false, []string{root})
+	run(&out, &errb, "go-pkgx", "go-zpkg", []string{"pkgxdev"}, nil, nil, true, false, []string{root})
 	if !strings.Contains(out.String(), "CITATION") {
 		t.Errorf("--show-citations listed nothing:\n%s", out.String())
 	}
@@ -286,7 +343,7 @@ func TestEveryRequiredFlagIsNamed(t *testing.T) {
 		{"go-pkgx", "go-zpkg", nil, "at least one directory"},
 	} {
 		var out, errb bytes.Buffer
-		if code := run(&out, &errb, tc.old, tc.new, nil, nil, false, false, tc.dirs); code != 2 {
+		if code := run(&out, &errb, tc.old, tc.new, nil, nil, nil, false, false, tc.dirs); code != 2 {
 			t.Errorf("%+v: exit %d, want 2", tc, code)
 		}
 		if !strings.Contains(errb.String(), tc.want) {
@@ -298,7 +355,7 @@ func TestEveryRequiredFlagIsNamed(t *testing.T) {
 // TestAnUnreadableTreeIsAnError, not an empty result.
 func TestAnUnreadableTreeIsAnError(t *testing.T) {
 	var out, errb bytes.Buffer
-	code := run(&out, &errb, "go-pkgx", "go-zpkg", nil, nil, false, false,
+	code := run(&out, &errb, "go-pkgx", "go-zpkg", nil, nil, nil, false, false,
 		[]string{filepath.Join(t.TempDir(), "no-such-tree")})
 	if code != 2 {
 		t.Errorf("exit %d, want 2 (%s)", code, errb.String())
@@ -317,7 +374,7 @@ func TestAnUnreadableFileIsAnError(t *testing.T) {
 	if _, err := os.ReadFile(p); err == nil {
 		t.Skip("running as a user that can read a 0000 file")
 	}
-	c := newClassifier("go-pkgx", "go-zpkg", nil, nil)
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil)
 	if _, _, err := scanTree(root, c); err == nil {
 		t.Error("an unreadable document passed as a clean read")
 	}
