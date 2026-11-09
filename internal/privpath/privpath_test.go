@@ -245,6 +245,41 @@ func TestTheFalsePositivesASweepMeasured(t *testing.T) {
 		t.Error("a real UNC path is no longer found")
 	}
 
+	// (2b) Shared, not personal: measured in go-tex/engine#715. And the
+	// placeholders a package manager's own issues use — the test is whether a
+	// name points at a PERSON, not whether some machine has that account.
+	for _, clean := range []string{
+		"built under /Users/Shared/axc/work by the agent",
+		"the key is at /home/user/.ssh/id_rsa",
+		"/home/admin/data.db is the default",
+		"/home/linuxbrew/.linuxbrew/bin is on PATH",
+	} {
+		if got := Scan(clean); len(got) != 0 {
+			t.Errorf("a path naming nobody was refused: %q → %v", clean, got)
+		}
+	}
+
+	// (2c) KEYBOARD KEYS. Measured in go-widgets/toolkit#495 and #421: a
+	// case-insensitive pattern read `Home/End/Space` as the home directory of a
+	// person called End, and then hunted "End" through the body.
+	for _, keys := range []string{
+		"the widget handles Home/End/Space and the arrows",
+		"Home/End move the caret",
+		"bind Page Up, Home/End/Tab",
+	} {
+		if got := Scan(keys); len(got) != 0 {
+			t.Errorf("a list of keyboard keys was read as a home directory: %q → %v", keys, got)
+		}
+	}
+	// … while the real spellings still match.
+	for _, real := range []string{
+		"/Users/alicia/x", "/home/alicia/x", `C:\Users\alicia\x`, `c:\users\alicia\x`,
+	} {
+		if got := Scan(real); len(got) == 0 {
+			t.Errorf("a real home path stopped matching: %q", real)
+		}
+	}
+
 	// (3) A one- or two-character name is never hunted bare, whatever taught it.
 	// One such name produced 276 of the sweep's 509 findings.
 	if got := Scan("/home/ab/x\nab initio, absolutely, a b\n"); len(got) != 1 {

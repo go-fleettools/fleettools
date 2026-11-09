@@ -76,7 +76,14 @@ func (f Finding) Reveal() string {
 // alone produced 38 findings: the tool's prefix taken for an account, and every
 // package name along the path hunted as that person's document. No account name
 // starts with a dot; a dotted first component is a tool's directory.
-var homePath = regexp.MustCompile(`(?i)(?:/Users|/home|\\Users|C:\\Users)[/\\]([A-Za-z0-9][A-Za-z0-9._-]*)((?:[/\\][A-Za-z0-9._-]+)*)`)
+// ⛔ CASE MATTERS, and a blanket (?i) cost five more false positives. Measured
+// 2026-11-09 in go-widgets/toolkit#495 and #421: `Home/End/Space` — a list of
+// KEYBOARD KEYS — matched as the home directory of a person called `End`, and
+// `End` was then hunted bare through those bodies. `/home` is lowercase on every
+// Unix and `/Users` is capitalised on macOS; only the Windows spelling is
+// genuinely case-insensitive, so only it is folded. The loss is `/HOME/x` and
+// macOS's case-insensitive `/users/x`, which nobody writes.
+var homePath = regexp.MustCompile(`(?:/Users|/home|(?:[A-Za-z]:)?\\(?i:Users))[/\\]([A-Za-z0-9][A-Za-z0-9._-]*)((?:[/\\][A-Za-z0-9._-]+)*)`)
 
 // uncPath matches a Windows share, which names a machine as well as a person.
 //
@@ -99,15 +106,32 @@ var uncPath = regexp.MustCompile(`\\\\[A-Za-z0-9._-]{3,}\\([A-Za-z0-9._$-]{2,})(
 // a person: a runner, a container, a documentation example. They are the reason
 // the account is captured rather than the prefix matched.
 //
-// ⛔ This list is the gate's only way to be wrong in the safe direction, so it
-// holds names that are generic BY CONSTRUCTION — a CI image's user, root, the
-// placeholders documentation uses — and never a name that merely looks generic.
-// "admin" and "user" are real account names on real machines.
+// ⛔ THE TEST IS IDENTIFIABILITY, NOT EXISTENCE. An earlier version of this
+// comment refused to list "user" and "admin" on the grounds that they are real
+// account names on real machines — which is true and measures the wrong thing.
+// The harm this package exists to prevent is a text naming WHO someone is;
+// `/home/user` and `/home/admin` name nobody, so publishing one discloses
+// nothing, whether or not a machine somewhere has that account. What the list
+// may not hold is a name that merely looks conventional while still pointing at
+// a person.
+//
+// ⛔ Its cost, stated: a generic account's path is skipped WHOLE, so a document
+// name in the tail (`/home/user/Documents/thesis.tex`) goes unreported too. That
+// is the deliberate trade — reporting the tail of every such path is what made
+// one sweep produce 38 findings on a single body of package names.
 var genericAccounts = map[string]bool{
+	// CI images and containers.
 	"runner": true, "root": true, "ubuntu": true, "vagrant": true,
 	"docker": true, "circleci": true, "travis": true, "jenkins": true,
+	"ec2-user": true, "azureuser": true, "pi": true, "nobody": true,
+	// Placeholders documentation uses.
 	"USERNAME": true, "username": true, "you": true, "me": true,
 	"<user>": true, "<name>": true, "example": true, "someone": true,
+	"user": true, "admin": true, "Administrator": true,
+	"test": true, "demo": true,
+	// Shared, not personal. Measured 2026-11-09: `/Users/Shared/axc/work`, in
+	// go-tex/engine#715, is macOS's directory for everyone on the machine.
+	"Shared": true, "Guest": true, "linuxbrew": true, "homebrew": true,
 }
 
 // genericComponents are path components that say nothing about a person: the
