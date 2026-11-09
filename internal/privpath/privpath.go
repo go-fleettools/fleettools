@@ -207,10 +207,26 @@ func Names(text string) []string {
 			continue
 		}
 		keep(m[1])
-		for _, c := range strings.Split(m[2], "/") {
-			for _, d := range strings.Split(c, `\`) {
-				add(d)
+		// ⛔ NOTHING UNDER A DOT-DIRECTORY IS HUNTED BARE. A component beginning
+		// with a dot is a TOOL's directory, and everything below it belongs to
+		// that tool's layout, not to the person. Measured 2026-11-09 on the one
+		// text in the fleet that really did disclose this machine:
+		// go-zpkg/packages#128 carried `/Users/<account>/.pkgx/llvm.org/v22.1.8/
+		// bin/clang-22`, and hunting its tail bare produced seven further
+		// findings for `llvm.org` and `v22.1.8` — public package coordinates,
+		// named six times in prose that IS the report. Redacting those would have
+		// left a bug report nobody can read, which is the failure Placeholder's
+		// comment warns about, applied to the very issue this package exists for.
+		//
+		// The path as a whole is still redacted, so the account is still
+		// protected. The cost, stated: a genuinely private document under a
+		// dot-directory (`~/.config/notes.md`) is caught in its path but not on
+		// its own.
+		for _, c := range strings.FieldsFunc(m[2], func(r rune) bool { return r == '/' || r == '\\' }) {
+			if strings.HasPrefix(c, ".") {
+				break
 			}
+			add(c)
 		}
 	}
 	for _, m := range uncPath.FindAllStringSubmatch(text, -1) {

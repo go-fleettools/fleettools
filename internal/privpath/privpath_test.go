@@ -280,6 +280,31 @@ func TestTheFalsePositivesASweepMeasured(t *testing.T) {
 		}
 	}
 
+	// (2d) THE ONE TEXT IN THE FLEET THAT REALLY DID DISCLOSE THIS MACHINE,
+	// go-zpkg/packages#128. The path is the finding; `llvm.org` and `v22.1.8`
+	// below the dot-directory are public package coordinates, named six times in
+	// the prose that IS the report. Redacting those leaves a bug report nobody
+	// can read — the failure Placeholder's comment warns about, applied to the
+	// very issue this package exists for.
+	body := "clang from llvm.org crashes\n\n" +
+		"`/Users/alicia/.pkgx/llvm.org/v22.1.8/bin/clang-22` returns 139\n\n" +
+		"llvm.org ships v22.1.8 with that assertion; llvm.org's own tracker has it\n"
+	got := Scan(body)
+	if len(got) != 1 {
+		t.Errorf("want the path alone, got %d: %v", len(got), got)
+	}
+	fixed, n := Redact(body)
+	if n != 1 {
+		t.Errorf("Redact changed %d things, want 1", n)
+	}
+	if strings.Contains(fixed, "alicia") {
+		t.Errorf("the account survived: %q", fixed)
+	}
+	// Three of the four, the fourth having been inside the elided path.
+	if strings.Count(fixed, "llvm.org") != 3 {
+		t.Errorf("the redaction ate the report's subject: %q", fixed)
+	}
+
 	// (3) A one- or two-character name is never hunted bare, whatever taught it.
 	// One such name produced 276 of the sweep's 509 findings.
 	if got := Scan("/home/ab/x\nab initio, absolutely, a b\n"); len(got) != 1 {
