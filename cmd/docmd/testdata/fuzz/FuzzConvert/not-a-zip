@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("just some text, not a zip")
