@@ -31,13 +31,13 @@ func runEdit(cmd *cobra.Command, args []string, o opts) error {
 	}
 	var title string
 	if o.title != "" {
-		if title, err = checkTitle(o.title); err != nil {
+		if title, err = checkTitle(o.title, o.waiver); err != nil {
 			return err
 		}
 	}
 	var body string
 	if o.bodyFile != "" {
-		if body, err = readBody(o.bodyFile); err != nil {
+		if body, err = readBody(o.bodyFile, o.waiver); err != nil {
 			return err
 		}
 	}
