@@ -19,7 +19,17 @@
 // A rule that has to be remembered at exactly that instant is not a control. So
 // the check sits in FRONT of the work and exits non-zero.
 //
-// It reads the two surfaces every repository has:
+// ⛔⛔ AND A THIRD SURFACE, because two were not enough. On 2026-11-08 the gate
+// ran as written on go-tex/go-tex.github.io, reported clean, and was right to:
+// go-widgets/toolkit — a module that repository already imports, at the very
+// version it pinned — had carried `FileTree` since toolkit#498, a complete
+// Explorer with create, rename, delete, move, import, inline name validation
+// and a context menu. A "New file" button was written anyway and closed
+// unmerged once a human said *there must already be one*. Nothing about a
+// consumer's own tracker or branches can contain a widget that lives upstream:
+// "has this been done?" has two halves, and only one is about this repository.
+//
+// It reads the surfaces a repository has:
 //
 //   - BRANCHES, by name AND by head-commit subject. A branch is often named for
 //     its mechanism and its commit for the symptom: `unrounded-space` answers
@@ -55,16 +65,34 @@ var repos = fleet.Repos
 
 const longHelp = `Refuses work on a subject a repository has already covered.
 
-It reads two surfaces and exits 1 if either carries anything:
+It reads three surfaces and exits 1 if any carries anything:
 
   BRANCHES          by name AND by head-commit subject — a branch is often
                     named for its mechanism and its commit for the symptom.
                     A pushed branch with no pull request is invisible work.
   ISSUES AND PRs    open and CLOSED. A closed "not merged, and here is why"
                     is the most valuable prior art there is.
+  DEPENDENCIES      the EXPORTED SURFACE of the fleet modules this module
+                    already requires — a declared type, function or method
+                    whose NAME carries a term, in the version MVS selected.
 
   priorart -repo go-tex/engine "running head"
   priorart -org go-tex "running head"        # tracker across the whole org
+  priorart -deps "file manager"              # the modules we already import
+  priorart -deps=../playground "file tree"   # another module's build list
+
+⛔ BEFORE WRITING A COMPONENT, ASK -deps. Nothing in a consumer's own tracker
+or branches can hold a widget that lives upstream, and on 2026-11-08 that gap
+cost a re-implementation: go-widgets/toolkit had carried FileTree — create,
+rename, delete, move, import, inline validation, a context menu — since
+toolkit#498, in the very version go-tex's playground pinned. The two surfaces
+above reported clean and were right to. Run against that repository, -deps
+names FileTree, BeginRename, AskDelete and FileRename.
+
+-deps needs no network for the surface itself (it parses the module cache) but
+one call to list the organisations this account belongs to, which is what tells
+our modules from a stranger's named go-something. -deps-all skips that and
+reads every module in the build list.
 
 ⛔ GIVE THE DISTINCTIVE NAME, NOT A SENTENCE. Measured on go-tex/engine:
 "@themark" returns ONE entry — the issue that holds the work — while
@@ -96,6 +124,8 @@ func RootCmd() *cobra.Command {
 		branches  bool
 		report    bool
 		limit     int
+		deps      string
+		depsAll   bool
 	)
 	cmd := cli.New("priorart <subject>",
 		"Refuse work on a subject a repository has already covered", longHelp)
@@ -104,27 +134,33 @@ func RootCmd() *cobra.Command {
 		if cli.HelpRequested(cmd) {
 			return nil
 		}
-		return run(cmd.OutOrStdout(), args[0], repoFlags, org, branches, report, limit)
+		return run(cmd.OutOrStdout(), args[0], repoFlags, org, branches, report, limit, deps, depsAll)
 	}
 	f := cmd.Flags()
 	f.StringArrayVar(&repoFlags, "repo", nil, "repository to read, owner/name (repeatable)")
 	f.StringVar(&org, "org", "", "read the tracker of a whole organisation in one call")
 	f.BoolVar(&branches, "branches", false, "with -org, also read every repository's branches (one call each)")
 	f.BoolVar(&report, "report", false, "print the findings and exit 0 even so")
+	// ⛔ A string with NoOptDefVal, not a bool: `-deps` alone means the module
+	// here, and `-deps ../playground` names another one. A bool plus a second
+	// flag for the directory would let the two disagree.
+	f.StringVar(&deps, "deps", "", "also read the EXPORTED SURFACE of the fleet modules this module requires (default: .)")
+	f.Lookup("deps").NoOptDefVal = "."
+	f.BoolVar(&depsAll, "deps-all", false, "with -deps, read every module in the build list, not only the fleet's")
 	// IntVarP, as `brief` does: a one-letter name has to be its own shorthand,
 	// or pflag reads `-n` as a shorthand it does not know and refuses the line.
 	f.IntVarP(&limit, "n", "n", 10, "show at most this many tracker entries per search (0: all)")
 	return cmd
 }
 
-func run(w io.Writer, subject string, repoFlags []string, org string, withBranches, report bool, limit int) error {
+func run(w io.Writer, subject string, repoFlags []string, org string, withBranches, report bool, limit int, deps string, depsAll bool) error {
 	terms := Terms(subject)
 	if len(terms) == 0 {
 		return cli.Unanswerable("subject %q holds no word to search for", subject)
 	}
 	fmt.Fprintf(w, "subject %q → terms %s\n", subject, strings.Join(terms, ", "))
 
-	rs, err := resolve(repoFlags, org, withBranches)
+	rs, err := resolve(repoFlags, org, withBranches, deps)
 	if err != nil {
 		return cli.Wrap(err)
 	}
@@ -211,6 +247,49 @@ func run(w io.Writer, subject string, repoFlags []string, org string, withBranch
 		fmt.Fprintf(w, "   %s branches: NOT read — pass -branches, or name it with -repo\n", r)
 	}
 
+	if rs.deps != "" {
+		r, err := depSurface(rs.deps, terms, depsAll)
+		if err != nil {
+			unread++
+			fmt.Fprintf(w, "\n⛔ the build list of %s was NOT READ, so it has disproved nothing: %v\n", rs.deps, err)
+		} else {
+			if len(r.Hits) > 0 {
+				found++
+				fmt.Fprintf(w, "\n⛔ %d exported declaration(s) in %d module(s) you ALREADY REQUIRE cover this subject:\n",
+					len(r.Hits), r.Read)
+				shown := r.Hits
+				if limit > 0 && len(shown) > limit {
+					shown = shown[:limit]
+				}
+				for _, h := range shown {
+					fmt.Fprintf(w, "    %-34s %-9s %-10s %s.%s\n",
+						h.Module+"@"+h.Version, "("+h.Term+")", h.Kind, h.Pkg, h.Name)
+				}
+				if rest := len(r.Hits) - len(shown); rest > 0 {
+					fmt.Fprintf(w, "    … and %d more (shown: %d of %d; raise with -n)\n", rest, len(shown), len(r.Hits))
+				}
+				// ⛔ The version is printed because "it exists upstream" and "it
+				// exists in the version you depend on" are different answers,
+				// and only the second one can be called today.
+				fmt.Fprintln(w, "   ⚠ These are the versions THIS module selected: you can call them now.")
+			} else {
+				fmt.Fprintf(w, "   %d module(s) you require: no exported declaration carries this subject\n", r.Read)
+			}
+			// ⛔ Named one by one, and counted as unread even when there are
+			// hits: a module whose surface was not read has disproved nothing
+			// about itself, so "found something AND did not finish looking" is
+			// the honest state rather than a result.
+			for _, u := range r.Unread {
+				unread++
+				fmt.Fprintf(w, "   ⛔ NOT READ: %s\n", u)
+			}
+			if len(r.Unread) > 0 {
+				fmt.Fprintf(w, "   ⚠ %d of %d selected module(s) were not read; `go mod download` then run again\n",
+					len(r.Unread), r.Read+len(r.Unread))
+			}
+		}
+	}
+
 	fmt.Fprintln(w)
 	switch {
 	case report:
@@ -243,10 +322,14 @@ type targets struct {
 	tracker        []string
 	branches       []string
 	unreadBranches []string
+	// deps is the module directory whose build list to read, or "" for not
+	// asked. It is a surface like the other two: unreadable holds the gate shut.
+	deps string
 }
 
-func resolve(repoFlags []string, org string, withBranches bool) (targets, error) {
+func resolve(repoFlags []string, org string, withBranches bool, deps string) (targets, error) {
 	var t targets
+	t.deps = deps
 	for _, r := range repoFlags {
 		if strings.Count(r, "/") != 1 || strings.HasPrefix(r, "/") || strings.HasSuffix(r, "/") {
 			return t, cli.Unanswerable("repository %q: want owner/name", r)
@@ -278,8 +361,8 @@ func resolve(repoFlags []string, org string, withBranches bool) (targets, error)
 			}
 		}
 	}
-	if len(t.tracker) == 0 && len(t.branches) == 0 && org == "" {
-		return t, cli.Unanswerable("no repository: pass -repo owner/name or -org name")
+	if len(t.tracker) == 0 && len(t.branches) == 0 && org == "" && deps == "" {
+		return t, cli.Unanswerable("no surface: pass -repo owner/name, -org name or -deps")
 	}
 	sort.Strings(t.branches)
 	sort.Strings(t.unreadBranches)
