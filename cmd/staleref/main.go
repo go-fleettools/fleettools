@@ -145,7 +145,19 @@ func newClassifier(old, new string, upstream []string, codeVars map[string]bool)
 		c.upstrRE = regexp.MustCompile(`(?:` + strings.Join(alts, "|") + `)`)
 	}
 	c.envVar = regexp.MustCompile(`\$?\b` + strings.ToUpper(stem) + `_[A-Z0-9_]+\b`)
-	c.bareOld = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(stem))
+	// ⛔⛔ WORD BOUNDARIES, BECAUSE THE NEW NAME CONTAINS THE OLD ONE. `pkgx`
+	// became `zpkgx`, so a stem match with no boundary fires on every mention
+	// of the CURRENT tool — and that was most of the UNSURE findings in the
+	// first sweep: 137 in the zpkgx repository, 124 in zbk's README, 38 in
+	// zpkgm, nearly all of them lines that are already correct. A report whose
+	// bulk is the thing it is checking FOR is one nobody reads
+	// (`a-sweep-that-measured-its-own-regex`).
+	//
+	// A boundary on both sides is exactly right here: `zpkgx` has a word
+	// character before the stem so it does not match, `go-pkgx` has a hyphen so
+	// it does, and `pkgxdev` has a word character after it — which upstream
+	// covers anyway, but it would be wrong to call it a bare name regardless.
+	c.bareOld = regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(stem) + `\b`)
 	return c
 }
 

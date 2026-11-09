@@ -158,6 +158,28 @@ func TestTheNameInProseIsNotRewritten(t *testing.T) {
 	}
 }
 
+// TestTheNewNameIsNotTheOldOne, which is not as obvious as it sounds.
+//
+// ⛔⛔ `pkgx` became `zpkgx`: the new name CONTAINS the old stem. Without a word
+// boundary the check fires on every mention of the current tool, and that was
+// most of the first sweep's UNSURE findings — 137 in the zpkgx repository, 124
+// in zbk's README, 38 in zpkgm, nearly all of them lines that are already
+// right. A report whose bulk is the thing it is checking FOR is one nobody
+// reads.
+func TestTheNewNameIsNotTheOldOne(t *testing.T) {
+	for _, line := range []string{
+		"`zpkgm` **installs**, `zpkgx` **runs** without installing",
+		"run `zpkgx node@22`, or `zpkgx +git +bash -- …`",
+		"curl …/install.sh | sh -s -- zpkgx v0.39.0",
+		"the bottle protocol with `zpkgm` and `zpkgx`",
+	} {
+		if got := classify(line); len(got) != 0 {
+			t.Errorf("%q: %d finding(s) about a line that names only the CURRENT tools: %+v",
+				line, len(got), got)
+		}
+	}
+}
+
 // TestABareNameIsUnsureAndCarriesItsSentence.
 //
 // The honest verdict. "pkgx" alone is our old command or their live project
