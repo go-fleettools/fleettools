@@ -4,49 +4,15 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/go-fleettools/fleettools/internal/ghtoken"
 )
 
-// maxTokFile bounds the token file: a token is tens of bytes.
-const maxTokFile = 4096
-
-// readToken reads the token from a file that only its owner may read (default
-// ~/.github-token), as ghissue does. The mode check is the point: a token in a
-// world-readable file is already spent.
-func readToken(path string) (string, error) {
-	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		path = filepath.Join(home, ".github-token")
-	}
-	st, err := os.Stat(path)
-	if err != nil {
-		return "", fmt.Errorf("token file: %w", err)
-	}
-	if !st.Mode().IsRegular() {
-		return "", fmt.Errorf("token file %s: not a regular file", path)
-	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("token file %s: mode %04o, want owner-only (0600)", path, st.Mode().Perm())
-	}
-	if st.Size() > maxTokFile {
-		return "", fmt.Errorf("token file %s: over %d bytes", path, maxTokFile)
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("token file: %w", err)
-	}
-	tok := strings.TrimSpace(string(b))
-	if tok == "" {
-		return "", fmt.Errorf("token file %s is empty", path)
-	}
-	return tok, nil
-}
+// readToken is ghtoken.Read: the token from a file only its owner may read
+// (default ~/.github-token).
+var readToken = ghtoken.Read
 
 // served is what GitHub says about a blob: still served, or gone.
 type served int

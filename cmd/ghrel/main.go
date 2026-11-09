@@ -41,6 +41,7 @@ import (
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/go-fleettools/fleettools/internal/ghtoken"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +50,6 @@ const (
 	maxTitle    = 256     // characters
 	maxAsset    = 2 << 30 // GitHub's per-asset limit: 2 GiB
 	maxResponse = 1 << 20 // bytes read from any response
-	maxTokFile  = 4 << 10
 	timeout     = 30 * time.Second
 	uploadTime  = 30 * time.Minute
 	apiBase     = "https://api.github.com"
@@ -525,38 +525,8 @@ func readNotes(path string) (string, error) {
 	return string(b), nil
 }
 
-// readToken reads the token from a file that only its owner may read.
-func readToken(path string) (string, error) {
-	if path == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		path = filepath.Join(home, ".github-token")
-	}
-	st, err := os.Stat(path)
-	if err != nil {
-		return "", fmt.Errorf("token file: %w", err)
-	}
-	if !st.Mode().IsRegular() {
-		return "", fmt.Errorf("token file %s: not a regular file", path)
-	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("token file %s: mode %04o, want owner-only (0600)", path, st.Mode().Perm())
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("token file: %w", err)
-	}
-	if len(b) > maxTokFile {
-		return "", fmt.Errorf("token file %s: over %d bytes", path, maxTokFile)
-	}
-	tok := strings.TrimSpace(string(b))
-	if tok == "" {
-		return "", fmt.Errorf("token file %s: empty", path)
-	}
-	return tok, nil
-}
+// readToken is ghtoken.Read: the token from a file only its owner may read.
+var readToken = ghtoken.Read
 
 // do sends one API request and insists on the status the caller expects; the
 // body of a failure is quoted because GitHub says why in it.
