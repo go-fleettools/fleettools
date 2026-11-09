@@ -41,8 +41,17 @@ type Finding struct {
 	Line  int    // 1-indexed
 	Col   int    // 1-indexed byte column, so an author can find it without being shown it
 	Match string // the exact text matched
-	Kind  string // "home path", "unc path", "account name", "document name"
+	Kind  string // "home path", "unc path", "account name", "document name", "name"
 	Why   string // what a reader of the refusal needs to know
+	// Account is WHOSE file system this finding names, when that is knowable.
+	//
+	// ⛔ It is here because a count cannot answer the question a sweep is run to
+	// answer. "126 findings over six repositories" says nothing about whether
+	// one of them is the owner of this machine, and that is the whole question.
+	// Measured 2026-11-09: of ten accounts named across four organisations, one
+	// was ours — and reading that from a list of 126 line numbers was not
+	// possible until the findings carried whose they were.
+	Account string
 }
 
 // String describes the finding WITHOUT reprinting what it found.
@@ -253,15 +262,35 @@ func Names(text string) []string {
 // /home/runner, and hunting "runner" would refuse every sentence about the
 // runner — the false positive that teaches a reader to waive by reflex.
 func SelfNames() []string {
+	if name, generic := Self(); name != "" && !generic {
+		return []string{name}
+	}
+	return nil
+}
+
+// Self returns this machine's account name and whether it is a generic one.
+//
+// ⛔⛔ THE THREE STATES ARE DIFFERENT AND MUST NOT PRINT ALIKE. Caught by CI on
+// 2026-11-09, which is the only place this shows: on a GitHub runner the home
+// directory is `/home/runner`, so SelfNames returns nothing — and a caller that
+// has only SelfNames cannot tell "I could not read who I am" from "I read it,
+// and it is a name that identifies nobody". The command printed the first
+// sentence while the second was true, which is an instrument whose two outcomes
+// read the same. Self reports them apart:
+//
+//	"", false     the home directory could not be read
+//	"runner", true  read, and generic: nothing of this machine's to disclose
+//	"alicia", false read, and personal: the name a sweep must look for
+func Self() (name string, generic bool) {
 	h, err := os.UserHomeDir()
 	if err != nil {
-		return nil
+		return "", false
 	}
 	a := filepath.Base(h)
-	if a == "" || a == "." || a == string(filepath.Separator) || genericAccounts[a] {
-		return nil
+	if a == "" || a == "." || a == string(filepath.Separator) {
+		return "", false
 	}
-	return []string{a}
+	return a, genericAccounts[a]
 }
 
 // Accounts returns only the account names, for a caller that wants to say whose
@@ -320,7 +349,7 @@ func ScanKnown(text string, known []string) []Finding {
 				}
 			}
 			out = append(out, Finding{
-				Line: i + 1, Col: loc[0] + 1, Match: m, Kind: "home path",
+				Line: i + 1, Col: loc[0] + 1, Match: m, Kind: "home path", Account: account,
 				Why: "a home directory names its account holder, their layout and their documents; the measurement is the content, the path is not",
 			})
 		}
@@ -358,10 +387,14 @@ func ScanKnown(text string, known []string) []Finding {
 				if inPath(line, at) {
 					continue
 				}
-				out = append(out, Finding{
+				f := Finding{
 					Line: i + 1, Col: at + 1, Match: name, Kind: kind,
 					Why: "a name from a path, standing on its own",
-				})
+				}
+				if kind == "account name" || kind == "name" {
+					f.Account = name
+				}
+				out = append(out, f)
 			}
 		}
 	}
