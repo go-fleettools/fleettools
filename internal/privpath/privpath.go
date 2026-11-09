@@ -262,15 +262,35 @@ func Names(text string) []string {
 // /home/runner, and hunting "runner" would refuse every sentence about the
 // runner — the false positive that teaches a reader to waive by reflex.
 func SelfNames() []string {
+	if name, generic := Self(); name != "" && !generic {
+		return []string{name}
+	}
+	return nil
+}
+
+// Self returns this machine's account name and whether it is a generic one.
+//
+// ⛔⛔ THE THREE STATES ARE DIFFERENT AND MUST NOT PRINT ALIKE. Caught by CI on
+// 2026-11-09, which is the only place this shows: on a GitHub runner the home
+// directory is `/home/runner`, so SelfNames returns nothing — and a caller that
+// has only SelfNames cannot tell "I could not read who I am" from "I read it,
+// and it is a name that identifies nobody". The command printed the first
+// sentence while the second was true, which is an instrument whose two outcomes
+// read the same. Self reports them apart:
+//
+//	"", false     the home directory could not be read
+//	"runner", true  read, and generic: nothing of this machine's to disclose
+//	"alicia", false read, and personal: the name a sweep must look for
+func Self() (name string, generic bool) {
 	h, err := os.UserHomeDir()
 	if err != nil {
-		return nil
+		return "", false
 	}
 	a := filepath.Base(h)
-	if a == "" || a == "." || a == string(filepath.Separator) || genericAccounts[a] {
-		return nil
+	if a == "" || a == "." || a == string(filepath.Separator) {
+		return "", false
 	}
-	return []string{a}
+	return a, genericAccounts[a]
 }
 
 // Accounts returns only the account names, for a caller that wants to say whose

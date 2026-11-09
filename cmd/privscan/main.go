@@ -149,7 +149,7 @@ func (r *roll) add(account, ref string) {
 // ⛔ The verdict is a SENTENCE, not a number. "45 findings" is what a reader
 // takes for an answer and is not one; "the running account is / is not named" is
 // the answer, and it is the line this command exists to print.
-func (r *roll) report(out io.Writer, self string) bool {
+func (r *roll) report(out io.Writer, self, absent string) bool {
 	mine := false
 	sort.Slice(r.order, func(i, j int) bool {
 		if len(r.texts[r.order[i]]) != len(r.texts[r.order[j]]) {
@@ -173,16 +173,47 @@ func (r *roll) report(out io.Writer, self string) bool {
 			fmt.Fprintf(out, "      %s\n", ref)
 		}
 	}
-	if self == "" {
-		fmt.Fprintln(out, "\nthis machine's account could not be read, so no verdict about it is offered")
-		return false
-	}
 	if mine {
 		fmt.Fprintln(out, "\nVERDICT: this machine's account IS named. The texts above are the remediation list.")
 		return true
 	}
-	fmt.Fprintln(out, "\nVERDICT: this machine's account is NOT among the accounts named.")
+	// ⛔ `absent` is the caller's sentence for "not in the roll", and there are
+	// four of them, not one. See selfVerdict: not checked, unreadable, generic,
+	// or genuinely absent. Printing one sentence for all four is what CI caught.
+	fmt.Fprintln(out, "\n"+absent)
 	return false
+}
+
+// selfVerdict says what this run can honestly conclude about this machine: the
+// account to flag in the roll, and the sentence to print when it is not there.
+//
+// ⛔⛔ FOUR STATES, FOUR SENTENCES. The first version printed "could not be
+// read" whenever privpath.SelfNames was empty, which on a CI runner was false —
+// the account was read, and it is `runner`, which identifies nobody. It also
+// computed a verdict about a name the run had been told to ignore with
+// --no-self. An instrument whose outcomes print alike measures nothing, and a
+// verdict about a check that did not run is worse than no verdict.
+func selfVerdict(o options) (self, absent string) {
+	name, generic := privpath.Self()
+	return verdictFor(o.self, name, generic)
+}
+
+// verdictFor is selfVerdict's decision, separated from reading the machine.
+//
+// ⛔ It is a pure function so that EVERY state has a test, not only the one the
+// test host happens to be in. The pair this replaced asserted whatever a
+// personal workstation produces and was red on the first CI runner it met; a
+// branch exercised on one kind of machine only is a branch with no control.
+func verdictFor(checked bool, name string, generic bool) (self, absent string) {
+	switch {
+	case !checked:
+		return "", "this machine's account was NOT checked (--no-self), so no verdict about it is offered."
+	case name == "":
+		return "", "this machine's home directory could not be read, so no verdict about it is offered."
+	case generic:
+		return "", fmt.Sprintf("this machine's account is %q, which identifies nobody — a CI image or a container — so it has nothing of its own to disclose.", name)
+	}
+	return name, "VERDICT: this machine's account is NOT among the accounts named."
 }
 
 // scan is the command's work.
@@ -240,8 +271,8 @@ func scan(out, errOut io.Writer, o options, files []string) int {
 	// exactly like a clean fleet, and this repository has that defect on record.
 	fmt.Fprintf(out, "\nprivscan: %d finding(s) across %d input(s)\n", found, inputs)
 	if o.accounts {
-		self := selfAccount()
-		r.report(out, self)
+		self, absent := selfVerdict(o)
+		r.report(out, self, absent)
 	}
 	if found > 0 {
 		status = worse(status, 1)

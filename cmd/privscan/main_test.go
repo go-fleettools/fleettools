@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/go-fleettools/fleettools/internal/privpath"
 )
 
 // write puts a body in a temp file and returns its path.
@@ -278,10 +281,64 @@ func TestAccountsAnswersWhoseFileSystemWasNamed(t *testing.T) {
 			t.Errorf("%q is missing from the roll:\n%s", want, got)
 		}
 	}
-	// ⛔ The verdict is a SENTENCE. "N findings" is what a reader takes for an
-	// answer and is not one.
-	if !strings.Contains(got, "VERDICT: this machine's account is NOT among") {
-		t.Errorf("no verdict about this machine:\n%s", got)
+	// ⛔ --no-self means this run did not check this machine, and the verdict
+	// must say THAT rather than pronounce on a name it was told to ignore. The
+	// first version of this test asserted "is NOT among" and passed locally for
+	// the wrong reason — the verdict was computed from the very account
+	// --no-self had excluded — then failed on CI, where the runner's account is
+	// generic and the code printed "could not be read" instead.
+	if !strings.Contains(got, "NOT checked (--no-self)") {
+		t.Errorf("the verdict pronounced on a check that did not run:\n%s", got)
+	}
+}
+
+// ⛔⛔ THE THREE STATES OF "WHO AM I", which must not print alike. On a GitHub
+// runner the home directory is /home/runner, so there is no personal account —
+// and "I could not read who I am" is a different sentence from "I read it, and
+// it names nobody". This test holds on either kind of machine, which the first
+// pair did not: they were green locally and red on CI.
+func TestSelfVerdictSaysWhichStateItIsIn(t *testing.T) {
+	for _, c := range []struct {
+		what    string
+		checked bool
+		name    string
+		generic bool
+		self    string
+		says    string
+	}{
+		{"not checked", false, "alicia", false, "", "--no-self"},
+		{"unreadable", true, "", false, "", "could not be read"},
+		{"a CI runner", true, "runner", true, "", "identifies nobody"},
+		{"a person", true, "alicia", false, "alicia", "VERDICT"},
+	} {
+		self, absent := verdictFor(c.checked, c.name, c.generic)
+		if self != c.self {
+			t.Errorf("%s: offered %q for hunting, want %q", c.what, self, c.self)
+		}
+		if !strings.Contains(absent, c.says) {
+			t.Errorf("%s: says %q, want it to mention %q", c.what, absent, c.says)
+		}
+	}
+	// ⛔ The four sentences must be four. If any two matched, the command would
+	// be an instrument whose outcomes read alike — which is what CI caught.
+	seen := map[string]string{}
+	for _, c := range [][3]any{
+		{false, "alicia", false}, {true, "", false},
+		{true, "runner", true}, {true, "alicia", false},
+	} {
+		_, absent := verdictFor(c[0].(bool), c[1].(string), c[2].(bool))
+		if prev, ok := seen[absent]; ok {
+			t.Errorf("two states print the same sentence: %v and %v → %q", prev, c, absent)
+		}
+		seen[absent] = fmt.Sprint(c)
+	}
+
+	// And the wiring: the command reads the machine through privpath.Self.
+	name, generic := privpath.Self()
+	wantSelf, wantAbsent := verdictFor(true, name, generic)
+	if s, a := selfVerdict(options{self: true}); s != wantSelf || a != wantAbsent {
+		t.Errorf("selfVerdict disagrees with verdictFor on this machine: (%q,%q) vs (%q,%q)",
+			s, a, wantSelf, wantAbsent)
 	}
 }
 
@@ -318,9 +375,12 @@ func TestAccountsOnCleanInputStillSaysSo(t *testing.T) {
 	if code := run([]string{"--no-self", "--accounts", p}, &out, &errOut); code != 0 {
 		t.Fatalf("exit %d, want 0", code)
 	}
+	// Not the word "VERDICT": with --no-self the honest sentence is that this
+	// machine was not checked. What must hold is that a clean sweep says
+	// SOMETHING about this machine rather than falling silent.
 	if !strings.Contains(out.String(), "0 account(s) named") ||
-		!strings.Contains(out.String(), "VERDICT") {
-		t.Errorf("a clean sweep printed no verdict:\n%s", out.String())
+		!strings.Contains(out.String(), "this machine's account") {
+		t.Errorf("a clean sweep said nothing about this machine:\n%s", out.String())
 	}
 }
 
