@@ -257,6 +257,73 @@ func TestSelfAccountIsHuntedByDefault(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE QUESTION A SWEEP IS RUN TO ANSWER, which a count cannot. The first
+// sweep of this fleet printed 509 findings over 60 repositories and no reading
+// of that list said whether one of them named the owner of the machine. Grouping
+// by account answered it in one line: of ten accounts, one was ours.
+func TestAccountsAnswersWhoseFileSystemWasNamed(t *testing.T) {
+	p := write(t, "body.md",
+		"/Users/alicia/a.tex and /home/bruno/b.tex\n"+
+			"and /Users/alicia/c.tex again\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--no-self", "--accounts", p}, &out, &errOut); code != 1 {
+		t.Fatalf("exit %d, want 1; stderr=%s", code, errOut.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "2 account(s) named") {
+		t.Errorf("the roll does not say how many accounts:\n%s", got)
+	}
+	for _, want := range []string{"alicia", "bruno"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q is missing from the roll:\n%s", want, got)
+		}
+	}
+	// ⛔ The verdict is a SENTENCE. "N findings" is what a reader takes for an
+	// answer and is not one.
+	if !strings.Contains(got, "VERDICT: this machine's account is NOT among") {
+		t.Errorf("no verdict about this machine:\n%s", got)
+	}
+}
+
+// The other direction, which is the one that matters: when the running account
+// IS named, the command must say so and hand over the remediation list.
+func TestAccountsNamesThisMachineWhenItIsNamed(t *testing.T) {
+	self := selfAccount()
+	if self == "" {
+		t.Skip("this machine's account cannot be read")
+	}
+	p := write(t, "body.md", "measured at /Users/"+self+"/thesis/main.tex\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--accounts", p}, &out, &errOut); code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	got := out.String()
+	if !strings.Contains(got, "VERDICT: this machine's account IS named") {
+		t.Errorf("the verdict missed this machine:\n%s", got)
+	}
+	if !strings.Contains(got, "THIS MACHINE'S ACCOUNT") {
+		t.Errorf("the roll does not flag which row is ours:\n%s", got)
+	}
+	if !strings.Contains(got, "remediation list") {
+		t.Errorf("the verdict does not say what the texts are for:\n%s", got)
+	}
+}
+
+// ⛔ A roll with nothing in it still prints a verdict. Silence after a sweep
+// reads as "clean", and a command that prints nothing cannot be told from one
+// that found nothing to print.
+func TestAccountsOnCleanInputStillSaysSo(t *testing.T) {
+	p := write(t, "body.md", "nothing private here at all\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"--no-self", "--accounts", p}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "0 account(s) named") ||
+		!strings.Contains(out.String(), "VERDICT") {
+		t.Errorf("a clean sweep printed no verdict:\n%s", out.String())
+	}
+}
+
 // gh --paginate concatenates one array per page instead of merging them.
 func TestDecodeItemsReadsConcatenatedPages(t *testing.T) {
 	raw := []byte(`[{"number":1,"title":"t1","body":"b1"}][{"number":2,"title":"t2","body":"b2"}]`)

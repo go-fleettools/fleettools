@@ -95,6 +95,8 @@ func RootCmd() *cobra.Command {
 	f.StringArrayVar(&o.names, "name", nil, "also hunt this name, with no path needed to learn it")
 	f.StringArrayVar(&o.repos, "repo", nil, "scan this repository's issues, pulls and comments")
 	f.StringArrayVar(&o.orgs, "org", nil, "scan every repository of this organisation")
+	f.BoolVar(&o.accounts, "accounts", false,
+		"report WHOSE file systems were named, and whether this machine's account is among them")
 	return c
 }
 
@@ -103,12 +105,84 @@ func run(args []string, out, errOut io.Writer) int {
 }
 
 type options struct {
-	fix   bool
-	show  bool
-	self  bool
-	names []string
-	repos []string
-	orgs  []string
+	fix      bool
+	show     bool
+	self     bool
+	accounts bool
+	names    []string
+	repos    []string
+	orgs     []string
+}
+
+// roll collects, across every input, whose file systems were named.
+//
+// ⛔ It exists because a COUNT cannot answer the question a sweep is run to
+// answer. The first sweep of this fleet printed 509 findings over 60
+// repositories, and no reading of that list said whether one of them was the
+// owner of the machine — which is the entire question. Grouping by account
+// answered it in one line: of ten accounts, one was ours.
+type roll struct {
+	texts map[string][]string // account → the texts naming it
+	order []string
+}
+
+func (r *roll) add(account, ref string) {
+	if account == "" {
+		return
+	}
+	if r.texts == nil {
+		r.texts = map[string][]string{}
+	}
+	if _, ok := r.texts[account]; !ok {
+		r.order = append(r.order, account)
+	}
+	for _, s := range r.texts[account] {
+		if s == ref {
+			return
+		}
+	}
+	r.texts[account] = append(r.texts[account], ref)
+}
+
+// report prints the roll and says whether this machine's account is in it.
+//
+// ⛔ The verdict is a SENTENCE, not a number. "45 findings" is what a reader
+// takes for an answer and is not one; "the running account is / is not named" is
+// the answer, and it is the line this command exists to print.
+func (r *roll) report(out io.Writer, self string) bool {
+	mine := false
+	sort.Slice(r.order, func(i, j int) bool {
+		if len(r.texts[r.order[i]]) != len(r.texts[r.order[j]]) {
+			return len(r.texts[r.order[i]]) > len(r.texts[r.order[j]])
+		}
+		return r.order[i] < r.order[j]
+	})
+	fmt.Fprintf(out, "\n%d account(s) named:\n", len(r.order))
+	for _, a := range r.order {
+		tag := ""
+		if a == self && self != "" {
+			tag = "   ⛔ THIS MACHINE'S ACCOUNT"
+			mine = true
+		}
+		fmt.Fprintf(out, "  %-24s %3d text(s)%s\n", a, len(r.texts[a]), tag)
+		for i, ref := range r.texts[a] {
+			if i == 4 {
+				fmt.Fprintf(out, "      … and %d more\n", len(r.texts[a])-i)
+				break
+			}
+			fmt.Fprintf(out, "      %s\n", ref)
+		}
+	}
+	if self == "" {
+		fmt.Fprintln(out, "\nthis machine's account could not be read, so no verdict about it is offered")
+		return false
+	}
+	if mine {
+		fmt.Fprintln(out, "\nVERDICT: this machine's account IS named. The texts above are the remediation list.")
+		return true
+	}
+	fmt.Fprintln(out, "\nVERDICT: this machine's account is NOT among the accounts named.")
+	return false
 }
 
 // scan is the command's work.
@@ -132,10 +206,11 @@ func scan(out, errOut io.Writer, o options, files []string) int {
 
 	status := 0
 	found, inputs := 0, 0
+	var r roll
 
 	for _, p := range files {
 		inputs++
-		n, code := scanFile(out, errOut, o, known, p)
+		n, code := scanFile(out, errOut, o, known, p, &r)
 		found += n
 		status = worse(status, code)
 	}
@@ -153,9 +228,9 @@ func scan(out, errOut io.Writer, o options, files []string) int {
 		}
 	}
 	sort.Strings(repos)
-	for _, r := range repos {
+	for _, name := range repos {
 		inputs++
-		n, code := scanRepo(out, errOut, o, known, r)
+		n, code := scanRepo(out, errOut, o, known, name, &r)
 		found += n
 		status = worse(status, code)
 	}
@@ -164,6 +239,10 @@ func scan(out, errOut io.Writer, o options, files []string) int {
 	// sweep that could not read its population and reported zero findings reads
 	// exactly like a clean fleet, and this repository has that defect on record.
 	fmt.Fprintf(out, "\nprivscan: %d finding(s) across %d input(s)\n", found, inputs)
+	if o.accounts {
+		self := selfAccount()
+		r.report(out, self)
+	}
 	if found > 0 {
 		status = worse(status, 1)
 	}
@@ -195,7 +274,7 @@ func selfAccount() string {
 	return ""
 }
 
-func scanFile(out, errOut io.Writer, o options, known []string, path string) (int, int) {
+func scanFile(out, errOut io.Writer, o options, known []string, path string, r *roll) (int, int) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(errOut, "privscan: %v\n", err)
@@ -223,6 +302,9 @@ func scanFile(out, errOut io.Writer, o options, known []string, path string) (in
 		fmt.Fprintf(out, "%s: %d replacement(s)\n", path, n)
 		return n, 0
 	}
+	for _, f := range found {
+		r.add(f.Account, path)
+	}
 	report(out, o, path, found)
 	return len(found), 0
 }
@@ -234,7 +316,7 @@ type item struct {
 	Body string
 }
 
-func scanRepo(out, errOut io.Writer, o options, known []string, repo string) (int, int) {
+func scanRepo(out, errOut io.Writer, o options, known []string, repo string, r *roll) (int, int) {
 	items, err := forgeText(repo)
 	if err != nil {
 		fmt.Fprintf(errOut, "privscan: %s: %v\n", repo, err)
@@ -247,7 +329,11 @@ func scanRepo(out, errOut io.Writer, o options, known []string, repo string) (in
 			continue
 		}
 		found += len(f)
-		report(out, o, it.Ref+" ("+it.Kind+")", f)
+		ref := it.Ref + " (" + it.Kind + ")"
+		for _, one := range f {
+			r.add(one.Account, ref)
+		}
+		report(out, o, ref, f)
 	}
 	if found == 0 {
 		fmt.Fprintf(out, "%s: clean (%d texts read)\n", repo, len(items))
