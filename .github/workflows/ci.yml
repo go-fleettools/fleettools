@@ -68,6 +68,11 @@ jobs:
       - name: fuzz the streaming scan
         run: go test -run '^$' -fuzz FuzzScanForAgreesWithContains -fuzztime 30s ./cmd/pagetext
 
+      # docmd reads untrusted Office packages (ZIP and XML); any bytes must give
+      # Markdown or an error, never a panic. The corpus is committed.
+      - name: fuzz the docx/pptx/xlsx reader
+        run: go test -run '^$' -fuzz FuzzConvert -fuzztime 30s ./cmd/docmd
+
       # The planted xz bomb (1.5 GiB declared over a few bytes) runs as a
       # compiled binary under a virtual memory limit and GOMEMLIMIT, so a
       # regression fails by itself instead of allocating gigabytes of the runner.

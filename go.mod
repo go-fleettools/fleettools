@@ -20,9 +20,13 @@ require (
 	github.com/go-compressions/xz v0.3.1
 	github.com/go-gitsafe/gitsafe v0.36.0
 	github.com/go-kramdown/kramdown v0.3.1
+	github.com/go-ooxml/ooxml v0.7.0
+	github.com/go-ooxml/opc v0.2.0
 	github.com/go-pdfkit/extract v0.9.0
 	github.com/go-pdfkit/html2pdf v0.4.1
 	github.com/go-pdfkit/reader v0.10.0
+	github.com/go-richdoc/markdown v0.12.0
+	github.com/go-richdoc/richdoc v0.7.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/ulikunitz/xz v0.5.17
@@ -67,6 +71,7 @@ require (
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/tannevaled/gobig2 v0.2.0 // indirect
+	github.com/yuin/goldmark v1.8.7 // indirect
 	golang.org/x/image v0.47.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
