@@ -90,6 +90,29 @@ label both added and removed, a label to remove that the issue does not carry.
 Adding a label the repository lacks creates it; adding one already present is
 a no-op on GitHub's side.
 
+--delete destroys an issue PERMANENTLY, which REST cannot do — it is GitHub's
+deleteIssue mutation, and it needs admin rights on the repository:
+
+  ghissue <owner/repo> <number> --delete --confirm <owner/repo#number>
+
+The reference is retyped because there is no undo and no second chance to see
+the number: the comments, the cross-references and the edit history go with the
+issue. It shows what it is about to delete first, refuses a pull request (GitHub
+does not delete those), and reads GraphQL's errors, which arrive behind an HTTP
+200. It exists because an edit does NOT undo a published disclosure.
+
+⛔ THE GATE. Every body and title this command sends is scanned first, and one
+that names a person's own file system — a home directory, the account name
+inside it, or a project or document name taken from the path, each of them also
+on its own — is REFUSED before the token is read. Three issues were filed on
+2026-11-09 carrying all four, and editing them afterwards did not undo it: the
+forge keeps the original under "edited". Fix the file with privscan --fix,
+look at it with privscan --show, or, if the path IS the subject, pass
+--allow-private-path "<why>" — a reason, never a boolean, and it is APPENDED to
+what gets published, so a waiver is made in public. No waiver covers a TITLE: a
+title cannot carry the reason and is republished in every listing and
+notification an edit never reaches.
+
 Exit status: 0 done, 2 refused or failed.`
 
 // newClient is replaced by tests, which need to trust an httptest TLS server.
@@ -124,6 +147,9 @@ func RootCmd() *cobra.Command {
 		doEdit   bool
 		addLab   []string
 		remLab   []string
+		waiver   string
+		doDelete bool
+		confirm  string
 	)
 	cmd := &cobra.Command{
 		Use:          "ghissue <owner/repo> <number> | <owner/repo> --new --title <t> --body-file <f>",
@@ -136,10 +162,17 @@ func RootCmd() *cobra.Command {
 				base: base, tokFile: tokFile, bodyFile: bodyFile, reason: reason,
 				title: title, dryRun: dryRun, doClose: doClose, doReopen: doReopen,
 				addLabels: addLab, removeLabels: remLab,
-				edit: doEdit,
+				edit: doEdit, waiver: waiver, confirm: confirm,
 			}
-			if doNew && doEdit {
-				return errors.New("--new opens an issue and --edit changes one; give one")
+			// ⛔ The three acts are named separately and checked against each
+			// other rather than ordered by precedence: --delete beside --edit is
+			// a line whose author meant one of them, and guessing which is how a
+			// destructive act happens by default.
+			if n := count(doNew, doEdit, doDelete); n > 1 {
+				return errors.New("--new opens an issue, --edit changes one and --delete destroys one; give one")
+			}
+			if doDelete {
+				return runDelete(cmd, args, o)
 			}
 			if doNew {
 				if len(addLab)+len(remLab) > 0 {
@@ -178,6 +211,17 @@ func RootCmd() *cobra.Command {
 	f.BoolVar(&doEdit, "edit", false, "edit an existing issue: --title, --body-file (REPLACES the body), --add-label, --remove-label")
 	f.StringArrayVar(&addLab, "add-label", nil, "label to add (--edit; repeatable)")
 	f.StringArrayVar(&remLab, "remove-label", nil, "label to remove (--edit; repeatable)")
+	// ⛔ A REASON, not a boolean, and no default. A boolean waiver is one
+	// keystroke and gets passed by reflex; a reason has to be written, and
+	// writing it is the moment to notice there is nothing to write. It also
+	// STAMPS — the reason is appended to the published text, so a waiver is a
+	// statement made in public rather than a switch flicked in private.
+	f.StringVar(&waiver, "allow-private-path", "",
+		"why this text must name a private file system; the reason is APPENDED to what is published")
+	f.BoolVar(&doDelete, "delete", false,
+		"delete the issue PERMANENTLY (with --confirm <owner/repo#number>)")
+	f.StringVar(&confirm, "confirm", "",
+		"the reference retyped, which --delete requires: there is no undo and no second chance to see the number")
 	return cmd
 }
 
@@ -186,6 +230,22 @@ type opts struct {
 	dryRun, doClose, doReopen              bool
 	addLabels, removeLabels                []string
 	edit                                   bool
+	// waiver is the reason given for publishing a reference to a private file
+	// system. Empty means the gate refuses; see privgate.go.
+	waiver string
+	// confirm is the reference retyped to authorise --delete; see delete.go.
+	confirm string
+}
+
+// count says how many of the acts were asked for.
+func count(bs ...bool) int {
+	n := 0
+	for _, b := range bs {
+		if b {
+			n++
+		}
+	}
+	return n
 }
 
 // runNew opens one issue. Everything that can be refused locally is refused
@@ -203,7 +263,7 @@ func runNew(cmd *cobra.Command, args []string, o opts) error {
 	if err != nil {
 		return err
 	}
-	title, err := checkTitle(o.title)
+	title, err := checkTitle(o.title, o.waiver)
 	if err != nil {
 		return err
 	}
@@ -212,7 +272,7 @@ func runNew(cmd *cobra.Command, args []string, o opts) error {
 		// refuses an empty body for the same reason.
 		return errors.New("--new needs --body-file: an issue says what and why")
 	}
-	body, err := readBody(o.bodyFile)
+	body, err := readBody(o.bodyFile, o.waiver)
 	if err != nil {
 		return err
 	}
@@ -247,7 +307,7 @@ func runNew(cmd *cobra.Command, args []string, o opts) error {
 
 // checkTitle refuses a title GitHub would refuse, and one that spans lines: a
 // newline in a title is a body pasted into the wrong flag.
-func checkTitle(t string) (string, error) {
+func checkTitle(t, waiver string) (string, error) {
 	t = strings.TrimSpace(t)
 	switch {
 	case t == "":
@@ -256,6 +316,9 @@ func checkTitle(t string) (string, error) {
 		return "", errors.New("--title: one line; the rest belongs in --body-file")
 	case len([]rune(t)) > maxTitle:
 		return "", fmt.Errorf("--title: over %d characters", maxTitle)
+	}
+	if err := gateTitle(t, waiver); err != nil {
+		return "", err
 	}
 	return t, nil
 }
@@ -334,7 +397,7 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 
 	var body string
 	if o.bodyFile != "" {
-		if body, err = readBody(o.bodyFile); err != nil {
+		if body, err = readBody(o.bodyFile, o.waiver); err != nil {
 			return err
 		}
 	}
@@ -403,8 +466,14 @@ func splitRepo(s string) (owner, repo string, err error) {
 }
 
 // readBody reads the comment, refusing an empty one: a comment with no text is
-// a notification to everyone watching that says nothing.
-func readBody(path string) (string, error) {
+// a notification to everyone watching that says nothing — and refusing one that
+// names a person's own file system, which is privgate.go.
+//
+// ⛔ The waiver is a PARAMETER and not a package variable: every path through
+// this command reads its text here, so a body cannot be read without the
+// compiler asking the caller what to do about a disclosure. A gate reached by
+// remembering to call it is not a gate.
+func readBody(path, waiver string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("body file: %w", err)
@@ -420,7 +489,7 @@ func readBody(path string) (string, error) {
 	if strings.TrimSpace(string(b)) == "" {
 		return "", errors.New("body file: empty")
 	}
-	return string(b), nil
+	return gateBody(string(b), waiver)
 }
 
 // readToken reads the token from a file that only its owner may read. The mode
@@ -462,7 +531,13 @@ type issue struct {
 	State   string `json:"state"`
 	Title   string `json:"title"`
 	HTMLURL string `json:"html_url"`
-	Labels  []struct {
+	// NodeID is what --delete needs: REST has no endpoint that deletes an
+	// issue, and the GraphQL mutation that does takes a node ID.
+	NodeID      string `json:"node_id"`
+	PullRequest *struct {
+		URL string `json:"url"`
+	} `json:"pull_request"`
+	Labels []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
 }

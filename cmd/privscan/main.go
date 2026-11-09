@@ -34,7 +34,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -128,9 +127,7 @@ func scan(out, errOut io.Writer, o options, files []string) int {
 
 	known := o.names
 	if o.self {
-		if n := selfAccount(); n != "" {
-			known = append(known, n)
-		}
+		known = append(known, privpath.SelfNames()...)
 	}
 
 	status := 0
@@ -186,19 +183,16 @@ func worse(a, b int) int {
 	return 0
 }
 
-// selfAccount is the account name of whoever is running the command, taken from
-// their home directory.
+// selfAccount is what --self contributes, for this command's tests to read.
 //
-// ⛔ It is hunted by default because the sweep's hardest case is a body that
-// names the account with no path anywhere in it — a session label, a signature,
-// a sentence. A scanner that can only learn names from paths calls such a body
-// clean, which is most of what a sweep reads.
+// ⛔ It delegates to privpath rather than calling os.UserHomeDir again: the gate
+// inside ghissue hunts the same name, and two copies of "who am I" would let the
+// scanner and the door disagree about whose machine is being protected.
 func selfAccount() string {
-	h, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	if n := privpath.SelfNames(); len(n) > 0 {
+		return n[0]
 	}
-	return filepath.Base(h)
+	return ""
 }
 
 func scanFile(out, errOut io.Writer, o options, known []string, path string) (int, int) {

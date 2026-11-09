@@ -29,10 +29,11 @@ package privpath
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
-
-	"regexp"
 )
 
 // Finding is one place a text names a person's own file system.
@@ -164,6 +165,31 @@ func Names(text string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// SelfNames returns the name of the account running the program, as a list to
+// be handed to ScanKnown or RedactKnown.
+//
+// ⛔ Every gate hunts it whether or not a path in the text revealed it, because
+// the sweep's and the gate's hardest case is a text that names the account with
+// NO path in it: a session label, a signature, a sentence. A scanner that can
+// only learn names from paths calls such a text clean, and that is most of what
+// there is to read. The 2026-11-09 leak was exactly this shape — the path in the
+// measurement section, the bare account in a label further down.
+//
+// ⛔ A generic account returns nothing. On a CI runner the home directory is
+// /home/runner, and hunting "runner" would refuse every sentence about the
+// runner — the false positive that teaches a reader to waive by reflex.
+func SelfNames() []string {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	a := filepath.Base(h)
+	if a == "" || a == "." || a == string(filepath.Separator) || genericAccounts[a] {
+		return nil
+	}
+	return []string{a}
 }
 
 // Accounts returns only the account names, for a caller that wants to say whose
