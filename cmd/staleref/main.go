@@ -109,7 +109,34 @@ type classifier struct {
 func newClassifier(old, new string, upstream []string, codeVars map[string]bool) *classifier {
 	stem := strings.TrimPrefix(old, "go-")
 	c := &classifier{old: old, new: new, upstream: upstream, codeVars: codeVars}
-	c.orgPath = regexp.MustCompile(`(?:github\.com/)?` + regexp.QuoteMeta(old) + `/[A-Za-z0-9._-]+`)
+	// ⛔⛔ AN ADDRESS IS STALE; THE NAME IN PROSE IS A QUESTION. This line was
+	// got wrong twice, in opposite directions, and both were measured.
+	//
+	// It first required `/<repo>`, which left all eight of registry-viewer's
+	// findings UNSURE although each was plainly the old org: a link to the org
+	// page, the landing host, a page title. So the suffix was made optional —
+	// and the next run put TWO findings in zbk's README under STALE, with a
+	// suggested replacement, that must NOT be rewritten:
+	//
+	//	every repository went from `go-pkgx` to `go-zpkg`
+	//	Nothing in go-pkgx carries a build identity — it predates them
+	//
+	// Those sentences are ABOUT the rename. A net gain of 24 decided findings
+	// had hidden two confident wrong answers, which is the failure recorded in
+	// `a-net-gain-hides-an-example-that-went-red`.
+	//
+	// ⭐ The distinction that holds is not how much of the name is there, it is
+	// whether the occurrence is an ADDRESS. A host, a forge shorthand, a
+	// `.github.io` landing host or a repository path must be updated whatever
+	// the sentence says — GitHub redirects a transferred repository, so a stale
+	// link keeps working and stays invisible, and a retired landing host does
+	// not. The bare name in prose is left UNSURE with its sentence, because
+	// deciding it needs the sentence read.
+	c.orgPath = regexp.MustCompile(
+		`(?:(?:https?://)?github\.com/` + regexp.QuoteMeta(old) + `(?:/[A-Za-z0-9._-]+)?` +
+			`|github>` + regexp.QuoteMeta(old) + `(?:/[A-Za-z0-9._-]+)?` +
+			`|` + regexp.QuoteMeta(old) + `\.github\.io(?:/[A-Za-z0-9._-]+)*` +
+			`|` + regexp.QuoteMeta(old) + `/[A-Za-z0-9._-]+)`)
 	if len(upstream) > 0 {
 		alts := make([]string, len(upstream))
 		for i, u := range upstream {

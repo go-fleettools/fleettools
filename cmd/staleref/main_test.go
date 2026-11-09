@@ -107,6 +107,57 @@ func TestTheCodeDecidesAboutAnEnvironmentVariable(t *testing.T) {
 	}
 }
 
+// TestAnAddressIsStaleWhateverTheSentenceSays.
+//
+// ⛔ The first real run added this, and the second corrected it. A host, a forge
+// shorthand, a landing host or a repository path must be updated whatever the
+// surrounding prose claims — GitHub redirects a transferred repository, so a
+// stale link keeps working and stays invisible, and a retired landing host does
+// not.
+func TestAnAddressIsStaleWhateverTheSentenceSays(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{`<a href="https://github.com/go-pkgx">the org</a>`, "github.com/go-zpkg"},
+		{`the landing tree at <https://go-pkgx.github.io/packages/>`, "go-zpkg.github.io/packages"},
+		// Renovate's `github>org/repo` shorthand carries no host, so the
+		// suggestion carries none either.
+		{`"extends": ["github>go-pkgx/.github"]`, "github>go-zpkg/.github"},
+		{`built from go-pkgx/bk at main`, "go-zpkg/bk"},
+	} {
+		var sawStale bool
+		for _, f := range classify(tc.line) {
+			if f.Verdict == stale && strings.Contains(f.Suggest, tc.want) {
+				sawStale = true
+			}
+		}
+		if !sawStale {
+			t.Errorf("%q: no STALE finding suggesting %q: %+v", tc.line, tc.want, classify(tc.line))
+		}
+	}
+}
+
+// TestTheNameInProseIsNotRewritten is the regression for two confident wrong
+// answers.
+//
+// ⛔⛔ Making the repository suffix optional decided 24 more findings and put
+// TWO of zbk's own README sentences under STALE **with a suggested
+// replacement** — sentences that are ABOUT the rename and whose meaning the
+// replacement destroys. A net gain had hidden two examples that went red
+// (`a-net-gain-hides-an-example-that-went-red`), and the fix is the distinction
+// between an address and a name in prose.
+func TestTheNameInProseIsNotRewritten(t *testing.T) {
+	for _, line := range []string{
+		"every repository went from `go-pkgx` to `go-zpkg` and every bottle stayed",
+		"Nothing in go-pkgx carries a build identity — it predates them.",
+		"<h1>go-pkgx registry viewer</h1>",
+	} {
+		for _, f := range classify(line) {
+			if f.Verdict == stale {
+				t.Errorf("%q: called an address (%+v) — prose is a question, not a rewrite", line, f)
+			}
+		}
+	}
+}
+
 // TestABareNameIsUnsureAndCarriesItsSentence.
 //
 // The honest verdict. "pkgx" alone is our old command or their live project
