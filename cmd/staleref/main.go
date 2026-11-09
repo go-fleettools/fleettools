@@ -92,13 +92,31 @@ type finding struct {
 type classifier struct {
 	old, new string
 	upstream []string
+	keep     []string
 
 	orgPath  *regexp.Regexp
 	upstrRE  *regexp.Regexp
+	keepRE   *regexp.Regexp
 	envVar   *regexp.Regexp
 	bareOld  *regexp.Regexp
 	codeVars map[string]bool
 }
+
+// ⛔⛔ --keep EXISTS BECAUSE THE OBVIOUS SWEEP WOULD HAVE BEEN DESTRUCTIVE.
+//
+// `go-zpkg` was `go-pkgx`, and every repository followed the transfer — but
+// GitHub's container packages are ORG-SCOPED and did not. Every bottle the
+// project has ever published still lives at `ghcr.io/go-pkgx/packages`, and
+// `go-zpkg/packages/.github/workflows/wasip1.yml:190-204` says so. Renaming
+// `bottle.DistBase` on the assumption that packages follow a transfer is
+// exactly what shipped an EMPTY registry in v0.64.0 through v0.68.0.
+//
+// So an address can carry the old name AND be the live one. Nothing about its
+// spelling distinguishes it from a dead link — only knowing where the artifacts
+// are does — which means it has to be stated, not inferred. A `--keep` match is
+// reported as a CITATION with its own kind, so it appears in a `--show-citations`
+// listing rather than vanishing: an exemption nobody can see is how the next
+// person re-proposes the same rewrite.
 
 // newClassifier compiles the patterns for one rename.
 //
@@ -106,9 +124,16 @@ type classifier struct {
 // that also names the old tools and variables ("pkgx" out of "go-pkgx"), which
 // is derived rather than asked for because the two are the same word in every
 // rename this fleet has done.
-func newClassifier(old, new string, upstream []string, codeVars map[string]bool) *classifier {
+func newClassifier(old, new string, upstream, keep []string, codeVars map[string]bool) *classifier {
 	stem := strings.TrimPrefix(old, "go-")
-	c := &classifier{old: old, new: new, upstream: upstream, codeVars: codeVars}
+	c := &classifier{old: old, new: new, upstream: upstream, keep: keep, codeVars: codeVars}
+	if len(keep) > 0 {
+		alts := make([]string, len(keep))
+		for i, k := range keep {
+			alts[i] = regexp.QuoteMeta(k)
+		}
+		c.keepRE = regexp.MustCompile(`(?:` + strings.Join(alts, "|") + `)[A-Za-z0-9._/-]*`)
+	}
 	// ⛔⛔ AN ADDRESS IS STALE; THE NAME IN PROSE IS A QUESTION. This line was
 	// got wrong twice, in opposite directions, and both were measured.
 	//
@@ -185,8 +210,23 @@ func (c *classifier) classifyLine(file string, n int, line string) []finding {
 		return true
 	}
 
+	// ⛔ KEEP IS MATCHED FIRST OF ALL, before upstream and before the org path.
+	// `ghcr.io/go-pkgx/packages` contains the old org path, so anything that
+	// looked at the org path first would report the live registry as a dead
+	// link and suggest the rewrite that emptied it.
+	if c.keepRE != nil {
+		for _, m := range c.keepRE.FindAllStringIndex(line, -1) {
+			cover(m[0], m[1])
+			out = append(out, finding{File: file, Line: n, Verdict: citation,
+				Kind: "live address, deliberately NOT renamed (--keep)",
+				Text: line[m[0]:m[1]]})
+		}
+	}
 	if c.upstrRE != nil {
 		for _, m := range c.upstrRE.FindAllStringIndex(line, -1) {
+			if !free(m[0], m[1]) {
+				continue
+			}
 			cover(m[0], m[1])
 			out = append(out, finding{File: file, Line: n, Verdict: citation,
 				Kind: "upstream", Text: line[m[0]:m[1]]})
@@ -336,6 +376,7 @@ func RootCmd() *cobra.Command {
 	var (
 		old, new      string
 		upstream      []string
+		keep          []string
 		codeVar       []string
 		showCitations bool
 		quiet         bool
@@ -344,12 +385,14 @@ func RootCmd() *cobra.Command {
 		"What a renamed organisation's docs still call themselves", longHelp)
 	c.RunE = func(cmd *cobra.Command, args []string) error {
 		return cli.FromStatus(run(cli.Out(cmd), cli.Err(cmd),
-			old, new, upstream, codeVar, showCitations, quiet, args))
+			old, new, upstream, keep, codeVar, showCitations, quiet, args))
 	}
 	c.Flags().StringVar(&old, "old", "", "the organisation's former name, eg. go-pkgx (required)")
 	c.Flags().StringVar(&new, "new", "", "the name it has now, eg. go-zpkg (required)")
 	c.Flags().StringArrayVar(&upstream, "upstream", nil,
 		"a name that belongs to the project upstream and must NOT be rewritten; repeatable")
+	c.Flags().StringArrayVar(&keep, "keep", nil,
+		"an address that carries the old name and is still LIVE, so it must not be rewritten (eg. a container registry that did not follow the transfer); repeatable")
 	c.Flags().StringArrayVar(&codeVar, "code-var", nil,
 		"an environment variable the CODE still reads, so documenting it is correct; repeatable")
 	c.Flags().BoolVar(&showCitations, "show-citations", false,
@@ -359,7 +402,7 @@ func RootCmd() *cobra.Command {
 	return c
 }
 
-func run(stdout, stderr io.Writer, old, new string, upstream, codeVar []string, showCitations, quiet bool, dirs []string) int {
+func run(stdout, stderr io.Writer, old, new string, upstream, keep, codeVar []string, showCitations, quiet bool, dirs []string) int {
 	var missing []string
 	if old == "" {
 		missing = append(missing, "--old")
@@ -379,7 +422,7 @@ func run(stdout, stderr io.Writer, old, new string, upstream, codeVar []string, 
 	for _, v := range codeVar {
 		vars[strings.TrimPrefix(v, "$")] = true
 	}
-	c := newClassifier(old, new, upstream, vars)
+	c := newClassifier(old, new, upstream, keep, vars)
 
 	byRoot := map[string][]finding{}
 	files := map[string]int{}
