@@ -41,8 +41,17 @@ type Finding struct {
 	Line  int    // 1-indexed
 	Col   int    // 1-indexed byte column, so an author can find it without being shown it
 	Match string // the exact text matched
-	Kind  string // "home path", "unc path", "account name", "document name"
+	Kind  string // "home path", "unc path", "account name", "document name", "name"
 	Why   string // what a reader of the refusal needs to know
+	// Account is WHOSE file system this finding names, when that is knowable.
+	//
+	// ⛔ It is here because a count cannot answer the question a sweep is run to
+	// answer. "126 findings over six repositories" says nothing about whether
+	// one of them is the owner of this machine, and that is the whole question.
+	// Measured 2026-11-09: of ten accounts named across four organisations, one
+	// was ours — and reading that from a list of 126 line numbers was not
+	// possible until the findings carried whose they were.
+	Account string
 }
 
 // String describes the finding WITHOUT reprinting what it found.
@@ -320,7 +329,7 @@ func ScanKnown(text string, known []string) []Finding {
 				}
 			}
 			out = append(out, Finding{
-				Line: i + 1, Col: loc[0] + 1, Match: m, Kind: "home path",
+				Line: i + 1, Col: loc[0] + 1, Match: m, Kind: "home path", Account: account,
 				Why: "a home directory names its account holder, their layout and their documents; the measurement is the content, the path is not",
 			})
 		}
@@ -358,10 +367,14 @@ func ScanKnown(text string, known []string) []Finding {
 				if inPath(line, at) {
 					continue
 				}
-				out = append(out, Finding{
+				f := Finding{
 					Line: i + 1, Col: at + 1, Match: name, Kind: kind,
 					Why: "a name from a path, standing on its own",
-				})
+				}
+				if kind == "account name" || kind == "name" {
+					f.Account = name
+				}
+				out = append(out, f)
 			}
 		}
 	}
