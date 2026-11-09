@@ -204,6 +204,57 @@ func TestKindsAreHonest(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE THREE FALSE POSITIVES A REAL SWEEP MEASURED, 2026-11-09. The first
+// run over 60 repositories reported 509 findings; the sample showed the tool
+// measuring itself. Each shape below is one of them, and each was costing more
+// than it caught — a gate that fires on a package manager's prefix and on TeX is
+// one its author switches off, which is the only way a gate truly fails.
+func TestTheFalsePositivesASweepMeasured(t *testing.T) {
+	// (1) A package manager's own prefix, read as a person called ".zpkg":
+	// `/home/.zpkg/<domain>/<pkg>/v<version>/bin/<tool>`. One body produced 38
+	// findings this way, every package name along the path hunted as a
+	// document. No account name begins with a dot.
+	for _, tool := range []string{
+		"/home/.zpkg/gnu.org/libtool/v2.6.2/bin/libtoolize",
+		"/home/.pkgx/gnu.org/libtool/v2.6.2/bin/libtoolize", // the older spelling its issue bodies still carry
+		"/Users/.cache/go-build/ab/abcdef",
+		"/home/.local/share/applications/x.desktop",
+	} {
+		body := tool + " failed, and libtoolize is the wrapper libtool installs\n"
+		if got := Scan(body); len(got) != 0 {
+			t.Errorf("a tool directory was read as a person: %q → %v", tool, got)
+		}
+	}
+
+	// (2) TeX. `\\` is a line break in LaTeX and an escaped backslash in every
+	// Go string literal, so `\\ + name + \ + name` matched inside ordinary TeX
+	// and captured a one-letter "share". In this fleet's TeX engine tracker that
+	// is everywhere.
+	for _, tex := range []string{
+		`a line\\hbox\scriptstyle`,
+		`\\par\noindent`,
+		`row one\\s`,
+		`\\ \hline`,
+	} {
+		if got := Scan(tex); len(got) != 0 {
+			t.Errorf("TeX was read as a Windows share: %q → %v", tex, got)
+		}
+	}
+	// … while a real share is still caught.
+	if got := Scan(`\\FILESERVER\alicia$\thesis\main.tex`); len(got) == 0 {
+		t.Error("a real UNC path is no longer found")
+	}
+
+	// (3) A one- or two-character name is never hunted bare, whatever taught it.
+	// One such name produced 276 of the sweep's 509 findings.
+	if got := Scan("/home/ab/x\nab initio, absolutely, a b\n"); len(got) != 1 {
+		t.Errorf("a two-letter account was hunted through prose: %v", got)
+	}
+	if got := ScanKnown("s is a letter, so is s, and s", []string{"s"}); len(got) != 0 {
+		t.Errorf("a one-letter name supplied by a caller was hunted: %v", got)
+	}
+}
+
 func TestRedactReplacesAndCounts(t *testing.T) {
 	in := "measured on `/Users/dennis/thesis/main.tex` and `/home/dennis/out.pdf`"
 	out, n := Redact(in)

@@ -69,10 +69,31 @@ func (f Finding) Reveal() string {
 // disclosure — "`/Users/runner` is the GitHub runner's home directory" is a
 // sentence a report may legitimately need, and refusing it would teach the
 // reader to pass the waiver by reflex, which is how a gate stops being one.
-var homePath = regexp.MustCompile(`(?i)(?:/Users|/home|\\Users|C:\\Users)[/\\]([A-Za-z0-9._-]+)((?:[/\\][A-Za-z0-9._-]+)*)`)
+// ⛔ The account may not begin with a dot. Measured on 2026-11-09 over 60
+// repositories: a package manager's own prefix — `/home/.zpkg/<domain>/<pkg>/
+// v<version>/bin/<tool>`, and the `.pkgx` spelling its older issue bodies still
+// carry — was read as the home directory of a person by that name, and one body
+// alone produced 38 findings: the tool's prefix taken for an account, and every
+// package name along the path hunted as that person's document. No account name
+// starts with a dot; a dotted first component is a tool's directory.
+var homePath = regexp.MustCompile(`(?i)(?:/Users|/home|\\Users|C:\\Users)[/\\]([A-Za-z0-9][A-Za-z0-9._-]*)((?:[/\\][A-Za-z0-9._-]+)*)`)
 
 // uncPath matches a Windows share, which names a machine as well as a person.
-var uncPath = regexp.MustCompile(`\\\\[A-Za-z0-9._-]+\\([A-Za-z0-9._$-]+)((?:\\[A-Za-z0-9._-]+)*)`)
+//
+// ⛔⛔ IT USED TO MATCH TeX. `\\` is a line break in LaTeX and an escaped
+// backslash in every Go string literal, so in this fleet's TeX engine tracker
+// the pattern `\\ + name + \ + name` matched things like `\\hbox\scriptstyle`
+// and captured `s` as a share. That one-letter capture was then hunted as a name
+// through all 60 repositories of a sweep, which is where 276 of its 509
+// findings came from — a measurement of my own regex, reported as a population.
+// Length alone does not separate them — `\\hbox\scriptstyle` has a four-letter
+// "host" and an eleven-letter "share". What separates them is that this package
+// is about a PATH ON A FILE SYSTEM, and a path has a path in it: a third
+// component is required. `\\par\noindent` and `\\hbox\scriptstyle` have two;
+// `\\FILESERVER\alicia$\thesis\main.tex` has four. A bare share root is given
+// up deliberately, and a chain of three backslash-separated control words is not
+// how TeX is written, braces being what groups its arguments.
+var uncPath = regexp.MustCompile(`\\\\[A-Za-z0-9._-]{3,}\\([A-Za-z0-9._$-]{2,})((?:\\[A-Za-z0-9._-]+)+)`)
 
 // genericAccounts are the home-directory names that identify a ROLE rather than
 // a person: a runner, a container, a documentation example. They are the reason
@@ -113,6 +134,17 @@ var genericComponents = map[string]bool{
 // this is still redacted INSIDE its path — only the standalone hunt is skipped.
 const minBareName = 5
 
+// minBareAccount is the shortest ACCOUNT this package will hunt on its own. It
+// is lower than minBareName because the account is the person's name and the
+// rule is centrally about it, but it is not 1.
+//
+// ⛔ Measured on 2026-11-09: a one-character name learned from a false path was
+// hunted through 60 repositories and produced 276 of a sweep's 509 findings.
+// Whatever the source, a name of one or two characters matches prose everywhere,
+// and a gate that fires everywhere is one its author turns off. A shorter
+// account is still reported INSIDE its path, where it is unambiguous.
+const minBareAccount = 3
+
 // Scan reports every place text names a person's own file system.
 func Scan(text string) []Finding { return ScanKnown(text, nil) }
 
@@ -130,7 +162,7 @@ func Names(text string) []string {
 	seen := map[string]bool{}
 	var out []string
 	keep := func(n string) {
-		if n == "" || genericAccounts[n] || seen[n] {
+		if n == "" || genericAccounts[n] || seen[n] || len(n) < minBareAccount {
 			return
 		}
 		seen[n] = true
@@ -227,7 +259,7 @@ func ScanKnown(text string, known []string) []Finding {
 	// the wrong thing.
 	names := map[string]string{}
 	for _, n := range known {
-		if n != "" && !genericAccounts[n] {
+		if n != "" && !genericAccounts[n] && len(n) >= minBareAccount {
 			names[n] = "name"
 		}
 	}
@@ -352,7 +384,7 @@ func RedactKnown(text string, known []string) (string, int) {
 	n := 0
 	names := map[string]bool{}
 	for _, k := range known {
-		if k != "" && !genericAccounts[k] {
+		if k != "" && !genericAccounts[k] && len(k) >= minBareAccount {
 			names[k] = true
 		}
 	}
