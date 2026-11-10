@@ -3,7 +3,8 @@
 //
 // priorart (#193) answers "has this already been done?" for whoever runs it.
 // Nothing tied that answer to the act of filing: twice in two days
-// (go-gitsafe/gitsafe#99, a duplicate of #90 that PR #96 was already
+// (go-gitsafe/gitsafe#99, a duplicate of go-gitsafe/gitsafe#90 that
+// go-gitsafe/gitsafe#96 was already
 // implementing; then go-quake1/engine#88) priorart and `ghissue --new` ran in
 // ONE shell command, so its verdict -- exit 1, "found" -- arrived after the
 // issue existed. A check in the same command as the act it guards is a log,

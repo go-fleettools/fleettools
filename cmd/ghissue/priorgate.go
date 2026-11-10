@@ -15,7 +15,8 @@ import (
 // answer to the act of filing. Twice in two days an issue was opened in the
 // SAME shell command as the priorart run meant to precede it, so the verdict
 // (exit 1: found) arrived after the issue existed: go-gitsafe/gitsafe#99
-// duplicated #90, which PR #96 was already implementing. A check in the same
+// duplicated go-gitsafe/gitsafe#90, which go-gitsafe/gitsafe#96 was already
+// implementing. A check in the same
 // command as the act it guards is a log, not a gate.
 //
 // So --new reads priorart's ledger (internal/priorledger) and refuses unless a
@@ -71,7 +72,7 @@ func priorArtStamp(repo, checked, waiver string) (string, error) {
 			"  Run it ALONE, read what it lists, then file:\n"+
 			"      priorart --repo %s \"<subject>\"\n"+
 			"  (a priorart run in the same command as --new cannot stop it: that is how\n"+
-			"  go-gitsafe/gitsafe#99 duplicated #90.) To file without it, say why:\n"+
+			"  go-gitsafe/gitsafe#99 duplicated go-gitsafe/gitsafe#90.) To file without it, say why:\n"+
 			"      --prior-art-waiver \"<reason>\"   (stamped into the issue)",
 			repo, priorWindow, repo)
 	}

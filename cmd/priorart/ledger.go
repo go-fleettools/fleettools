@@ -13,7 +13,7 @@ import (
 // record writes this run's verdict to priorart's ledger, which `ghissue
 // --new` reads before it files: an issue opened in the same command as the
 // priorart run meant to precede it cannot be stopped by that run, and twice it
-// was not (go-gitsafe/gitsafe#99, a duplicate of #90). Only runs that named
+// was not (go-gitsafe/gitsafe#99, a duplicate of go-gitsafe/gitsafe#90). Only runs that named
 // repositories (--repo) or an organisation (--org) are recorded: a --deps-only
 // run says nothing about a tracker.
 //
