@@ -62,6 +62,13 @@ const longHelp = `Repository-level GitHub writes, each after showing the reposit
   ghrepo <owner/repo> delete --confirm <owner/repo>
   ghrepo <owner/repo> sync [--branch B]
   ghrepo <owner/repo> secret-set <NAME> (--value-file F | --value-stdin)
+  ghrepo <owner/repo> pages workflow
+
+pages workflow makes the Pages site publish what a workflow deploys (build type
+"workflow"), creating the site when there is none. A repository named
+<org>.github.io starts as "legacy", which publishes the repository's own files
+from main; a site whose workflow builds its content needs this once. It is the
+only value: going back to "legacy" is refused.
 
 --topic REPLACES the whole topic set (GitHub's endpoint does); repeat it for
 several, and run edit without it to leave topics alone.
@@ -101,7 +108,7 @@ type opts struct {
 func RootCmd() *cobra.Command {
 	var o opts
 	cmd := &cobra.Command{
-		Use:          "ghrepo <owner/repo> <fork|edit|rename|archive|delete|sync|secret-set> [arg]",
+		Use:          "ghrepo <owner/repo> <fork|edit|rename|archive|delete|sync|secret-set|pages> [arg]",
 		Short:        "Fork, edit, rename, archive, delete, sync a GitHub repository, or set an Actions secret",
 		Long:         longHelp,
 		Args:         cobra.RangeArgs(2, 3),
@@ -212,8 +219,12 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		if !secretName.MatchString(arg) || strings.HasPrefix(strings.ToUpper(arg), "GITHUB_") {
 			return fmt.Errorf("secret name %q: letters, digits and underscores, not starting with a digit or GITHUB_", arg)
 		}
+	case "pages":
+		if arg != "workflow" {
+			return fmt.Errorf("pages: want the one value \"workflow\", got %q", arg)
+		}
 	default:
-		return fmt.Errorf("unknown verb %q: want fork, edit, rename, archive, delete, sync or secret-set", verb)
+		return fmt.Errorf("unknown verb %q: want fork, edit, rename, archive, delete, sync, secret-set or pages", verb)
 	}
 	if o.org != "" || o.name != "" {
 		if verb != "fork" {
@@ -282,6 +293,8 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		return doDelete(out, c, repoURL, tok, r, o)
 	case "sync":
 		return doSync(out, c, repoURL, tok, r, o)
+	case "pages":
+		return doPages(out, c, repoURL, tok, r, o)
 	default:
 		return doSecret(out, c, repoURL, tok, r, o, arg, secret)
 	}
@@ -458,6 +471,65 @@ func doSecret(out io.Writer, c *http.Client, repoURL, tok string, r repoInfo, o 
 		verb = "updated"
 	}
 	fmt.Fprintf(out, "secret %s %s on %s (HTTP %d)\n", name, verb, r.FullName, st)
+	return nil
+}
+
+// pagesBuildType reads the Pages site's build type; "" and found=false when the
+// repository has no Pages site (404).
+func pagesBuildType(c *http.Client, repoURL, tok string) (buildType string, found bool, err error) {
+	st, b, err := do(c, http.MethodGet, repoURL+"/pages", tok, nil, http.StatusOK, http.StatusNotFound)
+	if err != nil {
+		return "", false, err
+	}
+	if st == http.StatusNotFound {
+		return "", false, nil
+	}
+	var p struct {
+		BuildType string `json:"build_type"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil || p.BuildType == "" {
+		return "", true, errors.New("pages: the reply carried no build_type, so nothing proves what it is")
+	}
+	return p.BuildType, true, nil
+}
+
+// doPages makes the Pages site's build type "workflow": the state is read back
+// after the write, and a site that did not take it is an error.
+func doPages(out io.Writer, c *http.Client, repoURL, tok string, r repoInfo, o opts) error {
+	before, found, err := pagesBuildType(c, repoURL, tok)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "pages: site=%t build_type=%q\n", found, before)
+	if found && before == "workflow" {
+		fmt.Fprintln(out, "already publishes what a workflow deploys; nothing to do")
+		return nil
+	}
+	if o.dryRun {
+		if found {
+			fmt.Fprintln(out, "would change the build type to workflow")
+		} else {
+			fmt.Fprintln(out, "would create the Pages site with build type workflow")
+		}
+		return nil
+	}
+	payload, _ := json.Marshal(map[string]string{"build_type": "workflow"})
+	if found {
+		_, _, err = do(c, http.MethodPut, repoURL+"/pages", tok, payload, http.StatusNoContent)
+	} else {
+		_, _, err = do(c, http.MethodPost, repoURL+"/pages", tok, payload, http.StatusCreated)
+	}
+	if err != nil {
+		return err
+	}
+	after, found, err := pagesBuildType(c, repoURL, tok)
+	if err != nil {
+		return err
+	}
+	if !found || after != "workflow" {
+		return fmt.Errorf("pages: asked for workflow, the site says site=%t build_type=%q", found, after)
+	}
+	fmt.Fprintf(out, "pages: build_type=%q on %s\n", after, r.FullName)
 	return nil
 }
 
