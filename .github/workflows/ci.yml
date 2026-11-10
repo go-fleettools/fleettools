@@ -68,6 +68,12 @@ jobs:
       - name: fuzz the streaming scan
         run: go test -run '^$' -fuzz FuzzScanForAgreesWithContains -fuzztime 30s ./cmd/pagetext
 
+      # secondorigin reads a shell page this repository does not control; the
+      # walk over its scripts must end and the CSP normal form must be a fixed
+      # point, whatever the bytes.
+      - name: fuzz the second-origin shell parsers
+        run: go test -run '^$' -fuzz FuzzShellAndCSP -fuzztime 30s ./cmd/secondorigin
+
       # docmd reads untrusted Office packages (ZIP and XML); any bytes must give
       # Markdown or an error, never a panic. The corpus is committed.
       - name: fuzz the docx/pptx/xlsx reader
