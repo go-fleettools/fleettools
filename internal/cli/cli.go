@@ -228,7 +228,14 @@ func Exec(c *cobra.Command, args []string, out, errOut io.Writer) error {
 // A status of 1 prints nothing extra: the command's own output has already
 // listed what was found, and repeating it on stderr makes a lane's log read as
 // if something went wrong on top of the finding.
+//
+// ⛔ Status prints the error, so cobra must not. New sets SilenceErrors, but a
+// command built by hand (&cobra.Command{...}) does not, and ghissue, ghpr,
+// ghrel, ghrepo and ghrun printed every refusal twice -- cobra's "Error: …"
+// then this "⛔ …". Silencing here, at the one place that prints, covers every
+// command present and future; cobra reads the flag on the root.
 func Status(c *cobra.Command) int {
+	c.SilenceErrors = true
 	err := c.Execute()
 	if err == nil {
 		return 0
