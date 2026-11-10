@@ -144,6 +144,45 @@ func TestItCountsRepositoriesUnderARoot(t *testing.T) {
 	}
 }
 
+// ⛔ ONLY .yml AND .yaml ARE WORKFLOWS. A README, a notes file or a schema
+// sitting in .github/workflows/ can carry the string `runs-on:` without being
+// a workflow at all, and counting it inflates whichever repository documents
+// its own CI. Carried over from the version of this tool that lived outside a
+// repository; the rewrite onto internal/checkout kept the filter and dropped
+// the test, which is how a guard quietly becomes an assumption.
+func TestOnlyWorkflowFilesAreRead(t *testing.T) {
+	root := t.TempDir()
+	writeRepo(t, root, "org/one", map[string]string{
+		"ci.yml":      "    runs-on: ubuntu-latest\n",
+		"deploy.yaml": "    runs-on: macos-15\n",
+		"notes.md":    "    runs-on: windows-latest\n",
+		"README":      "    runs-on: windows-latest\n",
+	})
+	found, had := scanRepo(filepath.Join(root, "org", "one"), "org/one")
+	if !had {
+		t.Fatal("a directory holding workflows reported none")
+	}
+	if len(found) != 2 {
+		t.Fatalf("read %d values, want 2 (.yml and .yaml only): %+v", len(found), found)
+	}
+	for _, f := range found {
+		if f.RunsOn == "windows-latest" {
+			t.Errorf("a non-workflow file was read as one: %+v", f)
+		}
+	}
+}
+
+// A checkout with no .github/workflows at all is a repository without CI, not
+// a repository that could not be read. The caller counts them apart.
+func TestACheckoutWithNoWorkflowsIsNotAReadFailure(t *testing.T) {
+	root := t.TempDir()
+	writeRepo(t, root, "org/bare", nil)
+	found, had := scanRepo(filepath.Join(root, "org", "bare"), "org/bare")
+	if had || len(found) != 0 {
+		t.Errorf("scanRepo = (%+v, %v), want (nil, false)", found, had)
+	}
+}
+
 // ⛔ The note counts CHECKOUTS, not findings. runson reports a distribution --
 // thousands of findings over hundreds of checkouts -- so borrowing the
 // scanners' "N of the M findings above" sentence would have named the wrong
