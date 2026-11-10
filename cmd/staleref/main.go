@@ -214,9 +214,20 @@ func newClassifier(old, new string, upstream, keep, alsoRetired []string, codeVa
 	// is a prefix of its replacement, so without the boundary the gate would
 	// report every CORRECT line as drift — the failure recorded in
 	// `a-sweep-that-measured-its-own-regex`.
-	c.retired = []retired{newRetired(stem, strings.TrimPrefix(new, "go-"))}
+	//
+	// ⛔ THE STEM'S REPLACEMENT IS NOT DERIVABLE, so it is not guessed. The
+	// organisation went `go-pkgx` → `go-zpkg`, but its command went `pkgx` →
+	// `zpkgx`: trimming the prefix off the new org name yields `zpkg`, which is
+	// nothing. A suggestion is a string somebody pastes into a document, so a
+	// wrong one is worse than none. `--retired pkgx=zpkgx` states it, and an
+	// explicit entry REPLACES the stem rather than being shadowed by it.
+	c.retired = []retired{newRetired(stem, "")}
 	for _, r := range alsoRetired {
 		was, now, _ := strings.Cut(r, "=")
+		if was == stem {
+			c.retired[0] = newRetired(was, now)
+			continue
+		}
 		c.retired = append(c.retired, newRetired(was, now))
 	}
 	return c

@@ -482,6 +482,30 @@ func TestAnAllowPatternThatMatchesNothingIsAnError(t *testing.T) {
 	}
 }
 
+// ⛔ TestTheStemsReplacementIsNotGuessed. `go-pkgx` → `go-zpkg` would derive
+// `zpkg` for the command, but the command is `zpkgx`. A suggestion is a string
+// somebody pastes into a document, so the stem carries none unless --retired
+// states it — and when it does, it REPLACES the stem rather than being shadowed.
+func TestTheStemsReplacementIsNotGuessed(t *testing.T) {
+	silent := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil, map[string]bool{})
+	got := silent.classifyLine("README.md", 1, "run `pkgx node@22`")
+	if len(got) != 1 {
+		t.Fatalf("%d finding(s), want 1: %+v", len(got), got)
+	}
+	if strings.Contains(got[0].Kind, "zpkg") {
+		t.Errorf("the stem guessed a replacement: %q", got[0].Kind)
+	}
+
+	stated := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"pkgx=zpkgx"}, map[string]bool{})
+	got = stated.classifyLine("README.md", 1, "run `pkgx node@22`")
+	if len(got) != 1 {
+		t.Fatalf("%d finding(s) with --retired pkgx=zpkgx, want 1: %+v", len(got), got)
+	}
+	if !strings.Contains(got[0].Kind, "zpkgx") {
+		t.Errorf("an explicit --retired for the stem was shadowed: %q", got[0].Kind)
+	}
+}
+
 // TestEveryRequiredFlagIsNamed.
 func TestEveryRequiredFlagIsNamed(t *testing.T) {
 	for _, tc := range []struct {
