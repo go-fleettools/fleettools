@@ -265,7 +265,7 @@ func TestOnlyDocumentationIsRead(t *testing.T) {
 		"docs/page.html": "<p>go-pkgx/zbk</p>",
 	})
 	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil, nil)
-	found, files, err := scanTree(root, c, newAllowList(nil))
+	found, files, err := scanTree(root, c, newAllowList(nil), extSet(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,6 +506,58 @@ func TestTheStemsReplacementIsNotGuessed(t *testing.T) {
 	}
 }
 
+// ⛔⛔ TestExtReadsTheSourcesTheDefaultCannot is the hole this flag closes.
+//
+// On 2026-11-10 the go-zpkg sweep reported zpkgx accounted for while
+// `zpkgx --help` printed `ZPKG_DIR  bottle store (default: ~/.pkgx)` and
+// `internal/app/environments.go` READ `$HOME/.pkgx/environments`. Neither is
+// a documentation file, so no extension in the default set matched them and
+// their absence from the report read as cleanliness.
+func TestExtReadsTheSourcesTheDefaultCannot(t *testing.T) {
+	root := tree(t, map[string]string{
+		"README.md": "nothing stale here\n",
+		"main.go":   "// help: ZPKG_DIR bottle store (default: ~/.pkgx)\n",
+		"run.sh":    "exec pkgx \"$@\"\n",
+	})
+	o := opts{old: "go-pkgx", new: "go-zpkg", alsoRetired: []string{"pkgx=zpkgx"}}
+
+	// The default set cannot see either file, and says so with a clean run.
+	var out, errb bytes.Buffer
+	if code := run(&out, &errb, o, []string{root}); code != 0 {
+		t.Fatalf("exit %d with the default extensions, want 0:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "1 doc file(s)") {
+		t.Errorf("the default set read something other than README.md:\n%s", out.String())
+	}
+
+	// Named, they are read and both are found.
+	out.Reset()
+	errb.Reset()
+	o.exts = []string{"go", ".SH"} // bare, dotted and upper-case are one thing
+	if code := run(&out, &errb, o, []string{root}); code != 1 {
+		t.Fatalf("exit %d with --ext, want 1:\n%s", code, out.String())
+	}
+	for _, want := range []string{"main.go", "run.sh", "3 doc file(s)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("--ext did not reach %s:\n%s", want, out.String())
+		}
+	}
+}
+
+// TestExtNormalisesItsArgument: `go`, `.go` and `.GO` name one extension, so a
+// caller cannot half-enable a file set and read the silence as clean.
+func TestExtNormalisesItsArgument(t *testing.T) {
+	for _, spell := range []string{"go", ".go", ".GO", "  go  "} {
+		s := extSet([]string{spell})
+		if !s[".go"] {
+			t.Errorf("--ext %q did not enable .go", spell)
+		}
+	}
+	if s := extSet([]string{"", "   "}); len(s) != len(docExts) {
+		t.Errorf("an empty --ext changed the set: %v", s)
+	}
+}
+
 // TestEveryRequiredFlagIsNamed.
 func TestEveryRequiredFlagIsNamed(t *testing.T) {
 	for _, tc := range []struct {
@@ -550,7 +602,7 @@ func TestAnUnreadableFileIsAnError(t *testing.T) {
 		t.Skip("running as a user that can read a 0000 file")
 	}
 	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil, nil)
-	if _, _, err := scanTree(root, c, newAllowList(nil)); err == nil {
+	if _, _, err := scanTree(root, c, newAllowList(nil), extSet(nil)); err == nil {
 		t.Error("an unreadable document passed as a clean read")
 	}
 }
@@ -565,7 +617,7 @@ func TestTheRootCommandAnswersHelpWithZero(t *testing.T) {
 	if err := c.Execute(); err != nil {
 		t.Fatalf("--help returned %v", err)
 	}
-	for _, want := range []string{"--old", "--new", "--upstream", "--code-var", "--quiet", "--retired", "--allow"} {
+	for _, want := range []string{"--old", "--new", "--upstream", "--code-var", "--quiet", "--retired", "--allow", "--ext"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("--help does not mention %s", want)
 		}
