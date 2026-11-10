@@ -71,11 +71,50 @@ lets this gate a CI lane instead of only reporting.
 Exit status: 0 nothing stale, 1 at least one STALE or UNSURE reference,
 2 the files could not be read, or an --allow pattern matched no file.`
 
-// docExts are the files documentation lives in. Source files are modrename's
-// business and a recipe's own fields are the pantry's.
+// docExts are the files documentation lives in by default. Source files are
+// modrename's business and a recipe's own fields are the pantry's.
+//
+// ⛔⛔ THIS LIST IS A CLAIM ABOUT WHERE THE ANSWER CAN BE, and on 2026-11-10 it
+// was wrong in a way that read as a clean report. The go-zpkg sweep said
+// zpkgx was accounted for while `zpkgx --help` printed
+// `ZPKG_DIR  bottle store (default: ~/.pkgx)` and
+// `internal/app/environments.go:82` READ `$HOME/.pkgx/environments` — live
+// code pointing into the retired store, in files no extension here matches.
+// The same hole hid `zbk/config/config.go` returning `~/.pkgx` while
+// `bottle.Dir()` returned `~/.zpkg`.
+//
+// User-visible strings live in CODE: help text, usage blocks, warnings, error
+// messages, flag names, flag defaults and flag values. A rename sweep that
+// cannot open a `.go` file cannot see any of them, and reports their absence
+// as cleanliness — `a-scan-that-could-not-read-reported-zero`.
+//
+// So --ext exists, and the default stays conservative: widening it silently
+// would flood the report with a language's own identifiers. The caller says
+// which files are in scope, which makes the scope reviewable.
 var docExts = map[string]bool{
 	".md": true, ".html": true, ".txt": true, ".rst": true,
 	".yml": true, ".yaml": true, ".toml": true, ".json": true,
+}
+
+// extSet is the file set one run reads: docExts plus whatever --ext added.
+// An entry is normalised to a lower-case, leading-dot extension so that
+// `--ext go`, `--ext .go` and `--ext .GO` are one thing.
+func extSet(extra []string) map[string]bool {
+	s := make(map[string]bool, len(docExts)+len(extra))
+	for e := range docExts {
+		s[e] = true
+	}
+	for _, e := range extra {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		s[e] = true
+	}
+	return s
 }
 
 // verdict is what one occurrence is.
@@ -421,8 +460,9 @@ func (a *allowList) unused() []string {
 	return out
 }
 
-// scanTree classifies every documentation file under one directory.
-func scanTree(root string, c *classifier, allow *allowList) ([]finding, int, error) {
+// scanTree classifies every file under one directory whose extension is in
+// exts.
+func scanTree(root string, c *classifier, allow *allowList, exts map[string]bool) ([]finding, int, error) {
 	var out []finding
 	files := 0
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -436,7 +476,7 @@ func scanTree(root string, c *classifier, allow *allowList) ([]finding, int, err
 			}
 			return nil
 		}
-		if !docExts[strings.ToLower(filepath.Ext(p))] {
+		if !exts[strings.ToLower(filepath.Ext(p))] {
 			return nil
 		}
 		b, err := os.ReadFile(p)
@@ -537,6 +577,8 @@ func RootCmd() *cobra.Command {
 		"an environment variable the CODE still reads, so documenting it is correct; repeatable")
 	c.Flags().StringArrayVar(&o.alsoRetired, "retired", nil,
 		"another spelling the rename retired, as was=now (eg. bk=zbk); one rename is never one word, and a stem-only check reports the rest as clean; repeatable")
+	c.Flags().StringArrayVar(&o.exts, "ext", nil,
+		"also read files with this extension, eg. --ext go --ext sh. The default set is documentation only, and user-visible strings live in CODE — help text, usage blocks, warnings, flag names and flag DEFAULTS — so a sweep that cannot open a source file reports their absence as cleanliness; repeatable")
 	c.Flags().StringArrayVar(&o.allowPats, "allow", nil,
 		"a file on which the old name is the SUBJECT and every occurrence is correct (a filiation page, a CHANGELOG); its findings become citations, which is what lets the exit status gate. A pattern matching no file is an error; repeatable")
 	c.Flags().BoolVar(&o.showCitations, "show-citations", false,
@@ -556,6 +598,7 @@ type opts struct {
 	codeVar       []string
 	alsoRetired   []string
 	allowPats     []string
+	exts          []string
 	showCitations bool
 	quiet         bool
 }
@@ -583,11 +626,12 @@ func run(stdout, stderr io.Writer, o opts, dirs []string) int {
 	}
 	c := newClassifier(old, new, o.upstream, o.keep, o.alsoRetired, vars)
 	allow := newAllowList(o.allowPats)
+	exts := extSet(o.exts)
 
 	byRoot := map[string][]finding{}
 	files := map[string]int{}
 	for _, d := range dirs {
-		found, n, err := scanTree(d, c, allow)
+		found, n, err := scanTree(d, c, allow, exts)
 		if err != nil {
 			fmt.Fprintln(stderr, "staleref:", err)
 			return 2
