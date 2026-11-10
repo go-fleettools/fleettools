@@ -149,6 +149,8 @@ func RootCmd() *cobra.Command {
 		waiver   string
 		doDelete bool
 		confirm  string
+		prior    string
+		priorWv  string
 	)
 	cmd := &cobra.Command{
 		Use:          "ghissue <owner/repo> <number> | <owner/repo> --new --title <t> --body-file <f>",
@@ -162,6 +164,7 @@ func RootCmd() *cobra.Command {
 				title: title, dryRun: dryRun, doClose: doClose, doReopen: doReopen,
 				addLabels: addLab, removeLabels: remLab,
 				edit: doEdit, waiver: waiver, confirm: confirm,
+				priorArt: prior, priorWaiver: priorWv,
 			}
 			// ⛔ The three acts are named separately and checked against each
 			// other rather than ordered by precedence: --delete beside --edit is
@@ -221,6 +224,12 @@ func RootCmd() *cobra.Command {
 		"delete the issue PERMANENTLY (with --confirm <owner/repo#number>)")
 	f.StringVar(&confirm, "confirm", "",
 		"the reference retyped, which --delete requires: there is no undo and no second chance to see the number")
+	// The prior-art gate on --new (priorgate.go): a REASON each, stamped into
+	// the published body, for the same reason as --allow-private-path.
+	f.StringVar(&prior, "prior-art", "",
+		"--new after a priorart run that found something: what you read and why this issue is not a duplicate (STAMPED into the issue)")
+	f.StringVar(&priorWv, "prior-art-waiver", "",
+		"--new without a recent priorart run: why (STAMPED into the issue)")
 	return cmd
 }
 
@@ -234,6 +243,9 @@ type opts struct {
 	waiver string
 	// confirm is the reference retyped to authorise --delete; see delete.go.
 	confirm string
+	// priorArt and priorWaiver answer the prior-art gate on --new; see
+	// priorgate.go.
+	priorArt, priorWaiver string
 }
 
 // count says how many of the acts were asked for.
@@ -275,6 +287,13 @@ func runNew(cmd *cobra.Command, args []string, o opts) error {
 	if err != nil {
 		return err
 	}
+	// The prior-art gate, before anything is read from the network: a
+	// duplicate is refused locally, and the stamp goes into what is sent.
+	stamp, err := priorArtStamp(owner+"/"+repo, o.priorArt, o.priorWaiver)
+	if err != nil {
+		return err
+	}
+	body = strings.TrimRight(body, "\n") + "\n\n" + stamp + "\n"
 	if !strings.HasPrefix(o.base, "https://") && !isTestBase(o.base) {
 		return fmt.Errorf("base %q: must be https", o.base)
 	}

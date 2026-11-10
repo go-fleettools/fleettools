@@ -281,8 +281,10 @@ func TestNewOpensAnIssueAndReportsWhatGitHubGave(t *testing.T) {
 	if err := json.Unmarshal([]byte(s.bodies[1]), &sent); err != nil {
 		t.Fatal(err)
 	}
-	if sent["title"] != "BitLocker backend" || sent["body"] != "why" {
-		t.Errorf("sent %v, want the title flag and the file's bytes", sent)
+	// The file's bytes, then the prior-art stamp (priorgate.go).
+	if sent["title"] != "BitLocker backend" || !strings.HasPrefix(sent["body"], "why\n\nPrior art: `priorart` \"the test subject\"") ||
+		!strings.HasSuffix(sent["body"], "found none.\n") {
+		t.Errorf("sent %v, want the title flag, the file's bytes and the prior-art stamp", sent)
 	}
 	if !strings.Contains(out, "o/r  https://github.com/o/r") {
 		t.Errorf("output does not show the repository first:\n%s", out)
