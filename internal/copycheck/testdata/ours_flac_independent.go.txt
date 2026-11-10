@@ -1,0 +1,107 @@
+// Package fixture: a FLAC residual decoder written from the format
+// specification (RFC 9639, section 9.2.7), not from any decoder's source. It is
+// the CONTROL against REAL ffmpeg code: the same job as flacdec.c's
+// decode_residuals, written independently, must not be reported.
+package fixture
+
+import "errors"
+
+type bitReader struct {
+	data []byte
+	pos  uint // in bits
+}
+
+func (r *bitReader) bits(n uint) (uint32, error) {
+	if r.pos+n > uint(len(r.data))*8 {
+		return 0, errors.New("flac: out of data")
+	}
+	var v uint32
+	for i := uint(0); i < n; i++ {
+		b := r.data[r.pos>>3] >> (7 - r.pos&7) & 1
+		v = v<<1 | uint32(b)
+		r.pos++
+	}
+	return v, nil
+}
+
+func (r *bitReader) unary() (uint32, error) {
+	var q uint32
+	for {
+		b, err := r.bits(1)
+		if err != nil {
+			return 0, err
+		}
+		if b == 1 {
+			return q, nil
+		}
+		q++
+	}
+}
+
+func signExtend(v uint32, n uint) int32 {
+	if n == 0 {
+		return 0
+	}
+	return int32(v<<(32-n)) >> (32 - n)
+}
+
+// readResiduals fills out[order:blockSize] with the partitioned Rice coded
+// residual of one subframe.
+func readResiduals(r *bitReader, out []int32, order, blockSize int) error {
+	method, err := r.bits(2)
+	if err != nil {
+		return err
+	}
+	if method > 1 {
+		return errors.New("flac: reserved residual coding method")
+	}
+	porder, err := r.bits(4)
+	if err != nil {
+		return err
+	}
+	parts := 1 << porder
+	if blockSize%parts != 0 || blockSize/parts < order {
+		return errors.New("flac: bad partition order")
+	}
+	width := uint(4)
+	if method == 1 {
+		width = 5
+	}
+	next := order
+	for p := 0; p < parts; p++ {
+		n := blockSize / parts
+		if p == 0 {
+			n -= order
+		}
+		param, err := r.bits(width)
+		if err != nil {
+			return err
+		}
+		escape := uint32(1)<<width - 1
+		for end := next + n; next < end; next++ {
+			if param == escape {
+				raw, err := r.bits(5)
+				if err != nil {
+					return err
+				}
+				v, err := r.bits(uint(raw))
+				if err != nil {
+					return err
+				}
+				out[next] = signExtend(v, uint(raw))
+				continue
+			}
+			q, err := r.unary()
+			if err != nil {
+				return err
+			}
+			low, err := r.bits(uint(param))
+			if err != nil {
+				return err
+			}
+			folded := q<<param | low
+			out[next] = int32(folded>>1) ^ -int32(folded&1)
+		}
+	}
+	return nil
+}

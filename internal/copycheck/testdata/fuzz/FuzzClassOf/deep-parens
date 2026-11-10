@@ -1,0 +1,2 @@
+go test fuzz v1
+string("((((((((((MIT OR (GPL-2.0-only AND (ISC")

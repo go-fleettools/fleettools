@@ -1,0 +1,80 @@
+// Package fixture is a test fixture: a line-by-line translation of
+// ref_dec.c.txt into Go, as a hurried porter would write it. It is the PLANTED
+// POSITIVE: copycheck must fire on it.
+package fixture
+
+const maxBands = 24
+
+var bandEdges = [25]int{
+	0, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64,
+	76, 88, 100, 116, 132, 152, 176, 204, 240, 280, 328, 384,
+}
+
+var windowCoef = [20]float32{
+	0.0007, 0.0029, 0.0071, 0.0138, 0.0237, 0.0371, 0.0541,
+	0.0745, 0.0977, 0.1229, 0.1495, 0.1763, 0.2026, 0.2276,
+	0.2507, 0.2713, 0.2889, 0.3031, 0.3137, 0.3204,
+}
+
+type decCtx struct {
+	gain      int
+	numBands  int
+	maxSfb    int
+	reservoir int
+	gb        getBitContext
+	scale     [maxBands]int
+	spec      [384]float32
+	prev      [384]float32
+}
+
+func decodeSpectrum(ctx *decCtx, frameLen int) int {
+	var band, k, start, end, escBits, level int
+	var sign, mag int
+	totalBits := 0
+	var step, acc float32
+
+	if frameLen > 384 || ctx.maxSfb > maxBands {
+		return -1
+	}
+	for band = 0; band < ctx.maxSfb; band++ {
+		start = bandEdges[band]
+		end = bandEdges[band+1]
+		step = float32(ctx.scale[band])*0.25 + float32(ctx.gain)
+		for k = start; k < end; k++ {
+			level = ctx.gb.getBits(3)
+			totalBits += 3
+			if level == 7 {
+				escBits = 4
+				for ctx.gb.getBits1() != 0 && escBits < 12 {
+					escBits++
+					totalBits++
+				}
+				mag = (1 << escBits) + ctx.gb.getBits(escBits)
+				totalBits += escBits + 1
+			} else {
+				mag = level
+			}
+			sign = 0
+			if mag != 0 {
+				sign = ctx.gb.getBits1()
+				totalBits++
+			}
+			acc = float32(mag) * step
+			if sign != 0 {
+				ctx.spec[k] = -acc
+			} else {
+				ctx.spec[k] = acc
+			}
+		}
+	}
+	for k = 0; k < frameLen; k++ {
+		w := windowCoef[k%20]
+		ctx.spec[k] = ctx.spec[k]*w + ctx.prev[k]*(1.0-w)
+		ctx.prev[k] = ctx.spec[k]
+	}
+	ctx.reservoir += totalBits
+	if ctx.reservoir > 6144 {
+		ctx.reservoir = 6144
+	}
+	return totalBits
+}

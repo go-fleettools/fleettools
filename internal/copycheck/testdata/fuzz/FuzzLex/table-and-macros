@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("static const int t[] = {0x1, -2, FRAC_CONST(0.5f), 1_000, 0b11, 020};\r\ns->a->b := x <<= 1 &^= 2 ...\n")
