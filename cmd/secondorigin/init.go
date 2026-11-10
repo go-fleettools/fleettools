@@ -216,12 +216,15 @@ const skelShell = `<!doctype html>
 const skelJS = `// The shell of the second origin @@ORIGIN@@.
 //
 // It talks to exactly these origins, written in at init time and checked by
-// ` + "`secondorigin verify`" + ` against the parent's ` + DeclFile + `, and refuses to run
-// anywhere but framed by one of them. A message is believed only when its origin
-// is one of them, its source is the framing window, and it carries the nonce of
-// this page's URL fragment, which only the framing page knows. Every reply goes
-// to the origin that asked. Commands are added to HANDLERS; nothing else
-// answers.
+// ` + "`secondorigin verify`" + ` against the parent's ` + DeclFile + `, and runs that
+// check in a browser. A message is believed only when its origin is one of them,
+// its source is the framing window, and it carries the nonce of this page's URL
+// fragment, which only the framing page knows. The frame says nothing until the
+// parent has said {t:"hello", nonce}: it does not ask the browser who framed it
+// (location.ancestorOrigins is missing in Firefox, and the referrer is not sent),
+// it is TOLD, and believes the message only by those three tests. Every reply
+// goes to the origin that said hello. Commands are added to HANDLERS; nothing
+// else answers.
 (function () {
   "use strict";
   const ALLOW = @@ALLOW@@;
@@ -237,27 +240,25 @@ const skelJS = `// The shell of the second origin @@ORIGIN@@.
   }
   if (window.parent === window) { return refuse("not framed"); }
   if (!/^[A-Za-z0-9_-]{16,}$/.test(nonce)) { return refuse("no nonce"); }
-  const anc = location.ancestorOrigins;
-  let from;
-  if (anc && anc.length) {
-    from = anc.length === 1 ? anc[0] : "";
-  } else {
-    try { from = new URL(document.referrer).origin; } catch (e) { from = ""; }
-  }
-  if (ALLOW.indexOf(from) < 0) { return refuse("framed by an unexpected origin"); }
+  let from = ""; // the parent's origin, known once it has said hello
 
   window.addEventListener("message", function (e) {
     if (ALLOW.indexOf(e.origin) < 0 || e.source !== window.parent) { return; }
     const m = e.data;
-    if (!m || m.nonce !== nonce || typeof m.t !== "string" || typeof m.id !== "string") { return; }
+    if (!m || m.nonce !== nonce || typeof m.t !== "string") { return; }
+    if (m.t === "hello") {
+      from = e.origin;
+      e.source.postMessage({ t: "ready" }, from);
+      return;
+    }
+    if (from !== e.origin || typeof m.id !== "string") { return; }
     const h = Object.prototype.hasOwnProperty.call(HANDLERS, m.t) ? HANDLERS[m.t] : null;
-    if (!h) { return e.source.postMessage({ t: "error", id: m.id, error: "unknown command" }, e.origin); }
+    if (!h) { return e.source.postMessage({ t: "error", id: m.id, error: "unknown command" }, from); }
     Promise.resolve().then(function () { return h(m); }).then(
-      function (r) { e.source.postMessage({ t: m.t, id: m.id, result: r }, e.origin); },
-      function (err) { e.source.postMessage({ t: "error", id: m.id, error: String(err && err.message || err) }, e.origin); }
+      function (r) { e.source.postMessage({ t: m.t, id: m.id, result: r }, from); },
+      function (err) { e.source.postMessage({ t: "error", id: m.id, error: String(err && err.message || err) }, from); }
     );
   });
-  window.parent.postMessage({ t: "ready" }, from);
 })();
 `
 

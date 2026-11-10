@@ -140,4 +140,105 @@ func normCSP(p string) string {
 }
 
 var wildcardPost = regexp.MustCompile(`postMessage\s*\([^;]*,\s*["'` + "`" + `]\*["'` + "`" + `]\s*[,)]`)
-var readsOrigin = regexp.MustCompile(`\.origin\b|ancestorOrigins`)
+
+// matchClose returns the index just after the bracket that closes the one at
+// src[i] (open), walking strings and comments as stringLiterals does, or -1.
+func matchClose(src string, i int, open, close byte) int {
+	depth, n := 0, len(src)
+	for i < n {
+		c := src[i]
+		switch {
+		case c == '/' && i+1 < n && src[i+1] == '/':
+			for i < n && src[i] != '\n' {
+				i++
+			}
+			continue
+		case c == '/' && i+1 < n && src[i+1] == '*':
+			j := strings.Index(src[i+2:], "*/")
+			if j < 0 {
+				return -1
+			}
+			i += j + 4
+			continue
+		case c == '"' || c == '\'' || c == '`':
+			i++
+			for i < n && src[i] != c {
+				if src[i] == '\\' {
+					i++
+				}
+				i++
+			}
+		case c == open:
+			depth++
+		case c == close:
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+		i++
+	}
+	return -1
+}
+
+var messageListener = regexp.MustCompile(`addEventListener\(\s*["']message["']\s*,`)
+var firstIf = regexp.MustCompile(`^\s*(?:(?://[^\n]*\n|/\*.*?\*/)\s*)*if\s*\(`)
+
+// messageGuards checks the shape of every window "message" listener: ITS FIRST
+// STATEMENT must be an `if` whose condition compares both the message's origin
+// and its source and whose consequence returns.
+//
+// ⛔ A WORD IS NOT A CHECK (fleettools#243). The first version asked only that
+// the script mention `.origin`, and a shell whose listener had no origin test
+// at all, or no listener guard, still verified: the real shell names `.origin`
+// in four other places. The browser run (behaviour.go) is the proof; this is the
+// cheap first pass, and it fails on the shapes a mutation produces: the origin
+// test removed, the source test removed, the whole guard removed, or the guard
+// no longer first.
+func messageGuards(src string) (n int, problems []string) {
+	for _, loc := range messageListener.FindAllStringIndex(src, -1) {
+		n++
+		rest := src[loc[1]:]
+		bi := strings.IndexByte(rest, '{')
+		if bi < 0 {
+			problems = append(problems, "a message listener with no body")
+			continue
+		}
+		end := matchClose(rest, bi, '{', '}')
+		if end < 0 {
+			problems = append(problems, "a message listener whose body does not end")
+			continue
+		}
+		body := rest[bi+1 : end-1]
+		m := firstIf.FindStringIndex(body)
+		if m == nil {
+			problems = append(problems, "a message listener whose first statement is not an origin guard")
+			continue
+		}
+		po := m[1] - 1
+		pe := matchClose(body, po, '(', ')')
+		if pe < 0 {
+			problems = append(problems, "a message listener with an unreadable guard")
+			continue
+		}
+		cond, then := body[po+1:pe-1], strings.TrimSpace(body[pe:])
+		then = strings.TrimSpace(strings.TrimPrefix(then, "{"))
+		switch {
+		case !strings.Contains(cond, ".origin"):
+			problems = append(problems, "a message listener whose guard does not test the message's origin: "+oneLine(cond))
+		case !strings.Contains(cond, ".source"):
+			problems = append(problems, "a message listener whose guard does not test the message's source: "+oneLine(cond))
+		case !strings.HasPrefix(then, "return"):
+			problems = append(problems, "a message listener whose guard does not return: "+oneLine(cond))
+		}
+	}
+	return n, problems
+}
+
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 100 {
+		s = s[:100] + "…"
+	}
+	return s
+}

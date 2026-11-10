@@ -41,12 +41,17 @@ type Decl struct {
 	Parents []string `json:"parents"`
 	Shells  []string `json:"shells"`
 	CSP     string   `json:"csp"`
+	// Probe is a command the frame answers (with a message carrying the
+	// command's id) once the parent has said hello; the browser run sends it.
+	// Default "ping".
+	Probe string `json:"probe,omitempty"`
 }
 
 var (
 	orgRE   = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?-usercontent$`)
 	hostRE  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 	shellRE = regexp.MustCompile(`^/[A-Za-z0-9._/-]*$`)
+	probeRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,31}$`)
 )
 
 // Origin is the second origin itself.
@@ -103,6 +108,9 @@ func (d Decl) Validate(local bool) error {
 		if !shellRE.MatchString(s) || strings.Contains(s, "..") {
 			return fmt.Errorf("shell %q: want an absolute path like /shell.html", s)
 		}
+	}
+	if d.Probe != "" && !probeRE.MatchString(d.Probe) {
+		return fmt.Errorf("probe %q: a command name", d.Probe)
 	}
 	if normCSP(d.CSP) == "" {
 		return errors.New("csp: the expected policy of the shell")
@@ -161,6 +169,7 @@ type options struct {
 	local     bool
 	live      string // replaces https://<org>.github.io, for a test or a preview
 	tokenFile string
+	browsers  []string
 	retry     int
 	wait      time.Duration
 	timeout   time.Duration
@@ -181,6 +190,7 @@ func verifyCmd() *cobra.Command {
 	f.BoolVar(&o.local, "local", false, "allow loopback http parents (tests)")
 	f.StringVar(&o.live, "live-url", "", "read the site from this URL instead of https://<org>.github.io (tests, previews)")
 	f.StringVar(&o.tokenFile, "token-file", "", "send the GitHub token in this file with API reads, against the rate limit (\"default\" is ~/.github-token; none by default: the reads are public)")
+	f.StringArrayVar(&o.browsers, "browser", []string{"chromium"}, "the headless browser(s) the frame is run in: chromium, firefox, webkit (repeatable)")
 	f.IntVar(&o.retry, "retry", 0, "run again up to N times while the verdict is NOT VERIFIED (never while it is a FAIL)")
 	f.DurationVar(&o.wait, "wait", 20*time.Second, "time between runs")
 	f.DurationVar(&o.timeout, "timeout", 20*time.Second, "timeout of one request")
@@ -358,8 +368,108 @@ func verify(d Decl, o options, token string) []finding {
 	if o.live != "" {
 		base = strings.TrimSuffix(o.live, "/")
 	}
+	static := len(fs)
 	for _, s := range d.Shells {
 		fs = append(fs, verifyShell(d, base, s, o, token)...)
+	}
+
+	// 4. the whole organisation: any other Pages site of it is served on THIS
+	// origin (https://<org>.github.io/<repo>/) and can read what the frame keeps.
+	fs = append(fs, verifyOrg(d, o, token)...)
+
+	// 5. the frame, run: only when everything static held (a shell that fails the
+	// cheap pass is not worth a browser), and never skipped silently.
+	_ = static
+	if status(fs) == 0 {
+		for _, s := range d.Shells {
+			fs = append(fs, behaviour(d, base+s, o)...)
+		}
+	}
+	return fs
+}
+
+// behaviour is replaced by tests that have no browser.
+var behaviour = runBehaviour
+
+// verifyOrg checks that the declared repository is the organisation's only
+// public repository and only Pages site.
+//
+// ⛔ ONE ORIGIN, MANY SITES (fleettools#243). A repository of <org>-usercontent
+// with Pages enabled is served at https://<org>.github.io/<repo>/, the SAME
+// origin as the frame: its script can read the frame's localStorage, where a
+// remembered forge token is kept. A second PUBLIC repository is one settings
+// click from being that. The organisation's own switches
+// (members_can_create_pages, members_can_create_public_pages) are reported when
+// the API shows them, which it does to an owner only.
+func verifyOrg(d Decl, o options, token string) []finding {
+	var fs []finding
+	add := func(v verdict, check, format string, a ...any) {
+		fs = append(fs, finding{v, check, fmt.Sprintf(format, a...)})
+	}
+	var others []string
+	pages := false
+	for page := 1; page <= 10; page++ {
+		r := get(fmt.Sprintf("%s/orgs/%s/repos?type=all&per_page=100&page=%d", apiBase, d.Org, page), o, token, false)
+		if r.err != nil || r.code != 200 {
+			var why string
+			if r.err != nil {
+				why = r.err.Error()
+			} else {
+				why = "the API answered " + strconv.Itoa(r.code)
+			}
+			return append(fs, finding{unverified, "org repositories", why})
+		}
+		var repos []struct {
+			Name     string `json:"name"`
+			HasPages *bool  `json:"has_pages"`
+			Private  bool   `json:"private"`
+		}
+		if err := json.Unmarshal(r.body, &repos); err != nil {
+			return append(fs, finding{unverified, "org repositories", "unreadable answer"})
+		}
+		for _, r := range repos {
+			if strings.EqualFold(r.Name, d.Repo) {
+				continue
+			}
+			if r.HasPages == nil {
+				return append(fs, finding{unverified, "org repositories", "the answer does not say whether " + r.Name + " has Pages"})
+			}
+			if *r.HasPages {
+				pages = true
+				others = append(others, r.Name+" (a Pages site)")
+			} else if !r.Private {
+				others = append(others, r.Name+" (public)")
+			}
+		}
+		if len(repos) < 100 {
+			break
+		}
+		if page == 10 {
+			return append(fs, finding{unverified, "org repositories", "more than 1000 repositories: not read to the end"})
+		}
+	}
+	switch {
+	case pages:
+		add(fail, "org pages", "another Pages site is served on the frame's origin: %s", strings.Join(others, ", "))
+	case len(others) > 0:
+		add(fail, "org pages", "the frame's repository must be the organisation's only public repository: %s", strings.Join(others, ", "))
+	default:
+		add(pass, "org pages", "%s is the organisation's only public repository and Pages site", d.Repo)
+	}
+	r := get(apiBase+"/orgs/"+d.Org, o, token, false)
+	var s struct {
+		Pages       *bool `json:"members_can_create_pages"`
+		PublicPages *bool `json:"members_can_create_public_pages"`
+	}
+	if r.err == nil && r.code == 200 && json.Unmarshal(r.body, &s) == nil {
+		switch {
+		case (s.Pages != nil && *s.Pages) || (s.PublicPages != nil && *s.PublicPages):
+			add(fail, "org settings", "members may create Pages sites (members_can_create_pages, members_can_create_public_pages): any new repository would share the frame's origin")
+		case s.Pages == nil && s.PublicPages == nil:
+			add(pass, "org settings", "not visible without an owner's token (members_can_create_pages not checked)")
+		default:
+			add(pass, "org settings", "members cannot create Pages sites")
+		}
 	}
 	return fs
 }
@@ -458,14 +568,16 @@ func verifyShell(d Decl, base, path string, o options, token string) []finding {
 	}
 
 	found := map[string]bool{}
-	var wild, unrendered, reads bool
+	var wild, unrendered bool
+	listeners := 0
+	var guardProblems []string
 	for _, src := range srcs {
 		if wildcardPost.MatchString(src) {
 			wild = true
 		}
-		if readsOrigin.MatchString(src) {
-			reads = true
-		}
+		n, probs := messageGuards(src)
+		listeners += n
+		guardProblems = append(guardProblems, probs...)
 		for _, lit := range stringLiterals(src) {
 			if strings.Contains(lit, "{{") || strings.Contains(lit, "@@") {
 				unrendered = true
@@ -485,8 +597,12 @@ func verifyShell(d Decl, base, path string, o options, token string) []finding {
 	if wild {
 		add(fail, name+" origin check", `postMessage is sent to "*"`)
 	}
-	if !reads {
-		add(fail, name+" origin check", "no script reads event.origin")
+	guardsOK := listeners > 0 && len(guardProblems) == 0
+	if listeners == 0 {
+		add(fail, name+" origin check", "no script has a window message listener: nothing checks who talks to the frame")
+	}
+	for _, p := range guardProblems {
+		add(fail, name+" origin check", "%s", p)
 	}
 	declared := map[string]bool{}
 	for _, p := range d.Parents {
@@ -508,8 +624,8 @@ func verifyShell(d Decl, base, path string, o options, token string) []finding {
 	switch {
 	case len(missing) > 0 || len(extra) > 0:
 		add(fail, name+" parents", "missing %v, undeclared %v: the shell must name exactly %v", missing, extra, d.Parents)
-	case !unrendered && !wild && reads:
-		add(pass, name+" parents", "names exactly %v, no other origin, no \"*\"", d.Parents)
+	case !unrendered && !wild && guardsOK:
+		add(pass, name+" parents", "names exactly %v, no other origin, no \"*\"; every message listener starts with an origin and source guard", d.Parents)
 	}
 	return fs
 }
