@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("#define X \\\n /* never closed \"str 'c `raw 0x1p+ 1e- .5.5 \\")

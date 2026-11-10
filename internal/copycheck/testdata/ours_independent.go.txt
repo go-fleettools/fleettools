@@ -1,0 +1,79 @@
+// Package fixture is a test fixture: the SAME job as ref_dec.c.txt (read
+// quantised spectral lines band by band, then smooth them against the previous
+// frame), written from the description of the job and not from the C. It is the
+// CONTROL: copycheck must stay quiet on it.
+package fixture
+
+import "errors"
+
+var errFrame = errors.New("frame longer than the transform")
+
+// bandWidths are the widths of the scale-factor bands, in lines. They are
+// derived here from a growth rule instead of listed.
+func bandWidths(n int) []int {
+	w := make([]int, 0, n)
+	width := 4
+	for i := 0; i < n; i++ {
+		w = append(w, width)
+		if i >= 7 && i%2 == 1 {
+			width += width / 3
+		}
+	}
+	return w
+}
+
+type bitSource interface {
+	Bits(n int) uint32
+}
+
+type spectrum struct {
+	lines    []float64
+	previous []float64
+	budget   int
+}
+
+// escaped reads a magnitude whose prefix said "does not fit in three bits".
+func escaped(src bitSource) (value, used int) {
+	extra := 4
+	used = 1
+	for extra < 12 && src.Bits(1) == 1 {
+		extra++
+		used++
+	}
+	return 1<<extra | int(src.Bits(extra)), used + extra
+}
+
+func (s *spectrum) read(src bitSource, gains []float64, frame int) (int, error) {
+	if frame > len(s.lines) {
+		return 0, errFrame
+	}
+	consumed := 0
+	pos := 0
+	for band, width := range bandWidths(len(gains)) {
+		for i := 0; i < width && pos < frame; i++ {
+			prefix := int(src.Bits(3))
+			consumed += 3
+			magnitude := prefix
+			if prefix == 7 {
+				v, n := escaped(src)
+				magnitude, consumed = v, consumed+n
+			}
+			v := float64(magnitude) * gains[band]
+			if magnitude > 0 && src.Bits(1) == 1 {
+				v = -v
+				consumed++
+			} else if magnitude > 0 {
+				consumed++
+			}
+			s.lines[pos] = v
+			pos++
+		}
+	}
+	blend := 0.5
+	for i := range s.lines[:frame] {
+		s.lines[i] = blend*s.lines[i] + (1-blend)*s.previous[i]
+	}
+	copy(s.previous, s.lines)
+	s.budget = min(s.budget+consumed, 6144)
+	return consumed, nil
+}

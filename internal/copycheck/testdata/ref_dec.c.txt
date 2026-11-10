@@ -1,0 +1,77 @@
+/*
+ * Synthetic fixture, written for copycheck's tests; it is NOT taken from any
+ * real codec and is dedicated to the public domain (CC0-1.0). It has the
+ * proportions of a real decoder routine: a table of band offsets, a window
+ * table, and one function of about fifty lines with loops, escapes and state.
+ */
+#include <stdint.h>
+
+#define MAX_BANDS 24
+
+static const int band_edges[25] = {
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64,
+    76, 88, 100, 116, 132, 152, 176, 204, 240, 280, 328, 384
+};
+
+static const float window_coef[20] = {
+    0.0007f, 0.0029f, 0.0071f, 0.0138f, 0.0237f, 0.0371f, 0.0541f,
+    0.0745f, 0.0977f, 0.1229f, 0.1495f, 0.1763f, 0.2026f, 0.2276f,
+    0.2507f, 0.2713f, 0.2889f, 0.3031f, 0.3137f, 0.3204f
+};
+
+typedef struct DecCtx {
+    int gain;
+    int num_bands;
+    int max_sfb;
+    int reservoir;
+    GetBitContext gb;
+    int scale[MAX_BANDS];
+    float spec[384];
+    float prev[384];
+} DecCtx;
+
+static int decode_spectrum(DecCtx *ctx, int frame_len)
+{
+    int band, k, start, end, esc_bits, level;
+    int sign, mag, total_bits = 0;
+    float step, acc;
+
+    if (frame_len > 384 || ctx->max_sfb > MAX_BANDS)
+        return -1;
+    for (band = 0; band < ctx->max_sfb; band++) {
+        start = band_edges[band];
+        end   = band_edges[band + 1];
+        step  = ctx->scale[band] * 0.25f + ctx->gain;
+        for (k = start; k < end; k++) {
+            level = get_bits(&ctx->gb, 3);
+            total_bits += 3;
+            if (level == 7) {
+                esc_bits = 4;
+                while (get_bits1(&ctx->gb) && esc_bits < 12) {
+                    esc_bits++;
+                    total_bits++;
+                }
+                mag = (1 << esc_bits) + get_bits(&ctx->gb, esc_bits);
+                total_bits += esc_bits + 1;
+            } else {
+                mag = level;
+            }
+            sign = 0;
+            if (mag) {
+                sign = get_bits1(&ctx->gb);
+                total_bits++;
+            }
+            acc = mag * step;
+            ctx->spec[k] = sign ? -acc : acc;
+        }
+    }
+    for (k = 0; k < frame_len; k++) {
+        float w = window_coef[k % 20];
+        ctx->spec[k] = ctx->spec[k] * w + ctx->prev[k] * (1.0f - w);
+        ctx->prev[k] = ctx->spec[k];
+    }
+    ctx->reservoir += total_bits;
+    if (ctx->reservoir > 6144)
+        ctx->reservoir = 6144;
+    return total_bits;
+}

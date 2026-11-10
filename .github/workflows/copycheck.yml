@@ -1,0 +1,102 @@
+# A reusable gate: this repository's source does not resemble the references it
+# declared reading in a way their roles and licences forbid.
+#
+# Called BY the repository being guarded. It needs a `.provenance.yml` at the
+# root (see cmd/copycheck's README entry; `copycheck pin` prints each entry,
+# hash included). Eleven lines in the caller:
+#
+#   name: copycheck
+#   on:
+#     pull_request:
+#     push:
+#       branches: [main]
+#   jobs:
+#     copycheck:
+#       uses: go-fleettools/fleettools/.github/workflows/copycheck.yml@main
+#       with:
+#         version: v0.100.0   # the first fleettools tag that contains copycheck
+#         go-version: '1.27.3'
+#
+# ⛔ A RULE THAT LIVES IN A SENTENCE IS REMEMBERED UNTIL THE DAY IT MATTERS.
+# "Copyleft reference code may be read to understand, never copied or
+# translated, and its tables never copied verbatim" is exactly such a sentence,
+# and the day it matters is the day somebody is in the middle of porting a
+# function and the reference is open in the next window. This job is the door:
+# an AAC (or any) pull request cannot merge while it resembles what it was only
+# allowed to read.
+#
+# ⛔ EXIT 2 IS NOT EXIT 1, and neither is a pass. 1 = a finding (both locations
+# are printed); 2 = the question could not be answered (a reference that did not
+# download, a hash that differs from the manifest, a manifest that does not
+# parse). A gate that reads an unreadable reference as clean is the failure this
+# tool exists to prevent, so the job fails on both and the log says which.
+#
+# ⛔ THE VERSION IS REQUIRED AND PINNED. This job FAILS PULL REQUESTS: a judge
+# that follows a branch can change what a repository is held to with nobody
+# reviewing it, and its thresholds are tuned numbers. The go-version is required
+# for the same reason as in go-floor.yml.
+#
+# ⛔ THE REFERENCES ARE CACHED OUTSIDE THE WORKSPACE (os.UserCacheDir), never in
+# the repository: a downloaded copyleft tree must not be one `git add -A` away
+# from the history (copycheck refuses a cache directory inside a git tree). A
+# cached copy is re-verified against the manifest's SHA-256 on every run.
+name: copycheck
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: >-
+          the fleettools tag to install copycheck from, e.g. v0.100.0. REQUIRED.
+        required: true
+        type: string
+      go-version:
+        description: >-
+          the Go toolchain to build copycheck with. REQUIRED, never `stable`.
+        required: true
+        type: string
+      manifest:
+        description: the manifest, relative to the repository root
+        required: false
+        default: .provenance.yml
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  copycheck:
+    name: no copying from what was only read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: false
+      # ⛔ SAY WHICH TOOLCHAIN RAN.
+      - run: go version
+      - name: install copycheck
+        env:
+          VERSION: ${{ inputs.version }}
+        run: GOBIN="$RUNNER_TEMP/bin" go install "github.com/go-fleettools/fleettools/cmd/copycheck@${VERSION}"
+      - name: copycheck
+        # `shell: bash` is `bash -eo pipefail`: without pipefail the exit status
+        # of this step would be tee's, and a finding would read as a pass.
+        shell: bash
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+        run: |
+          "$RUNNER_TEMP/bin/copycheck" --manifest "$MANIFEST" | tee "$RUNNER_TEMP/report.txt"
+          {
+            echo '## copycheck'
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/report.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: what a failure means
+        if: failure()
+        run: |
+          echo "::notice::Exit 1 = a finding: the report names our file and theirs. Rewrite the code from the specification; a copyleft reference may be READ to understand, never copied or translated, and its tables are never copied."
+          echo "::notice::Exit 2 = copycheck could not look (reference unreachable, hash mismatch, bad manifest). That is NOT a pass: fix the manifest or the pin, never the gate."

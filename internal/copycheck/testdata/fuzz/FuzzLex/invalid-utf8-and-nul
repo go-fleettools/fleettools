@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\xff\xfe\x00int \xc3\x28 = 0x\x00;\n\\\r\n#\x00define")
