@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -215,13 +216,66 @@ func (i Item) Kind() string {
 // fix was not taken. A search for open items only is the one search guaranteed
 // to miss the most valuable prior art there is.
 func Tracker(scope string, terms []string) ([]Item, int, error) {
-	// The terms are OR-ed: GitHub's search treats space-separated words as AND,
-	// which for a three-word subject finds only an entry that uses all three.
-	var or []string
+	// ⛔ THE QUERY IS SPLIT, BECAUSE GITHUB ALLOWS FIVE OPERATORS AND NO MORE.
+	//
+	// The terms are OR-ed: search treats space-separated words as AND, which for
+	// a three-word subject finds only an entry using all three. But seven
+	// clauses need six ORs, and GitHub's search API documents a maximum of five
+	// AND/OR/NOT operators per query — so a subject of seven terms or more
+	// answered HTTP 422 and the tracker half was LOST. Measured in #200, same
+	// repository and minute: six clauses read 94 entries, seven returned 422.
+	//
+	// The terms that overflow are exactly the careful ones. A subject written
+	// precisely is the subject most likely to have prior art, and it was the
+	// one guaranteed not to look.
+	var batches [][]string
 	for _, t := range terms {
-		or = append(or, `"`+t+`"`)
+		q := `"` + t + `"`
+		if n := len(batches); n > 0 && len(batches[n-1]) < maxClausesPerQuery {
+			batches[n-1] = append(batches[n-1], q)
+			continue
+		}
+		batches = append(batches, []string{q})
 	}
-	q := scope + " " + strings.Join(or, " OR ")
+	var items []Item
+	total := 0
+	seen := map[string]bool{}
+	for _, batch := range batches {
+		got, n, err := trackerQuery(scope, terms, strings.Join(batch, " OR "))
+		if err != nil {
+			// ⛔ One failed batch is the whole surface unread, not a partial
+			// answer. Returning what the other batches found would be a list
+			// that looks complete and is not — the shape of every defect this
+			// tool exists to refuse.
+			return nil, 0, err
+		}
+		total += n
+		for _, it := range got {
+			// An entry matching terms in two batches comes back twice.
+			key := it.Repo + "#" + strconv.Itoa(it.Number)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			items = append(items, it)
+		}
+	}
+	return items, total, nil
+}
+
+// maxClausesPerQuery is how many OR-ed terms fit in one search. Six clauses are
+// joined by five ORs, which is exactly GitHub's documented limit.
+const maxClausesPerQuery = 6
+
+// trackerQuery runs ONE search and reads its page.
+//
+// ⚠ Splitting costs the single global ranking: GitHub ranks within a query, and
+// two queries have no common order. The batches are emitted in term order and
+// each keeps the order the search gave it, which is the least-wrong choice
+// available — see the note at the end of this function about why re-ranking
+// them here would be worse than leaving them unsorted.
+func trackerQuery(scope string, terms []string, orClause string) ([]Item, int, error) {
+	q := scope + " " + orClause
 	raw, err := gh("api", "-X", "GET", "search/issues",
 		"-f", "q="+q, "-f", "per_page=100")
 	if err != nil {
