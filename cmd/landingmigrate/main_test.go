@@ -643,6 +643,60 @@ func TestRepeatsCmd(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE GATE, WHICH IS THE WHOLE POINT OF THE FLAG. `repeats` reported what a
+// layout repeated and exited 0, so nothing could be built on it but a shell
+// reading its words. These three cases are the three answers it has to give.
+func TestRepeatsCheck(t *testing.T) {
+	d := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(d, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// A pure repeat, not yet wrapped: the gate fails and names the file.
+	bad := write("bad.html", `<p class="sub">Slides. <code>CGO_ENABLED=0</code>, BSD-3-Clause.</p>`)
+	out, code := runCmd(t, "repeats", bad, "--check")
+	if code != 1 {
+		t.Fatalf("a layout that repeats the strip exited %d, want 1:\n%s", code, out)
+	}
+	if !strings.Contains(out, "say what the mantra strip") || !strings.Contains(out, bad) {
+		t.Errorf("the refusal does not name what to do about it:\n%s", out)
+	}
+
+	// ⛔ EXIT 1, NOT 2. A gate has to tell "found something wrong" from "could
+	// not run": a missing file is 2, and a build that treated the two alike
+	// would go green the day the path was mistyped.
+	if _, code := runCmd(t, "repeats", filepath.Join(d, "none"), "--check"); code != 2 {
+		t.Error("a missing file under --check is not a finding, it is a failure to look")
+	}
+
+	// The same layout once `--write` has wrapped it: the fragments are still
+	// listed, and none of them is hideable any more.
+	good := write("good.html", `<p class="sub">Slides. `+
+		ifOff+`<code>CGO_ENABLED=0</code>, BSD-3-Clause.`+end+`</p>`)
+	if out, code := runCmd(t, "repeats", good, "--check"); code != 0 {
+		t.Errorf("a layout already wrapped exited %d:\n%s", code, out)
+	}
+
+	// A fragment that mentions the mantra and says MORE is kept for review and
+	// is not a finding: a gate that failed on those is one every landing turns
+	// off.
+	says := write("more.html", `<p>BSD-3-Clause code, MIT artwork, and the fonts are OFL.</p>`)
+	if out, code := runCmd(t, "repeats", says, "--check"); code != 0 {
+		t.Errorf("a mention that says more exited %d:\n%s", code, out)
+	}
+
+	// ⛔ And the two flags together are refused rather than silently ordered:
+	// a gate that fixed what it found would always pass.
+	if out, code := runCmd(t, "repeats", bad, "--check", "--write"); code != 2 {
+		t.Errorf("--check with --write exited %d:\n%s", code, out)
+	}
+}
+
 func TestInventory(t *testing.T) {
 	answer := `{"data":{"r0":{"isArchived":false,"gomod":{"text":"require github.com/go-fleettools/landingkit v0.4.0\n"},"index":null,"styles":null},` +
 		`"r1":{"isArchived":false,"gomod":null,"index":{"text":` + jsonString(tmpl) + `},"styles":null},` +
