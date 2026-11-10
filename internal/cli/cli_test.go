@@ -8,6 +8,31 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// A command built by hand, without SilenceErrors (ghissue's shape), prints its
+// error ONCE: Status prints it, so cobra must not print it again. The
+// subcommand case is here too, since cobra reads the flag on the root.
+func TestAnErrorIsPrintedOnce(t *testing.T) {
+	for _, sub := range []bool{false, true} {
+		root := &cobra.Command{Use: "tool", SilenceUsage: true,
+			RunE: func(*cobra.Command, []string) error { return Unanswerable("the refusal") }}
+		args := []string{}
+		if sub {
+			child := &cobra.Command{Use: "child", SilenceUsage: true,
+				RunE: func(*cobra.Command, []string) error { return Unanswerable("the refusal") }}
+			root.RunE = nil
+			root.AddCommand(child)
+			args = []string{"child"}
+		}
+		var out, errOut bytes.Buffer
+		if code := Drive(root, args, &out, &errOut); code != 2 {
+			t.Fatalf("sub %v: status %d", sub, code)
+		}
+		if n := strings.Count(errOut.String(), "the refusal"); n != 1 {
+			t.Errorf("sub %v: the error was printed %d times:\n%s", sub, n, errOut.String())
+		}
+	}
+}
+
 // ⛔ cobra answers a help request with a nil error, which is a status of 0. A
 // caller that reads the status alone prints the help and then does the work.
 //
