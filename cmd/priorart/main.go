@@ -134,7 +134,9 @@ func RootCmd() *cobra.Command {
 		if cli.HelpRequested(cmd) {
 			return nil
 		}
-		return run(cmd.OutOrStdout(), args[0], repoFlags, org, branches, report, limit, deps, depsAll)
+		err := run(cmd.OutOrStdout(), args[0], repoFlags, org, branches, report, limit, deps, depsAll)
+		record(cmd.ErrOrStderr(), args[0], repoFlags, org, report, err)
+		return err
 	}
 	f := cmd.Flags()
 	f.StringArrayVar(&repoFlags, "repo", nil, "repository to read, owner/name (repeatable)")
