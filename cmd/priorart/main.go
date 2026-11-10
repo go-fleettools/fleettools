@@ -295,6 +295,23 @@ func run(w io.Writer, subject string, repoFlags []string, org string, withBranch
 	case report:
 		fmt.Fprintf(w, "-report: %d surface(s) with prior art, %d unread. Exiting 0 as asked.\n", found, unread)
 		return nil
+	// ⛔ AN UNREAD SURFACE OUTRANKS A HIT, and it did not use to.
+	//
+	// `found > 0` was tested first, so a branch match returned "already covered"
+	// — exit 1 — on a run whose tracker had answered HTTP 422 and been read by
+	// nobody. The warning was printed above a verdict that said the opposite,
+	// and a caller keying on the EXIT STATUS, which is what a gate in front of
+	// work does, read "found, stop" from a run whose most valuable surface was
+	// never queried. Measured twice on 2026-11-09, two repositories, both with
+	// the warning printed and both exiting 1; on one of them the branches did
+	// hold the answer, so the masking cost nothing. That is luck, not design.
+	//
+	// Both facts are now in the message, because the status is one number and
+	// the reader needs the other half.
+	case unread > 0 && found > 0:
+		return cli.Unanswerable(
+			"%d surface(s) carry prior art for %q AND %d could not be read — READ what was found, and note the gap",
+			found, subject, unread)
 	case found > 0:
 		return cli.Found("%d surface(s) carry prior art for %q — READ IT before starting", found, subject)
 	case unread > 0:
