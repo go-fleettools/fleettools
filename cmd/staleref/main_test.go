@@ -32,7 +32,7 @@ func classify(line string, codeVars ...string) []finding {
 	for _, v := range codeVars {
 		vars[v] = true
 	}
-	c := newClassifier("go-pkgx", "go-zpkg", []string{"pkgxdev", "pkgx.sh"}, keepPats, vars)
+	c := newClassifier("go-pkgx", "go-zpkg", []string{"pkgxdev", "pkgx.sh"}, keepPats, nil, vars)
 	return c.classifyLine("README.md", 1, line)
 }
 
@@ -264,8 +264,8 @@ func TestOnlyDocumentationIsRead(t *testing.T) {
 		".git/config":    "url = github.com/go-pkgx/zbk",
 		"docs/page.html": "<p>go-pkgx/zbk</p>",
 	})
-	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil)
-	found, files, err := scanTree(root, c)
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil, nil)
+	found, files, err := scanTree(root, c, newAllowList(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestOnlyDocumentationIsRead(t *testing.T) {
 // that failed left an empty directory and the first sweep reported it clean.
 func TestATreeWithNoDocumentationSaysSo(t *testing.T) {
 	var out, errb bytes.Buffer
-	code := run(&out, &errb, "go-pkgx", "go-zpkg", nil, nil, nil, false, true,
+	code := run(&out, &errb, opts{old: "go-pkgx", new: "go-zpkg", quiet: true},
 		[]string{t.TempDir()})
 	if code != 0 {
 		t.Fatalf("exit %d, want 0", code)
@@ -302,7 +302,7 @@ func TestATreeWithNoDocumentationSaysSo(t *testing.T) {
 func TestQuietPrintsCountsAndStillFails(t *testing.T) {
 	root := tree(t, map[string]string{"README.md": "github.com/go-pkgx/zbk\n"})
 	var out, errb bytes.Buffer
-	if code := run(&out, &errb, "go-pkgx", "go-zpkg", nil, nil, nil, false, true, []string{root}); code != 1 {
+	if code := run(&out, &errb, opts{old: "go-pkgx", new: "go-zpkg", quiet: true}, []string{root}); code != 1 {
 		t.Fatalf("exit %d with --quiet, want 1", code)
 	}
 	if strings.Contains(out.String(), "STALE  ") {
@@ -318,16 +318,191 @@ func TestQuietPrintsCountsAndStillFails(t *testing.T) {
 func TestCitationsAreCountedButNotListedUnlessAsked(t *testing.T) {
 	root := tree(t, map[string]string{"README.md": "pkgxdev/pantry\n"})
 	var out, errb bytes.Buffer
-	if code := run(&out, &errb, "go-pkgx", "go-zpkg", []string{"pkgxdev"}, nil, nil, false, false, []string{root}); code != 0 {
+	base := opts{old: "go-pkgx", new: "go-zpkg", upstream: []string{"pkgxdev"}}
+	if code := run(&out, &errb, base, []string{root}); code != 0 {
 		t.Fatalf("exit %d, want 0 — a citation is not drift (%s)", code, out.String())
 	}
 	if strings.Contains(out.String(), "CITATION pkgxdev") {
 		t.Errorf("a citation was listed without --show-citations:\n%s", out.String())
 	}
 	out.Reset()
-	run(&out, &errb, "go-pkgx", "go-zpkg", []string{"pkgxdev"}, nil, nil, true, false, []string{root})
+	shown := base
+	shown.showCitations = true
+	run(&out, &errb, shown, []string{root})
 	if !strings.Contains(out.String(), "CITATION") {
 		t.Errorf("--show-citations listed nothing:\n%s", out.String())
+	}
+}
+
+// retiredClassify is classify() with the fleet's other retired spellings
+// declared, which is how the go-zpkg sweep is actually run.
+func retiredClassify(line string) []finding {
+	c := newClassifier("go-pkgx", "go-zpkg", []string{"pkgxdev", "pkgx.sh"}, keepPats,
+		[]string{"bk=zbk", "pkgm=zpkgm", "pkgs=zpkgs", "pkge=zpkge"}, map[string]bool{})
+	return c.classifyLine("README.md", 1, line)
+}
+
+// ⛔⛔ TestTheOtherRetiredSpellingsAreSeen is the hole this flag closes.
+//
+// The 2026-11-09 sweep checked the stem `pkgx` alone and was declared finished.
+// The next day `zbk/docs/from-scratch-toolchain.md` still said `bk` 72 times
+// and `zpkgx/README.md` still printed a `pkgx <pkg>` usage block: four of the
+// five renamed commands were invisible to the check that had passed.
+func TestTheOtherRetiredSpellingsAreSeen(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{"run `bk build` to make a bottle", "zbk"},
+		{"`pkgm install` resolves the closure", "zpkgm"},
+		{"ask `pkgs ls` what exists", "zpkgs"},
+		{"the generated `pkge` function", "zpkge"},
+	} {
+		got := retiredClassify(tc.line)
+		if len(got) != 1 {
+			t.Errorf("%q: %d finding(s), want 1: %+v", tc.line, len(got), got)
+			continue
+		}
+		if got[0].Verdict != unsure {
+			t.Errorf("%q: verdict %s, want UNSURE", tc.line, got[0].Verdict)
+		}
+		if !strings.Contains(got[0].Kind, tc.want) {
+			t.Errorf("%q: kind %q does not name the replacement %s", tc.line, got[0].Kind, tc.want)
+		}
+	}
+}
+
+// ⛔⛔ TestARetiredNameDoesNotMatchTheNameThatReplacedIt. Every retired spelling
+// in this rename is a PREFIX of its replacement — bk/zbk, pkgs/zpkgs — so
+// without a left word boundary the gate fires on every line that is already
+// correct, and its report is nothing but the thing it is checking FOR.
+func TestARetiredNameDoesNotMatchTheNameThatReplacedIt(t *testing.T) {
+	for _, line := range []string{
+		"run `zbk build` to make a bottle",
+		"`zpkgm install` resolves the closure",
+		"ask `zpkgs ls` what exists",
+		"the generated `zpkge` function",
+		"`zpkgx node@22 --version`",
+	} {
+		if got := retiredClassify(line); len(got) != 0 {
+			t.Errorf("%q: %d finding(s) on a correct line: %+v", line, len(got), got)
+		}
+	}
+}
+
+// TestAnEnvironmentVariableIsDecidedBeforeTheBareName: `BK_CC` is a variable,
+// and whether it is drift is a question for the code — not a bare `bk` with the
+// rest of its name cut off.
+func TestAnEnvironmentVariableIsDecidedBeforeTheBareName(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"bk=zbk"},
+		map[string]bool{"BK_CC": true})
+	got := c.classifyLine("README.md", 1, "imposed through `$BK_CC`")
+	if len(got) != 1 {
+		t.Fatalf("%d finding(s), want 1: %+v", len(got), got)
+	}
+	if got[0].Verdict != citation {
+		t.Errorf("verdict %s, want CITATION — the code still reads BK_CC: %+v", got[0].Verdict, got[0])
+	}
+	if got[0].Text != "$BK_CC" {
+		t.Errorf("matched %q, want the whole variable $BK_CC", got[0].Text)
+	}
+}
+
+// ⛔⛔ TestAFiliationPageIsNotDrift is what makes the exit status mean
+// something. A fork has to be able to say where it came from; without a way to
+// name that page, every run ends in hundreds of UNSURE findings and the
+// decision is never written down.
+func TestAFiliationPageIsNotDrift(t *testing.T) {
+	root := tree(t, map[string]string{
+		"content/filiation.md": "pkgx has no such object, and could not use one.\n",
+		"content/usage.md":     "run `pkgx node@22`\n",
+	})
+	var out, errb bytes.Buffer
+	o := opts{old: "go-pkgx", new: "go-zpkg", allowPats: []string{"filiation.md"}}
+
+	if code := run(&out, &errb, o, []string{root}); code != 1 {
+		t.Fatalf("exit %d, want 1 — usage.md is still drift (%s)(%s)", code, out.String(), errb.String())
+	}
+	if strings.Contains(out.String(), "filiation.md") {
+		t.Errorf("an allowed page was reported as a finding:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "usage.md") {
+		t.Errorf("the drift outside the allowed page went unreported:\n%s", out.String())
+	}
+
+	// With the one drifting page fixed, the gate goes green — the property that
+	// makes it usable in CI at all.
+	if err := os.WriteFile(filepath.Join(root, "content/usage.md"), []byte("run `zpkgx node@22`\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := run(&out, &errb, o, []string{root}); code != 0 {
+		t.Fatalf("exit %d once the drift is fixed, want 0:\n%s%s", code, out.String(), errb.String())
+	}
+}
+
+// TestAnAllowedPageIsStillVisibleWithShowCitations: an exemption nobody can see
+// is how the next person re-proposes the rewrite it exists to stop.
+func TestAnAllowedPageIsStillVisibleWithShowCitations(t *testing.T) {
+	root := tree(t, map[string]string{"filiation.md": "pkgx distributes plain tarballs\n"})
+	var out, errb bytes.Buffer
+	o := opts{old: "go-pkgx", new: "go-zpkg", allowPats: []string{"filiation.md"}, showCitations: true}
+	if code := run(&out, &errb, o, []string{root}); code != 0 {
+		t.Fatalf("exit %d, want 0 (%s)(%s)", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "this page's subject") {
+		t.Errorf("--show-citations does not show WHY the page is exempt:\n%s", out.String())
+	}
+}
+
+// ⛔⛔ TestAnAllowPatternThatMatchesNothingIsAnError.
+//
+// The exemption is meant to be narrow. A pattern naming a page that has since
+// been renamed or deleted exempts nothing, and would leave the gate green while
+// the thing it documents no longer exists — the vacuous guard recorded in
+// `three-ways-a-guard-passes-its-own-mutation`. MUTATION: rename the page the
+// pattern was written for, and this must go from 0 to 2.
+func TestAnAllowPatternThatMatchesNothingIsAnError(t *testing.T) {
+	root := tree(t, map[string]string{"filiation.md": "pkgx distributes plain tarballs\n"})
+	o := opts{old: "go-pkgx", new: "go-zpkg", allowPats: []string{"filiation.md"}}
+
+	var out, errb bytes.Buffer
+	if code := run(&out, &errb, o, []string{root}); code != 0 {
+		t.Fatalf("exit %d before the mutation, want 0 (%s)", code, errb.String())
+	}
+
+	if err := os.Rename(filepath.Join(root, "filiation.md"), filepath.Join(root, "heritage.md")); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := run(&out, &errb, o, []string{root}); code != 2 {
+		t.Fatalf("exit %d after the allowed page was renamed, want 2 — an exemption naming nothing passed silently", code)
+	}
+	if !strings.Contains(errb.String(), "filiation.md") {
+		t.Errorf("the refusal does not name the dead pattern: %s", errb.String())
+	}
+}
+
+// ⛔ TestTheStemsReplacementIsNotGuessed. `go-pkgx` → `go-zpkg` would derive
+// `zpkg` for the command, but the command is `zpkgx`. A suggestion is a string
+// somebody pastes into a document, so the stem carries none unless --retired
+// states it — and when it does, it REPLACES the stem rather than being shadowed.
+func TestTheStemsReplacementIsNotGuessed(t *testing.T) {
+	silent := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil, map[string]bool{})
+	got := silent.classifyLine("README.md", 1, "run `pkgx node@22`")
+	if len(got) != 1 {
+		t.Fatalf("%d finding(s), want 1: %+v", len(got), got)
+	}
+	if strings.Contains(got[0].Kind, "zpkg") {
+		t.Errorf("the stem guessed a replacement: %q", got[0].Kind)
+	}
+
+	stated := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"pkgx=zpkgx"}, map[string]bool{})
+	got = stated.classifyLine("README.md", 1, "run `pkgx node@22`")
+	if len(got) != 1 {
+		t.Fatalf("%d finding(s) with --retired pkgx=zpkgx, want 1: %+v", len(got), got)
+	}
+	if !strings.Contains(got[0].Kind, "zpkgx") {
+		t.Errorf("an explicit --retired for the stem was shadowed: %q", got[0].Kind)
 	}
 }
 
@@ -343,7 +518,7 @@ func TestEveryRequiredFlagIsNamed(t *testing.T) {
 		{"go-pkgx", "go-zpkg", nil, "at least one directory"},
 	} {
 		var out, errb bytes.Buffer
-		if code := run(&out, &errb, tc.old, tc.new, nil, nil, nil, false, false, tc.dirs); code != 2 {
+		if code := run(&out, &errb, opts{old: tc.old, new: tc.new}, tc.dirs); code != 2 {
 			t.Errorf("%+v: exit %d, want 2", tc, code)
 		}
 		if !strings.Contains(errb.String(), tc.want) {
@@ -355,7 +530,7 @@ func TestEveryRequiredFlagIsNamed(t *testing.T) {
 // TestAnUnreadableTreeIsAnError, not an empty result.
 func TestAnUnreadableTreeIsAnError(t *testing.T) {
 	var out, errb bytes.Buffer
-	code := run(&out, &errb, "go-pkgx", "go-zpkg", nil, nil, nil, false, false,
+	code := run(&out, &errb, opts{old: "go-pkgx", new: "go-zpkg"},
 		[]string{filepath.Join(t.TempDir(), "no-such-tree")})
 	if code != 2 {
 		t.Errorf("exit %d, want 2 (%s)", code, errb.String())
@@ -374,8 +549,8 @@ func TestAnUnreadableFileIsAnError(t *testing.T) {
 	if _, err := os.ReadFile(p); err == nil {
 		t.Skip("running as a user that can read a 0000 file")
 	}
-	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil)
-	if _, _, err := scanTree(root, c); err == nil {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil, nil)
+	if _, _, err := scanTree(root, c, newAllowList(nil)); err == nil {
 		t.Error("an unreadable document passed as a clean read")
 	}
 }
@@ -390,7 +565,7 @@ func TestTheRootCommandAnswersHelpWithZero(t *testing.T) {
 	if err := c.Execute(); err != nil {
 		t.Fatalf("--help returned %v", err)
 	}
-	for _, want := range []string{"--old", "--new", "--upstream", "--code-var", "--quiet"} {
+	for _, want := range []string{"--old", "--new", "--upstream", "--code-var", "--quiet", "--retired", "--allow"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("--help does not mention %s", want)
 		}
