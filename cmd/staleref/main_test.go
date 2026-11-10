@@ -387,9 +387,14 @@ func TestARetiredNameDoesNotMatchTheNameThatReplacedIt(t *testing.T) {
 	}
 }
 
-// TestAnEnvironmentVariableIsDecidedBeforeTheBareName: `BK_CC` is a variable,
-// and whether it is drift is a question for the code — not a bare `bk` with the
-// rest of its name cut off.
+// TestAnEnvironmentVariableIsDecidedBeforeTheBareName: `$BK_CC` is ONE
+// finding about a variable, not a bare `bk` with the rest of its name cut off.
+//
+// ⛔ Its verdict used to be CITATION here, on the grounds that the code reads
+// it. That assertion encoded the mistake DEBT exists for: the code being on
+// the old naming is the evidence the migration is unfinished, not a reason to
+// accept the name. The property this test is actually about — the whole
+// variable is matched, before the bare word — is unchanged.
 func TestAnEnvironmentVariableIsDecidedBeforeTheBareName(t *testing.T) {
 	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"bk=zbk"},
 		map[string]bool{"BK_CC": true})
@@ -397,11 +402,20 @@ func TestAnEnvironmentVariableIsDecidedBeforeTheBareName(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("%d finding(s), want 1: %+v", len(got), got)
 	}
-	if got[0].Verdict != citation {
-		t.Errorf("verdict %s, want CITATION — the code still reads BK_CC: %+v", got[0].Verdict, got[0])
+	if got[0].Verdict != debt {
+		t.Errorf("verdict %s, want DEBT: %+v", got[0].Verdict, got[0])
 	}
 	if got[0].Text != "$BK_CC" {
 		t.Errorf("matched %q, want the whole variable $BK_CC", got[0].Text)
+	}
+
+	// A code-var whose name is NOT retired stays a citation: the flag still
+	// does its original job.
+	c2 := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"bk=zbk"},
+		map[string]bool{"PKGX_DIR": true})
+	got2 := c2.classifyLine("README.md", 1, "set `$PKGX_DIR`")
+	if len(got2) != 1 || got2[0].Verdict != citation {
+		t.Errorf("a declared, non-retired name stopped being a citation: %+v", got2)
 	}
 }
 
@@ -555,6 +569,61 @@ func TestExtNormalisesItsArgument(t *testing.T) {
 	}
 	if s := extSet([]string{"", "   "}); len(s) != len(docExts) {
 		t.Errorf("an empty --ext changed the set: %v", s)
+	}
+}
+
+// ⛔⛔ TestACodeVarWithARetiredNameIsDebtNotAnExemption.
+//
+// This is the gate for a mistake made repeatedly on 2026-11-10: `--code-var X`
+// was used to excuse the NAME. `BK_CC`, `PKGE_SPECS`, `PKGX_DIR` were each
+// declared, each turned from a finding into a silent CITATION, and each time
+// the conclusion drawn was "documentation correct, leave it" — when the code
+// being on the old naming is precisely the evidence the migration is
+// unfinished.
+//
+// Declaring the variable must no longer make it disappear.
+func TestACodeVarWithARetiredNameIsDebtNotAnExemption(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil,
+		[]string{"bk=zbk", "pkge=zpkge"}, map[string]bool{"BK_CC": true, "ZBK_CC": true})
+
+	got := c.classifyLine("wrapper.go", 1, `export BK_CC="clang"`)
+	if len(got) != 1 {
+		t.Fatalf("%d finding(s), want 1: %+v", len(got), got)
+	}
+	if got[0].Verdict != debt {
+		t.Errorf("verdict %s, want DEBT — the code reads it AND the name is retired", got[0].Verdict)
+	}
+	if !strings.Contains(got[0].Kind, "the CODE is the half to change") {
+		t.Errorf("the kind does not say which half to fix: %q", got[0].Kind)
+	}
+
+	// ⛔ The prefix test is ANCHORED: ZBK_CC must not match BK_, or the gate
+	// fires on the very name the migration produces and nobody can finish.
+	if got := c.classifyLine("wrapper.go", 1, `export ZBK_CC="clang"`); len(got) != 0 {
+		t.Errorf("ZBK_CC was flagged: %+v", got)
+	}
+}
+
+// ⛔ TestADebtFindingSurvivesQuietAndFails: --quiet trades findings for
+// counts, and the one finding that must not be reducible to a count is the one
+// a flag used to make disappear.
+func TestADebtFindingSurvivesQuietAndFails(t *testing.T) {
+	root := tree(t, map[string]string{"README.md": "set `BK_CC` before building\n"})
+	o := opts{
+		old: "go-pkgx", new: "go-zpkg",
+		alsoRetired: []string{"bk=zbk"},
+		codeVar:     []string{"BK_CC"},
+		quiet:       true,
+	}
+	var out, errb bytes.Buffer
+	if code := run(&out, &errb, o, []string{root}); code != 1 {
+		t.Fatalf("exit %d, want 1 — a declared but retired name must still fail:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "DEBT") || !strings.Contains(out.String(), "BK_CC") {
+		t.Errorf("--quiet hid the debt finding:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "has not been migrated") {
+		t.Errorf("the summary does not say what a DEBT means:\n%s", out.String())
 	}
 }
 

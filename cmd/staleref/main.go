@@ -124,7 +124,42 @@ const (
 	stale    verdict = "STALE"
 	citation verdict = "CITATION"
 	unsure   verdict = "UNSURE"
+	debt     verdict = "DEBT"
 )
+
+// ⛔⛔ DEBT EXISTS BECAUSE --code-var WAS THE INSTRUMENT OF A REPEATED MISTAKE.
+//
+// `--code-var X` says "the code reads X, so a document naming it is correct",
+// and that is true — but it was used all day on 2026-11-10 to excuse the name
+// ITSELF. `BK_CC`, `PKGE_SPECS`, `PKGX_DIR`: each was declared, each turned
+// from a finding into a silent CITATION, and each time the conclusion drawn
+// was "documentation correct, leave it". The user's correction was the whole
+// point: *if the code is still on the old naming, the migration was done
+// badly*. A prefix that is not ours is the old product's naming however live
+// it is.
+//
+// So a code-var whose NAME carries a retired spelling is not an exemption. It
+// is migration debt, it is reported under its own verdict, and it FAILS —
+// which is precisely what declaring the variable used to prevent. Checking the
+// code tells you which half to fix; it never tells you to stop.
+//
+// `ZBK_CC` does not match `BK_`, because the prefix test is anchored: the name
+// must BEGIN with the retired spelling followed by `_`.
+
+// retiredVarPrefix reports whether an environment variable's name begins with
+// a retired spelling, and what that spelling was replaced by.
+func (c *classifier) retiredVarPrefix(name string) (was, now string, ok bool) {
+	up := strings.ToUpper(name)
+	for _, r := range c.retired {
+		if r.new == "" {
+			continue // no replacement stated: nothing to migrate it to
+		}
+		if strings.HasPrefix(up, strings.ToUpper(r.old)+"_") {
+			return r.old, r.new, true
+		}
+	}
+	return "", "", false
+}
 
 // finding is one classified occurrence.
 type finding struct {
@@ -352,9 +387,15 @@ func (c *classifier) classifyLine(file string, n int, line string) []finding {
 			v := stale
 			kind := "environment variable the code no longer reads"
 			if c.codeVars[name] {
-				// ⛔ THE CODE DECIDES. A variable the code still reads is not drift,
-				// whatever its name looks like.
+				// ⛔ THE CODE DECIDES WHICH HALF IS WRONG — NOT WHETHER TO STOP.
+				// A variable the code still reads is not documentation drift.
 				v, kind = citation, "environment variable the code still reads"
+				if was, now, ok := c.retiredVarPrefix(name); ok {
+					v = debt
+					kind = fmt.Sprintf(
+						"the code reads it AND its name is retired (%s_ → %s_): the CODE is the half to change",
+						strings.ToUpper(was), strings.ToUpper(now))
+				}
 			}
 			out = append(out, finding{File: file, Line: n, Verdict: v, Kind: kind,
 				Text: line[m[0]:m[1]]})
@@ -526,13 +567,16 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 			counts[f.Verdict]++
 			totals[f.Verdict]++
 		}
-		fmt.Fprintf(w, "%s: %d doc file(s), %d STALE, %d UNSURE, %d CITATION\n",
-			root, files[root], counts[stale], counts[unsure], counts[citation])
+		fmt.Fprintf(w, "%s: %d doc file(s), %d STALE, %d DEBT, %d UNSURE, %d CITATION\n",
+			root, files[root], counts[stale], counts[debt], counts[unsure], counts[citation])
 		for _, f := range byRoot[root] {
 			if f.Verdict != citation {
 				clean = false
 			}
-			if quiet || (f.Verdict == citation && !showCitations) {
+			// ⛔ A DEBT FINDING IS ALWAYS LISTED, even under --quiet. --quiet
+			// trades findings for counts, and the one finding that must not be
+			// reducible to a count is the one declaring a flag made disappear.
+			if f.Verdict != debt && (quiet || (f.Verdict == citation && !showCitations)) {
 				continue
 			}
 			suffix := ""
@@ -543,9 +587,12 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 				f.Verdict, f.File, f.Line, f.Kind, suffix, f.Text)
 		}
 	}
-	fmt.Fprintf(w, "\n%d STALE, %d UNSURE, %d CITATION across %d tree(s)\n",
-		totals[stale], totals[unsure], totals[citation], len(roots))
-	if totals[stale] == 0 && totals[unsure] == 0 {
+	fmt.Fprintf(w, "\n%d STALE, %d DEBT, %d UNSURE, %d CITATION across %d tree(s)\n",
+		totals[stale], totals[debt], totals[unsure], totals[citation], len(roots))
+	if totals[debt] > 0 {
+		fmt.Fprintf(w, "staleref: %d name(s) the code reads and the rename retired — declaring them with --code-var does not make them correct, it records that the CODE has not been migrated\n", totals[debt])
+	}
+	if totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 {
 		// ⛔ A tree with no documentation files reports no findings, which is
 		// the same output as a clean one. The file count is what tells them
 		// apart, so it is always printed.
