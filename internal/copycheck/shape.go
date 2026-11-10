@@ -223,7 +223,7 @@ func (ix *ShapeIndex) Match(ref *ShapeFile, minTokens int, minSim float64, maxGa
 			if re >= len(ref.Toks) {
 				re = len(ref.Toks) - 1
 			}
-			ol := first + ix.k - 1
+			ol := last + ix.k - 1
 			if ol >= len(our.Toks) {
 				ol = len(our.Toks) - 1
 			}
