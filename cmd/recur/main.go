@@ -51,6 +51,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -141,7 +142,61 @@ func RootCmd() *cobra.Command {
 		"why no gate can exist for this one; the reason is written into the ledger, dated")
 	c.Flags().BoolVar(&o.seed, "seed", false,
 		"write everything known right now as untriaged backlog, so the gate starts clean")
+	c.Flags().BoolVar(&o.hook, "hook", false,
+		"read a PreToolUse payload on stdin and answer it: deny a publishing command while a recurrence is unaccounted for")
 	return c
+}
+
+// publishing is what the gate stands in front of. A recurrence left unaccounted
+// for should stop work being SHIPPED, not stop it being done: refusing an edit
+// or a test run would make the gate something to disable rather than satisfy.
+var publishing = regexp.MustCompile(`\b(gitpush|ghmerge|ghrelease)\b`)
+
+// hookMode answers a PreToolUse payload.
+//
+// ⛔ IT BLOCKS ON ONE CONDITION ONLY: a definite finding. Everything else —
+// a payload it cannot read, a memory directory that will not open, its own
+// failure — allows and says so on stderr. About 25 sessions share this machine,
+// and a detector that halts them all because it could not read a file would be
+// a worse defect than the one it is here to catch. Exit 2 means refused to
+// decide, and a refusal is not a verdict.
+func hookMode(out, errOut io.Writer, o opts, stdin io.Reader) int {
+	var payload struct {
+		ToolInput struct {
+			Command string `json:"command"`
+		} `json:"tool_input"`
+	}
+	b, err := io.ReadAll(stdin)
+	if err != nil || json.Unmarshal(b, &payload) != nil {
+		fmt.Fprintln(errOut, "recur: could not read the hook payload; allowing (a refusal is not a verdict)")
+		return 0
+	}
+	if !publishing.MatchString(payload.ToolInput.Command) {
+		return 0
+	}
+	open, total, _, err := findings(o)
+	if err != nil {
+		fmt.Fprintf(errOut, "recur: %v; allowing (a refusal is not a verdict)\n", err)
+		return 0
+	}
+	if len(open) == 0 {
+		return 0
+	}
+	var b2 strings.Builder
+	fmt.Fprintf(&b2, "%d of %d recorded recurrence(s) have no gate, and this command publishes:\\n", len(open), total)
+	for _, lesson := range open {
+		fmt.Fprintf(&b2, "  %s\\n", lesson)
+	}
+	fmt.Fprintf(&b2, "A lesson that repeated is a tool and a gate that are missing. Build it, then: recur --memory %s --accept <lesson> --gate <what> | --no-gate '<why>'", o.memory)
+	enc := json.NewEncoder(out)
+	_ = enc.Encode(map[string]any{
+		"hookSpecificOutput": map[string]any{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       "deny",
+			"permissionDecisionReason": strings.ReplaceAll(b2.String(), `\n`, "\n"),
+		},
+	})
+	return 0
 }
 
 func run(args []string, out, errOut io.Writer) int {
@@ -154,6 +209,37 @@ type opts struct {
 	gate   string
 	noGate string
 	seed   bool
+	hook   bool
+}
+
+// findings is the reading both the report and the hook are built on: which
+// recorded recurrences the ledger does not account for, how many were read, and
+// how many of the accounted ones are still untriaged backlog.
+func findings(o opts) (open []string, total, backlog int, err error) {
+	info, err := os.Stat(o.memory)
+	if err != nil || !info.IsDir() {
+		return nil, 0, 0, fmt.Errorf("%s is not a readable directory", o.memory)
+	}
+	known, err := readLedger(filepath.Join(o.memory, ledgerName))
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("reading the ledger: %w", err)
+	}
+	found, err := scan(o.memory)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	for _, lesson := range found {
+		e, ok := known[lesson]
+		if !ok {
+			open = append(open, lesson)
+			continue
+		}
+		if e.state == "backlog" {
+			backlog++
+		}
+	}
+	sort.Strings(open)
+	return open, len(found), backlog, nil
 }
 
 // entry is one ledger line: a lesson, and what was decided about it.
@@ -164,6 +250,13 @@ type entry struct {
 }
 
 func check(out, errOut io.Writer, o opts) int {
+	if o.hook {
+		if o.memory == "" {
+			fmt.Fprintln(errOut, "recur: --hook needs --memory; allowing")
+			return 0
+		}
+		return hookMode(out, errOut, o, os.Stdin)
+	}
 	if o.memory == "" {
 		fmt.Fprintln(errOut, "recur: --memory is required: there is no default memory directory, and guessing one would read somebody else's")
 		return 2

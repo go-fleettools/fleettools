@@ -194,6 +194,48 @@ func TestItRefusesRatherThanReportingACleanCorpus(t *testing.T) {
 	}
 }
 
+// ⛔ THE GATE BLOCKS ON ONE CONDITION ONLY. About 25 sessions share this
+// machine; a detector that halted them all because it could not read a file
+// would be a worse defect than the one it is here to catch. Only a definite
+// finding on a publishing command denies — everything else allows and says so.
+func TestTheHookDeniesOnlyADefiniteFinding(t *testing.T) {
+	dir := mem(t, map[string]string{"came-back.md": "Troisième récidive."})
+	const push = `{"tool_input":{"command":"cd /x && ~/.local/bin/gitpush -u origin topic"}}`
+
+	for _, tc := range []struct {
+		name, memory, payload string
+		deny                  bool
+		warns                 string
+	}{
+		{name: "a publishing command with an unaccounted recurrence", memory: dir, payload: push, deny: true},
+		{name: "a command that publishes nothing", memory: dir,
+			payload: `{"tool_input":{"command":"ls -la"}}`},
+		{name: "a memory directory that will not open", memory: filepath.Join(dir, "nope"),
+			payload: push, warns: "allowing"},
+		{name: "a payload it cannot read", memory: dir, payload: "not json at all", warns: "allowing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			code := hookMode(&out, &errOut, opts{memory: tc.memory}, strings.NewReader(tc.payload))
+			// Always 0: the decision travels in the JSON, never in the status,
+			// so a non-zero exit cannot be mistaken for a block.
+			if code != 0 {
+				t.Fatalf("code %d, want 0", code)
+			}
+			denied := strings.Contains(out.String(), `"permissionDecision":"deny"`)
+			if denied != tc.deny {
+				t.Fatalf("denied=%v, want %v\nout: %s\nerr: %s", denied, tc.deny, out.String(), errOut.String())
+			}
+			if tc.deny && !strings.Contains(out.String(), "came-back") {
+				t.Errorf("a refusal must name the lesson; it said %q", out.String())
+			}
+			if tc.warns != "" && !strings.Contains(errOut.String(), tc.warns) {
+				t.Errorf("it should warn on stderr; it said %q", errOut.String())
+			}
+		})
+	}
+}
+
 // The ledger and the index are not lessons, and must not be scanned as ones.
 func TestTheLedgerAndTheIndexAreNotScanned(t *testing.T) {
 	dir := mem(t, map[string]string{
