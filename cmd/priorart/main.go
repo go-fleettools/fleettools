@@ -193,7 +193,7 @@ func run(w io.Writer, subject string, repoFlags []string, org string, withBranch
 			}
 			for _, it := range shown {
 				fmt.Fprintf(w, "    %-5s %-22s #%-5d [%-6s] %-9s %s\n",
-					it.Kind(), it.Repo, it.Number, it.State, "("+it.Hit+")", it.Title)
+					it.Kind(), it.Repo, it.Number, it.Shown(), "("+it.Hit+")", it.Title)
 			}
 			// ⛔ The cut is STATED, with the total the search itself reported: a
 			// list silently truncated at -n is a measurement whose population is
@@ -203,6 +203,14 @@ func run(w io.Writer, subject string, repoFlags []string, org string, withBranch
 					rest, len(shown), total)
 			}
 			fmt.Fprintln(w, "   ⚠ A CLOSED entry is often the most valuable: \"not merged, and here is why\".")
+			// ⛔ And the one above it used to be a lie by omission. GitHub's
+			// search calls a MERGED pull request "closed", so the hint sent the
+			// reader looking for a reason it was rejected — on work that had
+			// shipped. [merged] is now its own word; this line says what it
+			// costs to miss one.
+			if mergedShown(shown) {
+				fmt.Fprintln(w, "   ⛔ A [merged] entry is the subject ALREADY DONE. If it names an open pull request, that one is superseded.")
+			}
 		default:
 			fmt.Fprintf(w, "   %s tracker: clean (open and closed)\n", scope)
 		}
