@@ -76,9 +76,13 @@ rule to enforce and the command refuses rather than passing.
 --via accepts a plain function name (helper) or a method, written as Go writes
 it in a doc comment: (*Peer).awaited or (Peer).awaited.
 
-A waiver names a site and says why, and the reason is PRINTED with the result:
+A waiver names a site and says why, and the reason is PRINTED with the result.
+Name the FUNCTION, not the line: a line number is the most brittle handle there
+is, and a CI file that carries one stops naming the site the day somebody adds
+an import.
 
-    --allow 'peer_js.go:179=AcceptAnswer has no caller context to expire'
+    --allow '(*Peer).AcceptAnswer=no call after it can be blocked'
+    --allow 'peer_js.go:180=…'                 # also accepted, and worse
 
 Exit status: 0 clean, 1 at least one bypass, 2 refused to decide — the
 directory would not parse, or a declared name is not in it. A name that
@@ -110,7 +114,7 @@ func RootCmd() *cobra.Command {
 	c.Flags().StringVar(&via, "via", "",
 		"the only function allowed to call it: name, (*T).name or (T).name (required, no default)")
 	c.Flags().StringArrayVar(&allow, "allow", nil,
-		"waive one site: 'file.go:LINE=why'. The reason is printed with the result (repeatable)")
+		"waive one site: '(*T).Func=why' or 'file.go:LINE=why'. Name the function — a line moves. The reason is printed (repeatable)")
 	c.Flags().BoolVar(&tests, "tests", false,
 		"scan _test.go files too; by default they are skipped and the count is printed")
 	c.Flags().IntVar(&expect, "expect", -1,
@@ -213,8 +217,18 @@ func check(out, errOut io.Writer, o opts, args []string) int {
 	bad := 0
 	for _, s := range found {
 		key := fmt.Sprintf("%s:%d", s.file, s.line)
-		if why, isWaived := waived[key]; isWaived {
-			fmt.Fprintf(out, "waived %s: %s calls %s directly — %s\n", key, s.in, o.wraps, why)
+		// ⛔ A waiver may name the SITE or the FUNCTION that contains it, and a
+		// CI file should carry the function. A line number is the most brittle
+		// handle there is: one inserted line above it and the waiver names
+		// something else, or nothing — which is how a gate ends up carrying a
+		// waiver nobody can check. The function survives every edit that does
+		// not move the call out of it, and it is what a reader recognises.
+		why, isWaived := waived[key]
+		if !isWaived {
+			why, isWaived = waived[s.in]
+		}
+		if isWaived {
+			fmt.Fprintf(out, "waived %s (%s) calls %s directly — %s\n", key, s.in, o.wraps, why)
 			continue
 		}
 		fmt.Fprintf(out, "%s: %s calls %s directly; it must go through %s\n", key, s.in, o.wraps, o.via)

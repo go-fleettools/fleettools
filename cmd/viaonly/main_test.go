@@ -165,6 +165,35 @@ func (p *Peer) bad(x int) int { return await(x) }
 	}
 }
 
+// ⛔ A waiver should name the FUNCTION, and it must keep naming the same site
+// when lines move. A CI file carrying 'peer_js.go:180' stops naming anything the
+// day somebody adds an import, and a gate with a waiver nobody can check is
+// worse than a gate with none.
+func TestAWaiverByFunctionSurvivesLinesMovingAbove(t *testing.T) {
+	body := wrapped + `
+func (p *Peer) bad(x int) int { return await(x) }
+`
+	waiver := "(*Peer).bad=measured: this one runs before there is a context"
+
+	dir := pkg(t, map[string]string{"p.go": body})
+	code, out, _ := drive(t, "--wraps", "await", "--via", "(*Peer).awaited", "--allow", waiver, dir)
+	if code != 0 {
+		t.Fatalf("a function waiver should pass, got %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "(*Peer).bad") || !strings.Contains(out, "runs before there is a context") {
+		t.Errorf("the site and its reason must both be printed; it said %q", out)
+	}
+
+	// The same package with four lines inserted above everything. A line-keyed
+	// waiver would now name the wrong place; this one still names the function.
+	moved := pkg(t, map[string]string{"p.go": "package p\n\n// one\n// two\n// three\n// four\n" +
+		strings.TrimPrefix(body, "package p\n")})
+	code, out, _ = drive(t, "--wraps", "await", "--via", "(*Peer).awaited", "--allow", waiver, moved)
+	if code != 0 {
+		t.Fatalf("the waiver must survive lines moving above it, got %d\n%s", code, out)
+	}
+}
+
 // --expect is the second half of the refusal: a rule can resolve and still match
 // nothing, and a count the caller states out loud catches that.
 func TestExpectCatchesARuleThatMatchedTooFew(t *testing.T) {
