@@ -196,7 +196,28 @@ type Item struct {
 	State  string
 	Repo   string
 	IsPR   bool
+	Merged bool
 	Hit    string
+}
+
+// Shown is the state to print, and for a pull request it is NOT State.
+//
+// ⛔⛔ GITHUB'S SEARCH API CALLS A MERGED PULL REQUEST "closed", and this
+// command's own hint tells the reader that closed means "not merged, and here
+// is why". Together they said the opposite of the truth. Measured on
+// 2026-11-10: a run printed `pr go-tex/engine #731 [closed]` for a pull request
+// MERGED two days earlier, whose title named the open #722 it superseded. #722
+// was then reported as "green and parked, awaiting a corpus sweep" for three
+// days — blocked on nothing, its subject already shipped — and the reader had
+// looked straight at the line that said so.
+//
+// The search payload carries merged_at inside its pull_request object; nothing
+// here was reading it. See #208.
+func (i Item) Shown() string {
+	if i.IsPR && i.Merged {
+		return "merged"
+	}
+	return i.State
 }
 
 // Kind distinguishes a pull request from an issue, which changes what the entry
@@ -206,6 +227,17 @@ func (i Item) Kind() string {
 		return "pr"
 	}
 	return "issue"
+}
+
+// mergedShown reports whether any of the listed entries is a merged pull
+// request, so the hint about them is printed only when there is one to explain.
+func mergedShown(items []Item) bool {
+	for _, it := range items {
+		if it.IsPR && it.Merged {
+			return true
+		}
+	}
+	return false
 }
 
 // Tracker reports the issues and pull requests under a scope — "repo:owner/name"
@@ -291,6 +323,11 @@ func trackerQuery(scope string, terms []string, orClause string) ([]Item, int, e
 			URL         string `json:"repository_url"`
 			PullRequest *struct {
 				URL string `json:"url"`
+				// merged_at is null for a pull request that was closed without
+				// merging, and a timestamp for one that landed. It is the ONLY
+				// thing in this payload that tells the two apart: `state` says
+				// "closed" for both. See Item.Shown.
+				MergedAt *string `json:"merged_at"`
 			} `json:"pull_request"`
 		} `json:"items"`
 	}
@@ -311,6 +348,7 @@ func trackerQuery(scope string, terms []string, orClause string) ([]Item, int, e
 			State:  it.State,
 			Repo:   repoOf(it.URL),
 			IsPR:   it.PullRequest != nil,
+			Merged: it.PullRequest != nil && it.PullRequest.MergedAt != nil,
 			Hit:    h,
 		})
 	}
