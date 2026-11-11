@@ -37,6 +37,11 @@ func newFake(t *testing.T) (*fake, *httptest.Server) {
 	sk := skeleton(Decl{Org: org, Repo: org + ".github.io", Parents: []string{parent}, Shells: []string{"/shell.html"}, CSP: SkeletonCSP})
 	f.body["/shell.html"] = sk["shell.html"]
 	f.body["/shell.js"] = sk["shell.js"]
+	f.body["/orgs/"+org+"/repos"] = `[{"name":"` + org + `.github.io","has_pages":true,"private":false}]`
+	// no browser in these tests: the run of the frame has its own (behaviour_test.go)
+	oldB := behaviour
+	behaviour = func(Decl, string, options) []finding { return []finding{{pass, "stub run", "no browser here"}} }
+	t.Cleanup(func() { behaviour = oldB })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -143,9 +148,35 @@ func TestVerifyDrift(t *testing.T) {
 		{"wildcard target", func(f *fake) {
 			f.body["/shell.js"] = sk(f) + "\nwindow.parent.postMessage({t:'x'}, '*');\n"
 		}, nil, `sent to "*"`},
-		{"never reads origin", func(f *fake) {
+		{"listener without a guard", func(f *fake) {
 			f.body["/shell.js"] = `const ALLOW = ["https://acme.github.io"]; addEventListener("message", e => 1);`
-		}, nil, "no script reads event.origin"},
+		}, nil, "message listener with no body"},
+		// fleettools#243: the shell MENTIONS .origin everywhere, and the one test
+		// that matters is gone. Each of these passed before.
+		{"guard without the origin test", func(f *fake) {
+			f.body["/shell.js"] = strings.Replace(sk(f), "if (ALLOW.indexOf(e.origin) < 0 || e.source !== window.parent)", "if (e.source !== window.parent)", 1)
+		}, nil, "guard does not test the message's origin"},
+		{"guard without the source test", func(f *fake) {
+			f.body["/shell.js"] = strings.Replace(sk(f), "if (ALLOW.indexOf(e.origin) < 0 || e.source !== window.parent)", "if (ALLOW.indexOf(e.origin) < 0)", 1)
+		}, nil, "guard does not test the message's source"},
+		{"guard removed", func(f *fake) {
+			f.body["/shell.js"] = strings.Replace(sk(f), "    if (ALLOW.indexOf(e.origin) < 0 || e.source !== window.parent) { return; }\n", "    const unused = e.origin;\n", 1)
+		}, nil, "first statement is not an origin guard"},
+		{"guard that does not return", func(f *fake) {
+			f.body["/shell.js"] = strings.Replace(sk(f), "if (ALLOW.indexOf(e.origin) < 0 || e.source !== window.parent) { return; }", "if (ALLOW.indexOf(e.origin) < 0 || e.source !== window.parent) { console.log(1); }", 1)
+		}, nil, "guard does not return"},
+		{"a second listener without a guard", func(f *fake) {
+			f.body["/shell.js"] = sk(f) + "\nwindow.addEventListener('message', function (e) { e.source.postMessage({t:'x'}, e.origin); });\n"
+		}, nil, "first statement is not an origin guard"},
+		{"another public repository in the organisation", func(f *fake) {
+			f.body["/orgs/"+org+"/repos"] = `[{"name":"` + org + `.github.io","has_pages":true,"private":false},{"name":"notes","has_pages":false,"private":false}]`
+		}, nil, "only public repository"},
+		{"another Pages site in the organisation", func(f *fake) {
+			f.body["/orgs/"+org+"/repos"] = `[{"name":"` + org + `.github.io","has_pages":true,"private":false},{"name":"site","has_pages":true,"private":true}]`
+		}, nil, "another Pages site is served on the frame's origin: site (a Pages site)"},
+		{"members may create Pages sites", func(f *fake) {
+			f.body["/orgs/"+org] = `{"type":"Organization","members_can_create_pages":true,"members_can_create_public_pages":true}`
+		}, nil, "members may create Pages sites"},
 		{"placeholder left", func(f *fake) {
 			f.body["/shell.js"] = sk(f) + "\nvar X = '@@ALLOW@@'; // e.origin\n"
 		}, nil, "placeholder was never rendered"},

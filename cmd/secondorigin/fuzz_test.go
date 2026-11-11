@@ -26,6 +26,6 @@ func FuzzShellAndCSP(f *testing.F) {
 			t.Fatalf("normCSP is not a fixed point: %q -> %q -> %q", s, n, normCSP(n))
 		}
 		wildcardPost.MatchString(s)
-		readsOrigin.MatchString(s)
+		messageGuards(s)
 	})
 }

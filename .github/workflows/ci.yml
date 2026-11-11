@@ -52,6 +52,11 @@ jobs:
           # The scripts run against 1800 repositories; a syntax error in one is
           # a sweep that stops halfway. bash -n is the floor, not a lint.
           find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+      # secondorigin runs the frame it verifies in headless browsers (fleettools#243);
+      # its tests skip without a driver, so the driver is installed: a skipped
+      # browser test would be a gate that reads green and ran nothing.
+      - name: playwright browsers (secondorigin)
+        run: go run github.com/mxschmitt/playwright-go/cmd/playwright install --with-deps chromium firefox
       - name: build
         run: CGO_ENABLED=0 go build ./...
       - name: vet

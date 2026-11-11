@@ -27,6 +27,7 @@ require (
 	github.com/go-pdfkit/reader v0.10.0
 	github.com/go-richdoc/markdown v0.12.0
 	github.com/go-richdoc/richdoc v0.7.0
+	github.com/mxschmitt/playwright-go v0.6401.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/ulikunitz/xz v0.5.17
@@ -42,6 +43,7 @@ require (
 require (
 	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/breml/rootcerts v0.3.7 // indirect
+	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
 	github.com/dlclark/regexp2/v2 v2.5.2 // indirect
 	github.com/dop251/goja v0.0.0-20260926152631-39ec2650adc9 // indirect
 	github.com/evanw/esbuild v0.28.2 // indirect
@@ -62,6 +64,7 @@ require (
 	github.com/go-ruby-regexp/regexp v0.1.1 // indirect
 	github.com/go-simd/highway v0.0.14 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
+	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/go-webengine/engine v0.18.1 // indirect
 	github.com/go-webengine/esbuildsandbox v0.1.0 // indirect
 	github.com/go-widgets/painter v0.16.0 // indirect
