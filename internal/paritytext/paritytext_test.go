@@ -1,0 +1,325 @@
+package paritytext
+
+import (
+	"strings"
+	"testing"
+)
+
+// refusing are texts that defer or decline a performance change because of bit
+// identity. The first two are go-fft/fft#116's own sentences.
+var refusing = []struct{ name, text, rule string }{
+	{"116 contract change",
+		"A real-input path is cheaper but rounds differently. That is a contract change (bit identity with the documented definition), so it needs a decision, not a drive-by.",
+		"contract-change"},
+	{"116 keep the contract",
+		"Keep the bit-identity contract for FFTReal (and add the real path only as a separate function or option), and port rfftp for odd n.\nA faster kernel is the reason.",
+		"keep-parity-contract"},
+	{"because parity",
+		"We do not use FMA in the default kernel because it would break bit-parity.",
+		"declined-because-parity"},
+	{"would break",
+		"Reordering the reduction would break bit-identical output, and the SIMD kernel needs it.",
+		"would-break-parity"},
+	{"no way",
+		"- No bit-identical reduction exists; no code change, no release.",
+		"no-bit-identical-way"},
+	{"blocks",
+		"What blocks a bit-identical kernel on loong64 is the missing vector FMA.",
+		"parity-blocks-kernel"},
+	{"skip simd",
+		"We skip the AVX2 kernel since it is not bit-exact with the scalar path.",
+		"declined-because-parity"},
+}
+
+// passing are texts that mention bit identity without deferring anything for
+// it: the commonest sentences in a performance pull request.
+var passing = []string{
+	"Output unchanged, bit-identical.",
+	"The new SIMD kernel is bit-identical to the scalar path, so we keep it enabled.",
+	"Bit-identical to the Go loops; about 1.2x faster on Zen 3.",
+	"Tests: per-kernel bit identity in all four layouts, 19 whole factorizations.",
+	"No arithmetic changes. TestFoo passes bit for bit on Haswell.",
+	"Results are byte-identical to the previous release.",
+	"Regeneration reproduces the checked-in assembly byte-for-byte.",
+	"We do not need a fallback; the kernel is bit-identical.",
+	"A plain sentence with no cue at all.",
+	"The radix-32 pass was built bit-identical and lost on every length, so no length is routed to it.",
+}
+
+func TestRefusing(t *testing.T) {
+	for _, c := range refusing {
+		t.Run(c.name, func(t *testing.T) {
+			got := Scan(c.text)
+			if len(got) == 0 {
+				t.Fatalf("not refused: %q", c.text)
+			}
+			found := false
+			for _, f := range got {
+				if f.Rule == c.rule {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("rules %v, want %s", got, c.rule)
+			}
+			if _, err := Gate(c.text, "", "--parity-waiver"); err == nil {
+				t.Error("Gate let it through")
+			}
+		})
+	}
+}
+
+func TestPassing(t *testing.T) {
+	for _, s := range passing {
+		if got := Scan(s); len(got) != 0 {
+			t.Errorf("%q refused: %v", s, got)
+		}
+		if out, err := Gate(s, "", "--parity-waiver"); err != nil || out != s {
+			t.Errorf("%q: Gate = %q, %v", s, out, err)
+		}
+	}
+}
+
+// TestMutationRemovingTheClausePasses is the mutation: the refusing sentence
+// without its "because parity" clause passes.
+func TestMutationRemovingTheClausePasses(t *testing.T) {
+	refused := "We do not use FMA in the default kernel because it would break bit-parity."
+	if len(Scan(refused)) == 0 {
+		t.Fatal("the fixture must refuse")
+	}
+	mutated := strings.Replace(refused, " because it would break bit-parity", "", 1)
+	if got := Scan(mutated); len(got) != 0 {
+		t.Errorf("without the clause it still refuses: %v", got)
+	}
+}
+
+func TestMeasuredBoundExempts(t *testing.T) {
+	base := "We skip the AVX2 kernel because it would break bit-parity."
+	if len(Scan(base)) == 0 {
+		t.Fatal("fixture")
+	}
+	for _, bound := range []string{
+		"Measured relative RMS error 3.1e-16 against double-double, bound 4.4e-15.",
+		"The error stays under 2 ulp on every length.",
+		"Max error 4ε at n = 1024.",
+	} {
+		if out, err := Gate(base+" "+bound, "", "--parity-waiver"); err != nil || !strings.Contains(out, bound) {
+			t.Errorf("%q: %v", bound, err)
+		}
+	}
+	// Words without a number are not a measurement.
+	if _, err := Gate(base+" The error is within tolerance.", "", "--parity-waiver"); err == nil {
+		t.Error("\"within tolerance\" passed as a measurement")
+	}
+	// A number with no error word is not one either.
+	if _, err := Gate(base+" It ran 3.5e-3 seconds.", "", "--parity-waiver"); err == nil {
+		t.Error("a bare number passed as a measurement")
+	}
+}
+
+func TestWaiverIsStamped(t *testing.T) {
+	text := "We skip the AVX2 kernel because it would break bit-parity.\n"
+	out, err := Gate(text, "  the\nreason  ", "--parity-waiver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out, strings.TrimRight(text, "\n")) || !strings.Contains(out, StampPrefix+"the reason\n") {
+		t.Errorf("stamp missing or not one line: %q", out)
+	}
+	// The stamp is not read back: a reason may name what it excuses.
+	again, err := Gate(out, "", "--parity-waiver")
+	if err == nil {
+		t.Errorf("the stamped text must still be refused without a waiver (the sentence is still there): %q", again)
+	}
+	if got, want := len(Scan(out)), len(Scan(text)); got != want {
+		t.Errorf("stamp changed the findings: %d vs %d", got, want)
+	}
+	stamped := "Fine.\n\n" + Stamp("we skip the kernel because it would break bit-parity") + "\n\n"
+	if got := Scan(stamped); len(got) != 0 {
+		t.Errorf("the stamp line was read: %v", got)
+	}
+	// A stamp-looking line that is NOT last is the author's text, read like any.
+	forged := Stamp("we skip the SIMD kernel because it would break bit-parity") + "\n\nAnd more.\n"
+	if got := Scan(forged); len(got) == 0 {
+		t.Error("a stamp in the middle of a text skipped the gate")
+	}
+}
+
+func TestRefusalNamesTheRuleAndTheModel(t *testing.T) {
+	_, err := Gate(refusing[2].text, "", "--parity-waiver")
+	if err == nil {
+		t.Fatal("not refused")
+	}
+	for _, want := range []string{Issue, Parked, "porting step", "--parity-waiver", "line 1", "declined-because-parity"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal lacks %q:\n%v", want, err)
+		}
+	}
+}
+
+func TestRefusalTruncates(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 7; i++ {
+		b.WriteString("- We skip the SIMD kernel because it would break bit-parity.\n")
+	}
+	_, err := Gate(b.String(), "", "--parity-waiver")
+	if err == nil || !strings.Contains(err.Error(), "and 2 more") {
+		t.Errorf("want a truncated list, got %v", err)
+	}
+	long := "We skip the SIMD kernel because it would break bit-parity " + strings.Repeat("and more ", 60) + "."
+	f := Scan(long)
+	if len(f) != 1 || !strings.HasSuffix(f[0].String(), "…") {
+		t.Errorf("a long sentence is shortened: %v", f)
+	}
+}
+
+func TestTitleNeverWaived(t *testing.T) {
+	if err := GateTitle("perf: SIMD kernel skipped because it breaks bit-parity", "--parity-waiver"); err == nil || !strings.Contains(err.Error(), "no waiver covers a title") {
+		t.Errorf("got %v", err)
+	}
+	if err := GateTitle("perf: SIMD kernel, bit-identical", "--parity-waiver"); err != nil {
+		t.Errorf("a mention in a title must pass: %v", err)
+	}
+}
+
+func TestOverSizeIsRefusedNotHalfRead(t *testing.T) {
+	big := strings.Repeat("x", MaxText+1)
+	if _, err := Gate(big, "", "--parity-waiver"); err == nil || !strings.Contains(err.Error(), "does not read") {
+		t.Errorf("got %v", err)
+	}
+	// Scan alone reads the first MaxText bytes only.
+	if got := Scan(strings.Repeat("a ", MaxText/2) + " We skip the SIMD kernel because it would break bit-parity."); len(got) != 0 {
+		t.Errorf("read past the bound: %v", got)
+	}
+}
+
+func TestStripBlanksWhatIsNotTheAuthors(t *testing.T) {
+	text := "Ok.\n```go\nwe skip SIMD because it would break bit-parity\n```\n" +
+		"> quoted: we skip SIMD because it would break bit-parity\n" +
+		"inline `we skip SIMD because it would break bit-parity` code, <!-- we skip SIMD because it would break bit-parity --> and\n" +
+		"<!-- multi\nwe skip SIMD because it would break bit-parity\n--> after.\n" +
+		"~~~\nwe skip SIMD because it would break bit-parity\n~~~\n" +
+		"see https://example.com/we-skip-simd-because-bit-parity for more\n" +
+		"<!-- open and never closed we skip SIMD because it would break bit-parity\n"
+	if got := Scan(text); len(got) != 0 {
+		t.Errorf("read what is not the author's: %v", got)
+	}
+	if n := strings.Count(Strip(text), "\n"); n != strings.Count(text, "\n") {
+		t.Errorf("Strip changed the line count: %d vs %d", n, strings.Count(text, "\n"))
+	}
+}
+
+func TestUnitsAndLines(t *testing.T) {
+	text := "Intro sentence. Second one, e.g. an abbreviation, stays whole. Third (it ends here.) Fourth!\n\n" +
+		"# Heading\n- item one\n  continues here\n- item two\n| a | b |\n\nLast paragraph, v1.2 stays whole"
+	us := Units(text)
+	var got []string
+	for _, u := range us {
+		got = append(got, u.Text)
+	}
+	want := []string{
+		"Intro sentence.", "Second one, e.g. an abbreviation, stays whole.", "Third (it ends here.)", "Fourth!",
+		"# Heading", "- item one continues here", "- item two", "| a | b |", "Last paragraph, v1.2 stays whole",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("units\n got %q\nwant %q", got, want)
+	}
+	if us[0].Line != 1 || us[4].Line != 3 || us[5].Line != 4 || us[6].Line != 6 || us[8].Line != 9 {
+		t.Errorf("lines: %+v", us)
+	}
+	// A sentence is placed on the line it starts on, not its paragraph's first.
+	wrapped := Units("Alpha one.\nBeta two\nstill beta. Gamma three.\nDelta.")
+	var lines []int
+	for _, u := range wrapped {
+		lines = append(lines, u.Line)
+	}
+	if len(lines) != 4 || lines[0] != 1 || lines[1] != 2 || lines[2] != 3 || lines[3] != 4 {
+		t.Errorf("wrapped lines %v (%v)", lines, wrapped)
+	}
+	if got := Units("   \n\n"); len(got) != 0 {
+		t.Errorf("blank text has units: %v", got)
+	}
+}
+
+func TestSentenceEdges(t *testing.T) {
+	for in, n := range map[string]int{
+		"One. Two.":          2,
+		"One.Two":            1, // no space: not a boundary
+		"One. two":           1, // lower-case continuation
+		"One.  ":             1,
+		"One. ":              1,
+		"Is it? Yes! 3 more": 3,
+		"Vs. Not a boundary": 1, // abbreviation
+		"A \"quoted.\" Next": 2,
+		"No. 5 is here":      1,
+	} {
+		if got := sentences(in); len(got) != n {
+			t.Errorf("%q: %d sentences %v, want %d", in, len(got), got, n)
+		}
+	}
+}
+
+func TestWindowStaysInTheParagraph(t *testing.T) {
+	us := Units("First. Second. Third.\n\nOther.")
+	if w := Window(us, 1); !strings.Contains(w, "First") || !strings.Contains(w, "Third") {
+		t.Errorf("window %q", w)
+	}
+	if w := Window(us, 2); strings.Contains(w, "Other") {
+		t.Errorf("window crossed a paragraph: %q", w)
+	}
+	if w := Window(us, 0); strings.Contains(w, "Other") || !strings.HasPrefix(w, "First") {
+		t.Errorf("window %q", w)
+	}
+}
+
+func TestHasBitIdentityExcludesParaphrase(t *testing.T) {
+	if !HasBitIdentity("it is Bit-Identical") || HasBitIdentity("it rounds differently") {
+		t.Error("HasBitIdentity")
+	}
+	if !parity.MatchString("it rounds differently") {
+		t.Error("the paraphrase is a parity cue")
+	}
+}
+
+func FuzzScan(f *testing.F) {
+	for _, c := range refusing {
+		f.Add(c.text)
+	}
+	for _, s := range passing {
+		f.Add(s)
+	}
+	f.Add("```\nunclosed fence we skip SIMD because bit-parity")
+	f.Add("<!-- unclosed")
+	f.Add("> > nested\n\n\n- \n|\n#\n")
+	f.Add("1.\n2. Three.\n. . . ? ! e.g. i.e.")
+	f.Fuzz(func(t *testing.T, s string) {
+		found := Scan(s)
+		lines := strings.Count(s, "\n") + 1
+		for _, fd := range found {
+			if fd.Line < 1 || fd.Line > lines {
+				t.Fatalf("line %d outside 1..%d", fd.Line, lines)
+			}
+			if fd.Rule == "" || fd.Sentence == "" {
+				t.Fatalf("empty finding %+v", fd)
+			}
+			_ = fd.String()
+		}
+		if n := strings.Count(Strip(s), "\n"); n != strings.Count(s, "\n") {
+			t.Fatalf("Strip changed the line count")
+		}
+		out, err := Gate(s, "because", "--parity-waiver")
+		if len(s) > MaxText {
+			return
+		}
+		if err != nil {
+			t.Fatalf("a waiver must pass any text: %v", err)
+		}
+		if strings.TrimSpace(s) != "" && len(found) > 0 && !HasMeasuredBound(Units(s)) && !strings.Contains(out, StampPrefix) {
+			t.Fatalf("a waived finding must be stamped")
+		}
+		// The stamp is never read back: stamping does not change the findings.
+		if got := len(Scan(out)); got != len(found) {
+			t.Fatalf("stamping changed the findings: %d vs %d", got, len(found))
+		}
+	})
+}
