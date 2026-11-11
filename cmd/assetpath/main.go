@@ -41,6 +41,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
 )
 
@@ -345,6 +346,12 @@ func (e exitErr) Error() string { return e.err.Error() }
 func exitWith(code int, err error) error { return exitErr{code: code, err: err} }
 
 func main() {
+	// ⛔ A RESOLVER THAT IS ITSELF OUT OF DATE answers from an older idea of
+	// what the shapes are, and its answer looks exactly like a current one.
+	// The fleet gate TestEveryCommandAsksWhetherItIsStale requires this of
+	// every command, and it caught this one: the tests here were green and the
+	// conformance test was not.
+	fleet.WarnIfStale(os.Stderr)
 	if err := RootCmd().Execute(); err != nil {
 		var ee exitErr
 		code := 2
