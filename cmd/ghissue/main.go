@@ -112,6 +112,12 @@ what gets published, so a waiver is made in public. No waiver covers a TITLE: a
 title cannot carry the reason and is republished in every listing and
 notification an edit never reaches.
 
+⛔ THE BIT-PARITY GATE. A body that defers or declines a performance change
+BECAUSE it would break bit identity is refused (fleet decision 2026-11-11,
+go-fft/fft#121: bit identity is a porting step, never the contract), unless it
+cites a measured error bound; --parity-waiver "<why>" is stamped into the
+text, and no waiver covers a title. See paritycheck --help.
+
 Exit status: 0 done, 2 refused or failed.`
 
 // newClient is replaced by tests, which need to trust an httptest TLS server.
@@ -151,6 +157,7 @@ func RootCmd() *cobra.Command {
 		confirm  string
 		prior    string
 		priorWv  string
+		parityWv string
 	)
 	cmd := &cobra.Command{
 		Use:          "ghissue <owner/repo> <number> | <owner/repo> --new --title <t> --body-file <f>",
@@ -164,7 +171,7 @@ func RootCmd() *cobra.Command {
 				title: title, dryRun: dryRun, doClose: doClose, doReopen: doReopen,
 				addLabels: addLab, removeLabels: remLab,
 				edit: doEdit, waiver: waiver, confirm: confirm,
-				priorArt: prior, priorWaiver: priorWv,
+				priorArt: prior, priorWaiver: priorWv, parityWaiver: parityWv,
 			}
 			// ⛔ The three acts are named separately and checked against each
 			// other rather than ordered by precedence: --delete beside --edit is
@@ -230,6 +237,10 @@ func RootCmd() *cobra.Command {
 		"--new after a priorart run that found something: what you read and why this issue is not a duplicate (STAMPED into the issue)")
 	f.StringVar(&priorWv, "prior-art-waiver", "",
 		"--new without a recent priorart run: why (STAMPED into the issue)")
+	// The bit-parity gate (paritygate.go): a REASON, stamped into the published
+	// text, like the two above.
+	f.StringVar(&parityWv, "parity-waiver", "",
+		"why this text may defer a performance change because it breaks bit identity (STAMPED into the text)")
 	return cmd
 }
 
@@ -246,6 +257,8 @@ type opts struct {
 	// priorArt and priorWaiver answer the prior-art gate on --new; see
 	// priorgate.go.
 	priorArt, priorWaiver string
+	// parityWaiver answers the bit-parity gate; see paritygate.go.
+	parityWaiver string
 }
 
 // count says how many of the acts were asked for.
@@ -274,7 +287,7 @@ func runNew(cmd *cobra.Command, args []string, o opts) error {
 	if err != nil {
 		return err
 	}
-	title, err := checkTitle(o.title, o.waiver)
+	title, err := checkTitle(o.title, o.waivers())
 	if err != nil {
 		return err
 	}
@@ -283,7 +296,7 @@ func runNew(cmd *cobra.Command, args []string, o opts) error {
 		// refuses an empty body for the same reason.
 		return errors.New("--new needs --body-file: an issue says what and why")
 	}
-	body, err := readBody(o.bodyFile, o.waiver)
+	body, err := readBody(o.bodyFile, o.waivers())
 	if err != nil {
 		return err
 	}
@@ -325,7 +338,7 @@ func runNew(cmd *cobra.Command, args []string, o opts) error {
 
 // checkTitle refuses a title GitHub would refuse, and one that spans lines: a
 // newline in a title is a body pasted into the wrong flag.
-func checkTitle(t, waiver string) (string, error) {
+func checkTitle(t string, w waivers) (string, error) {
 	t = strings.TrimSpace(t)
 	switch {
 	case t == "":
@@ -335,7 +348,10 @@ func checkTitle(t, waiver string) (string, error) {
 	case len([]rune(t)) > maxTitle:
 		return "", fmt.Errorf("--title: over %d characters", maxTitle)
 	}
-	if err := gateTitle(t, waiver); err != nil {
+	if err := gateTitle(t, w.private); err != nil {
+		return "", err
+	}
+	if err := gateParityTitle(t); err != nil {
 		return "", err
 	}
 	return t, nil
@@ -415,7 +431,7 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 
 	var body string
 	if o.bodyFile != "" {
-		if body, err = readBody(o.bodyFile, o.waiver); err != nil {
+		if body, err = readBody(o.bodyFile, o.waivers()); err != nil {
 			return err
 		}
 	}
@@ -491,7 +507,7 @@ func splitRepo(s string) (owner, repo string, err error) {
 // this command reads its text here, so a body cannot be read without the
 // compiler asking the caller what to do about a disclosure. A gate reached by
 // remembering to call it is not a gate.
-func readBody(path, waiver string) (string, error) {
+func readBody(path string, w waivers) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("body file: %w", err)
@@ -507,7 +523,11 @@ func readBody(path, waiver string) (string, error) {
 	if strings.TrimSpace(string(b)) == "" {
 		return "", errors.New("body file: empty")
 	}
-	return gateBody(string(b), waiver)
+	s, err := gateBody(string(b), w.private)
+	if err != nil {
+		return "", err
+	}
+	return gateParityBody(s, w.parity)
 }
 
 // readToken is ghtoken.Read: the token from a file only its owner may read.
