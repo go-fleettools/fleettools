@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/go-fleettools/fleettools/internal/paritytext"
 )
 
 // floaty makes a repository a floating-point one (FloatMin words).
@@ -419,5 +421,35 @@ func TestParkedOutranksUnread(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(locked, 0o644) })
 	if r, err := Check(root); err != nil || r.Verdict != Fail || len(r.Unread) != 1 {
 		t.Errorf("%+v %v", r, err)
+	}
+}
+
+// A parking sentence INSIDE the marker section is still read: the section is
+// where an author would put it.
+func TestParkedSentenceInsideTheMarkerSection(t *testing.T) {
+	sectioned := contract + "| trsm | bit for bit against SciPy's Fortran | **left** |\n"
+	r := check(t, map[string]string{"README.md": floaty + "\n" + sectioned, "a_test.go": boundTest})
+	if r.Verdict != Fail || len(r.Parked) != 1 {
+		t.Errorf("%+v", r)
+	}
+	if r := check(t, map[string]string{"README.md": floaty + "\n" + contract, "a_test.go": boundTest}); r.Verdict != Pass {
+		t.Errorf("control: %+v", r)
+	}
+}
+
+// A surface the scanner would only half read is UNREAD, not PASS.
+func TestOversizedSurfaceIsUnread(t *testing.T) {
+	big := strings.Repeat("A line of prose with nothing to find.\n", (paritytext.MaxText/38)+10)
+	if len(big) <= paritytext.MaxText || len(big) >= MaxFile {
+		t.Fatalf("fixture size %d", len(big))
+	}
+	r := check(t, map[string]string{"README.md": "Fine.\n", "docs/big.md": big})
+	if r.Verdict != Unread || len(r.Unread) != 1 || !strings.Contains(r.Unread[0], "docs/big.md") {
+		t.Errorf("%+v", r)
+	}
+	// Go comments count by the comment text, not the source.
+	src := "package p\n" + strings.Repeat("// "+strings.Repeat("x", 70)+"\n", (paritytext.MaxText/70)+100)
+	if r := check(t, map[string]string{"README.md": "Fine.\n", "a.go": src}); r.Verdict != Unread {
+		t.Errorf("go: %+v", r)
 	}
 }

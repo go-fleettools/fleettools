@@ -132,6 +132,18 @@ var (
 	// about an identity ELEMENT of a reduction, not a missing kernel.
 	reductionIdentity = regexp.MustCompile(`(?i)\bidentity\s+(element|value|to\b)`)
 
+	// noVectorISA: where the assembler or the instruction set has no vector
+	// double arithmetic, the kernel is INEXPRESSIBLE and parity is not what blocks
+	// it ("the Go ppc64 assembler exposes no vector double arithmetic"). Read in
+	// the sentence and its paragraph neighbours.
+	noVectorISA = regexp.MustCompile(`(?i)\b(assembler|isa|instruction\s+set|hardware|cpu|vector\s+facility)\b[^.;]{0,60}?\b(has|have|exposes?|provides?|offers?|lacks?|without)\s+(\*\*)?(no|a)?\s*(vector|simd)` +
+		`|\bno\s+vector\s+(double|float|arithmetic|instruction|fma|multiply|add)` +
+		`|\binexpressible\b|\bcannot\s+be\s+expressed\s+in\s+(the\s+)?(go\s+)?assembler`)
+
+	// leftButClosed: "**left** (already fused in order, PR #7)" says the gap is
+	// ALREADY closed.
+	leftButClosed = regexp.MustCompile(`(?i)\*\*left\*\*\s*\(\s*(already|done|fixed|closed|shipped|merged|resolved)\b`)
+
 	// leftOnParity: a table row validated "bit for bit" whose change is
 	// "**left**" — the gap is left open, and the row says what it is held by.
 	leftOnParity = regexp.MustCompile(`(?i)\*\*left\*\*|\bleft\s+(open|as\s+is|alone|for\s+now)\b`)
@@ -411,9 +423,9 @@ func classify(s string, perfSent, inPerf bool, win func() string) string {
 		return "contract-change"
 	case inPerf && keepContract.MatchString(s) && optionWords.MatchString(win()):
 		return "keep-parity-contract"
-	case noBitIdentical.MatchString(s) && !noLonger.MatchString(s) && !reductionIdentity.MatchString(s):
+	case noBitIdentical.MatchString(s) && !noLonger.MatchString(s) && !reductionIdentity.MatchString(s) && !noVectorISA.MatchString(win()):
 		return "no-bit-identical-way"
-	case leftOnParity.MatchString(s):
+	case leftOnParity.MatchString(s) && !leftButClosed.MatchString(s):
 		return "left-on-parity"
 	case inPerf && stayToKeep.MatchString(s):
 		return "stay-to-keep-parity"

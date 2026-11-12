@@ -181,11 +181,20 @@ func Check(root string) (*Report, error) {
 			return nil
 		}
 		r.Files++
+		add := func(text string) {
+			// The scanner reads at most MaxText bytes; a larger surface would be
+			// half-read, and a half-read file is not a PASS.
+			if len(text) > paritytext.MaxText {
+				r.Unread = append(r.Unread, fmt.Sprintf("%s: %d bytes of text, over the %d the scanner reads", rel, len(text), paritytext.MaxText))
+				return
+			}
+			surfaces = append(surfaces, surface{rel, text})
+		}
 		switch kind {
 		case prose:
-			surfaces = append(surfaces, surface{rel, string(b)})
+			add(string(b))
 		case goSource:
-			surfaces = append(surfaces, surface{rel, goComments(b)})
+			add(goComments(b))
 		case testFile:
 			if testRe.Match(b) && r.Marker.Test == "" {
 				r.Marker.Test = rel

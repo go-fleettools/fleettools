@@ -531,3 +531,33 @@ func TestCommittedDocForms(t *testing.T) {
 		t.Errorf("a measured bound did not exempt the row: %v", got)
 	}
 }
+
+// Where the assembler has no vector double arithmetic the kernel is
+// inexpressible: parity is not what blocks it (go-fft docs/plan-fft.md:202).
+func TestNoVectorISAIsNotParity(t *testing.T) {
+	fires := "No bit-identical vector kernel is expressible on ppc64le."
+	for _, passes := range []string{
+		"- **ppc64le**: the Go ppc64 assembler exposes **no vector double arithmetic** (the VSX surface is loads/stores, logicals, permutes), so likewise no bit-identical vector kernel is expressible.",
+		"Where no bit-identical kernel is expressible (loong64/ppc64le, no vector double arithmetic in the Go assembler) the scalar oracle stands.",
+		"The assembler has no vector double arithmetic on loong64. As on ppc64le, a bit-identical vector complex multiply cannot be built.",
+	} {
+		if got := Scan(passes); len(got) != 0 {
+			t.Errorf("refused: %q %v", passes, got)
+		}
+	}
+	if len(Scan(fires)) == 0 {
+		t.Error("the same sentence without the ISA reason must fire")
+	}
+}
+
+// "**left** (already fused in order, PR #7)" says the gap is already closed.
+func TestLeftButAlreadyClosed(t *testing.T) {
+	closed := "| MINPACK qrfac | bit for bit (MINPACK order) | **left** (already fused in order, PR #7) |"
+	open := "| MINPACK qrfac | bit for bit (MINPACK order) | **left** (no kernel keeps that order) |"
+	if got := Scan(closed); len(got) != 0 {
+		t.Errorf("a closed gap was refused: %v", got)
+	}
+	if got := Scan(open); len(got) == 0 {
+		t.Error("an open gap passed")
+	}
+}
