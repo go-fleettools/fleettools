@@ -489,9 +489,13 @@ func TestItAllowsWhateverItCannotRead(t *testing.T) {
 	}
 }
 
-// ⛔ BOUND THE LOOP: a blocked reply ends in another Stop.
+// ⛔ BOUND THE LOOP WHEN THERE IS NO UUID TO KEY ON. Refusing one reply once
+// handles the ordinary case; an entry carrying no uuid cannot be recognised
+// the second time, so --max-blocks is what stops it looping.
 func TestItGivesUpRatherThanLoop(t *testing.T) {
-	p := transcript(t, userTurn("proceed"), assistantText("a1", "no stamp"))
+	noUUID := line{"type": "assistant", "message": line{"role": "assistant",
+		"content": []line{{"type": "text", "text": "no stamp"}}}}
+	p := transcript(t, userTurn("proceed"), noUUID)
 	dir := t.TempDir()
 	saved := stateDir
 	stateDir = func() (string, error) { return dir, nil }
@@ -521,6 +525,88 @@ func TestItGivesUpRatherThanLoop(t *testing.T) {
 	}
 }
 
+// ⛔⛔ ONE REFUSAL PER REPLY. Found by this gate firing on its own author:
+// blocking at Stop does not start a new user turn, so the anchor does not
+// move, and the next Stop judges the SAME text — which is already written and
+// cannot be edited. The first version refused it again, and again, asking each
+// time for a message that no longer exists to be rewritten.
+func TestTheSameReplyIsRefusedOnlyOnce(t *testing.T) {
+	dir := t.TempDir()
+	saved := stateDir
+	stateDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { stateDir = saved })
+	savedNow := now
+	now = func() time.Time { return clock }
+	t.Cleanup(func() { now = savedNow })
+
+	p := transcript(t, userTurn("proceed"), assistantText("a1", "no stamp"))
+	blocked := 0
+	for i := 0; i < 4; i++ {
+		c := RootCmd()
+		c.SetIn(strings.NewReader(payload(t, p, "same")))
+		var out, errOut bytes.Buffer
+		cli.Drive(c, []string{"--hook"}, &out, &errOut)
+		var a hookAnswer
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &a); err != nil {
+			t.Fatal(err)
+		}
+		if a.Decision == "block" {
+			blocked++
+		}
+	}
+	if blocked != 1 {
+		t.Fatalf("the same unchangeable reply was refused %d times; want 1", blocked)
+	}
+}
+
+// ⛔ A refusal must not ask for the impossible: the text it names is already
+// written, so the only actionable instruction is about the NEXT reply.
+func TestTheReasonAsksForSomethingThatCanStillBeDone(t *testing.T) {
+	r := verdict{kind: missing, got: "The reviewer hit the 5-hour limit…"}.reason()
+	if strings.Contains(r, "Write the reply again") {
+		t.Error("the reason asks for a message that no longer exists to be rewritten")
+	}
+	if !strings.Contains(r, "NEXT turn") {
+		t.Errorf("the reason does not say what can still be done: %q", r)
+	}
+	if !strings.Contains(r, "FIRST text block") {
+		t.Errorf("the reason does not say which text is judged: %q", r)
+	}
+}
+
+// A DIFFERENT unstamped reply is still refused — standing down is per reply,
+// not for the session.
+func TestANewUnstampedReplyIsStillRefused(t *testing.T) {
+	dir := t.TempDir()
+	saved := stateDir
+	stateDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { stateDir = saved })
+	savedNow := now
+	now = func() time.Time { return clock }
+	t.Cleanup(func() { now = savedNow })
+
+	first := transcript(t, userTurn("proceed"), assistantText("a1", "no stamp"))
+	second := transcript(t, userTurn("proceed"), assistantText("a2", "still no stamp"))
+	decide := func(p string) string {
+		c := RootCmd()
+		c.SetIn(strings.NewReader(payload(t, p, "sess")))
+		var out, errOut bytes.Buffer
+		cli.Drive(c, []string{"--hook"}, &out, &errOut)
+		var a hookAnswer
+		_ = json.Unmarshal([]byte(strings.TrimSpace(out.String())), &a)
+		return a.Decision
+	}
+	if d := decide(first); d != "block" {
+		t.Fatalf("first = %q, want block", d)
+	}
+	if d := decide(first); d != "" {
+		t.Fatalf("same reply again = %q, want no decision", d)
+	}
+	if d := decide(second); d != "block" {
+		t.Fatalf("a different unstamped reply = %q, want block", d)
+	}
+}
+
 func TestAStampedReplyClearsTheCount(t *testing.T) {
 	dir := t.TempDir()
 	saved := stateDir
@@ -541,7 +627,7 @@ func TestAStampedReplyClearsTheCount(t *testing.T) {
 	}
 	run(bad)
 	run(good)
-	if n := blocksSoFar("sess"); n != 0 {
+	if n, _ := blocksSoFar("sess"); n != 0 {
 		t.Fatalf("a stamped reply left the count at %d, want 0", n)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sess.blocks")); !os.IsNotExist(err) {

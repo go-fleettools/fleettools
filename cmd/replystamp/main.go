@@ -483,9 +483,10 @@ const wanted = "**[2026-11-01 21:05 CET]**"
 func (v verdict) reason() string {
 	switch v.kind {
 	case missing:
-		return fmt.Sprintf("Your reply did not start with the local date and time. It started with: %s\n"+
+		return fmt.Sprintf("The reply you just ended did not START with the local date and time. Its first text was: %s\n"+
 			"CLAUDE.md's first rule: start EVERY reply with %s -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … ».\n"+
-			"Write the reply again, with the stamp on the first line.", v.got, wanted)
+			"⛔ What is judged is the FIRST text block of the turn, not the last: a stamp on a closing summary does not satisfy it, and text written between tool calls is where a reply begins.\n"+
+			"That text is already written and cannot be edited, so open your NEXT turn with the stamp. This reply will not be refused again.", v.got, wanted)
 	case twelveHour:
 		return fmt.Sprintf("Your reply opened on a 12-hour clock: %s\n"+
 			"CLAUDE.md asks for a 24-hour one and names this: never am/pm. Convert it (9:21 pm is 21:21) and write the reply again.", v.got)
@@ -567,23 +568,39 @@ func runHook(cmd *cobra.Command, o *options) error {
 		clearBlocks(p.SessionID)
 		return allow(out, errOut, "")
 	}
-	// ⛔ BOUND THE LOOP, AND BOUND IT IN TOTAL. A blocked reply ends in another
-	// Stop, so a model that cannot satisfy this would be sent back for ever.
-	// After --max-blocks it stands down for the rest of the session and says
-	// so.
+	// ⛔⛔ REFUSE ONE REPLY ONCE. A SECOND REFUSAL OF IT CANNOT BE ACTED ON.
 	//
+	// Found by this gate firing on its own author, 2026-11-12. Blocking at Stop
+	// does not start a new user turn, so the anchor does not move: the reply
+	// being judged is the same text next time, and that text is already written
+	// and cannot be edited. The first version said "Write the reply again, with
+	// the stamp on the first line" — of a message that no longer exists to be
+	// written. It blocked, was obeyed as well as it could be, and blocked again
+	// on the identical text.
+	//
+	// So the count is keyed on the judged reply's UUID. One refusal per
+	// offending reply, after which it stands down for THAT reply and says why.
+	// --max-blocks still bounds the case where an entry carries no uuid.
+	//
+	// ⛔ And the reason had to change with it: what the model can actually do is
+	// open its NEXT turn with the stamp. A gate that asks for the impossible
+	// teaches nothing and costs a turn each time it asks.
+	n, last := blocksSoFar(p.SessionID)
+	if f.uuid != "" && f.uuid == last {
+		return allow(out, errOut,
+			"already refused this reply; its text is written and cannot be changed, so standing down for it")
+	}
 	// ⛔ IT MUST NOT CLEAR THE COUNT WHEN IT GIVES UP, which is what the first
 	// version did: the count went back to zero, the gate re-armed on the very
 	// next reply, and the loop came back as block, block, allow, block, block,
 	// allow — bounded only in threes. Its test measured 4 refusals in 6
-	// replies. Only a STAMPED reply clears the count, which is the right
-	// re-arming: the thing the gate is for has happened.
-	n := blocksSoFar(p.SessionID) + 1
+	// replies. Only a STAMPED reply clears the count.
+	n++
 	if n > o.maxBlocks {
-		recordBlock(p.SessionID, n)
+		recordBlock(p.SessionID, n, f.uuid)
 		return allow(out, errOut, "the reply is still unstamped after %d refusals; standing down until a stamped reply comes through", o.maxBlocks)
 	}
-	recordBlock(p.SessionID, n)
+	recordBlock(p.SessionID, n, f.uuid)
 	return answer(out, hookAnswer{Decision: "block", Reason: v.reason()})
 }
 
@@ -621,23 +638,26 @@ func countPath(session string) (string, bool) {
 	return filepath.Join(dir, session+".blocks"), true
 }
 
-func blocksSoFar(session string) int {
+// blocksSoFar returns how many consecutive refusals this session has had, and
+// the UUID of the reply the last one was about.
+func blocksSoFar(session string) (int, string) {
 	p, ok := countPath(session)
 	if !ok {
-		return 0
+		return 0, ""
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {
-		return 0
+		return 0, ""
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	count, uuid, _ := strings.Cut(strings.TrimSpace(string(b)), " ")
+	n, err := strconv.Atoi(count)
 	if err != nil {
-		return 0
+		return 0, ""
 	}
-	return n
+	return n, uuid
 }
 
-func recordBlock(session string, n int) {
+func recordBlock(session string, n int, uuid string) {
 	p, ok := countPath(session)
 	if !ok {
 		return
@@ -645,7 +665,11 @@ func recordBlock(session string, n int) {
 	if os.MkdirAll(filepath.Dir(p), 0o755) != nil {
 		return
 	}
-	_ = os.WriteFile(p, []byte(strconv.Itoa(n)+"\n"), 0o644)
+	// ⛔ The UUID goes on the same line as the count, and a uuid is written by
+	// this program alone — but it still travels through a file, so it is read
+	// back with Cut rather than parsed, and a line of any other shape reads as
+	// no state at all rather than as a panic.
+	_ = os.WriteFile(p, []byte(strconv.Itoa(n)+" "+uuid+"\n"), 0o644)
 }
 
 func clearBlocks(session string) {
