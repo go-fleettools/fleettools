@@ -249,13 +249,17 @@ func hiddenCount(fs []fragment) int {
 }
 
 func repeatsCmd() *cobra.Command {
-	var write bool
+	var write, check bool
 	var rep string
 	c := &cobra.Command{
 		Use:   "repeats LAYOUT",
 		Short: "Find (and with --write hide) what a layout says that the mantra strip already says",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if write && check {
+				return fmt.Errorf("--check asks whether the layout is right and --write makes it " +
+					"right: a gate that fixed what it found would always pass")
+			}
 			b, err := os.ReadFile(args[0])
 			if err != nil {
 				return err
@@ -270,12 +274,43 @@ func repeatsCmd() *cobra.Command {
 			if write && out != string(b) {
 				return os.WriteFile(args[0], []byte(out), 0o644)
 			}
+			if check {
+				if n := hideable(frags); n > 0 {
+					return &failure{fmt.Errorf("%d fragment(s) of %s say what the mantra strip "+
+						"already says; `landingmigrate repeats --write %s` wraps them",
+						n, args[0], args[0])}
+				}
+			}
 			return nil
 		},
 	}
 	c.Flags().BoolVarP(&write, "write", "w", false, "hide the repeats in the file")
+	// ⛔ A REPORTING COMMAND CANNOT BE A GATE. This found what a layout repeats
+	// from the day it was written and always exited 0, so the only way to fail
+	// a build on it was a shell reading its words — which is how a check comes
+	// to pass because a message was reworded. go-pdfkit's landing said the
+	// licence and CGO_ENABLED=0 three times under a strip that says both, for
+	// as long as the page existed, and a reader found it rather than CI.
+	c.Flags().BoolVar(&check, "check", false,
+		"exit 1 when a fragment is still a pure repeat, for a gate (not with --write)")
 	c.Flags().StringVar(&rep, "report", "", "write the fragments found, for verify")
 	return c
+}
+
+// hideable counts the fragments that are pure repeats and not yet wrapped.
+//
+// ⛔ ONLY THOSE. A fragment that mentions the mantra and says MORE — "BSD-3
+// code · MIT artwork" — is kept for a person to read, and a gate that failed on
+// those would be a gate every landing turns off. It is the same line repeats.go
+// already draws between hiding a fragment and listing it.
+func hideable(frags []fragment) int {
+	n := 0
+	for _, f := range frags {
+		if f.Hidden {
+			n++
+		}
+	}
+	return n
 }
 
 func stripCmd() *cobra.Command {
