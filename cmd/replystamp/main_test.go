@@ -122,6 +122,29 @@ func assistantText(uuid, text string) line {
 		"content": []line{{"type": "text", "text": text}}}}
 }
 
+func apiErrorText(uuid, text string) line {
+	return line{"type": "assistant", "uuid": uuid, "isApiErrorMessage": true,
+		"apiError": "usage_limit_reached", "apiErrorStatus": 429,
+		"message": line{"role": "assistant",
+			"content": []line{{"type": "text", "text": text}}}}
+}
+
+func sidechainUser(text string) line {
+	return line{"type": "user", "uuid": "su", "isSidechain": true, "message": line{"role": "user",
+		"content": []line{{"type": "text", "text": text}}}}
+}
+
+func sidechainAssistant(uuid, text string) line {
+	return line{"type": "assistant", "uuid": uuid, "isSidechain": true, "message": line{"role": "assistant",
+		"content": []line{{"type": "text", "text": text}}}}
+}
+
+func stampedAt(uuid, text string, at time.Time) line {
+	l := assistantText(uuid, text)
+	l["timestamp"] = at.UTC().Format(time.RFC3339)
+	return l
+}
+
 func assistantToolUse(uuid string) line {
 	return line{"type": "assistant", "uuid": uuid, "message": line{"role": "assistant",
 		"content": []line{{"type": "tool_use", "name": "Bash"}}}}
@@ -231,6 +254,119 @@ func TestAStringUserEntryIsATurn(t *testing.T) {
 	}
 	if judge(r.text, clock, 3*time.Hour).kind != missing {
 		t.Errorf("the unstamped reply after a compaction must be refused")
+	}
+}
+
+// ⛔⛔ A USAGE-LIMIT MESSAGE IS NOT A REPLY. Measured over the 50 transcripts
+// on this machine: 14 end on `You've hit your 5-hour limit · resets 8:50pm`,
+// text the model never wrote, recorded as an ordinary assistant text entry.
+// Refusing it blocks a reply nobody composed, at the one moment the session
+// has no requests left to satisfy the refusal with.
+func TestAUsageLimitMessageIsNotAReply(t *testing.T) {
+	p := transcript(t,
+		userTurn("proceed"),
+		apiErrorText("a1", "You've hit your 5-hour limit · resets 8:50pm (Europe/Paris)"),
+	)
+	if _, err := findReply(p); err == nil {
+		t.Fatal("the limit message was judged as a reply")
+	}
+}
+
+// And when the limit lands mid-turn, the real reply is still the first text:
+// the error must not displace it, in either direction.
+func TestALimitMessageAfterARealReplyDoesNotDisplaceIt(t *testing.T) {
+	p := transcript(t,
+		userTurn("proceed"),
+		assistantText("a1", stamp(clock)+"\n\nStarting the sweep."),
+		assistantToolUse("a2"),
+		toolResult("ok"),
+		apiErrorText("a3", "You've hit your 5-hour limit · resets 8:50pm (Europe/Paris)"),
+	)
+	r, err := findReply(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.uuid != "a1" {
+		t.Fatalf("anchored on %s (%q)", r.uuid, r.text)
+	}
+}
+
+// ⛔ A SUBAGENT WRITES INTO THE SAME TRANSCRIPT. Its prompt is a user entry
+// with text in it and its answer is an assistant text, so without the
+// sidechain test the anchor lands inside the subagent and refuses the parent
+// session for a reply it did not write. Its turns must be skipped too, not
+// only its replies.
+func TestASubagentIsNotThisSessionsReply(t *testing.T) {
+	p := transcript(t,
+		userTurn("proceed"),
+		assistantText("a1", stamp(clock)+"\n\nSpawning a reviewer."),
+		assistantToolUse("a2"),
+		sidechainUser("Review PR #256 and report back."),
+		sidechainAssistant("s1", "Two concrete false refusals already."),
+		toolResult("agent finished"),
+		assistantText("a3", "The reviewer found two."),
+	)
+	r, err := findReply(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.uuid != "a1" {
+		t.Fatalf("anchored on %s (%q)", r.uuid, r.text)
+	}
+}
+
+// ⛔⛔ THE CLOCK IS THE REPLY'S OWN TIMESTAMP, NOT time.Now(). Measured over
+// the 50 transcripts on this machine, judging against the wall clock: 8
+// reported STALE by 18 hours to 19 days, every one a reply that was correctly
+// stamped when it was written, in a session that has since ended.
+func TestAnOldTranscriptIsJudgedAtTheTimeItWasWritten(t *testing.T) {
+	written := clock.Add(-19 * 24 * time.Hour)
+	p := transcript(t,
+		userTurn("proceed"),
+		stampedAt("a1", stamp(written)+"\n\nMerged and released.", written),
+	)
+	r, err := findReply(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := judge(r.text, judgedAgainst(r), 3*time.Hour); v.kind != stamped {
+		t.Fatalf("a reply stamped correctly 19 days ago reads as %v", v.kind)
+	}
+}
+
+// The staleness check must still catch what it is for: a stamp that does not
+// match the moment the reply was actually written.
+func TestAStampFromAnotherDayIsStillStale(t *testing.T) {
+	written := clock
+	p := transcript(t,
+		userTurn("proceed"),
+		stampedAt("a1", stamp(clock.Add(-48*time.Hour))+"\n\nok", written),
+	)
+	r, err := findReply(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := judge(r.text, judgedAgainst(r), 3*time.Hour); v.kind != stale {
+		t.Fatalf("a stamp two days off its own entry reads as %v", v.kind)
+	}
+}
+
+// With no recorded timestamp there is still a reply to judge, so it falls back
+// to the clock rather than refusing to answer.
+func TestWithoutATimestampItFallsBackToTheClock(t *testing.T) {
+	p := transcript(t, userTurn("proceed"), assistantText("a1", stamp(clock)+"\n\nok"))
+	r, err := findReply(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.haveAt {
+		t.Fatal("the fixture was supposed to carry no timestamp")
+	}
+	savedNow := now
+	now = func() time.Time { return clock }
+	t.Cleanup(func() { now = savedNow })
+	if v := judge(r.text, judgedAgainst(r), 3*time.Hour); v.kind != stamped {
+		t.Fatalf("kind = %v", v.kind)
 	}
 }
 

@@ -167,7 +167,7 @@ func run(cmd *cobra.Command, o *options) error {
 	if err != nil {
 		return cli.Unanswerable("%v", err)
 	}
-	v := judge(f.text, now(), o.tolerance)
+	v := judge(f.text, judgedAgainst(f), o.tolerance)
 	fmt.Fprintln(cli.Out(cmd), v.report(f))
 	if v.kind == stamped {
 		return nil
@@ -182,6 +182,10 @@ func run(cmd *cobra.Command, o *options) error {
 type aReply struct {
 	text string
 	uuid string
+	// at is the instant the transcript recorded the reply. It is the clock the
+	// stamp is judged against; see judgedAgainst.
+	at     time.Time
+	haveAt bool
 }
 
 type entry struct {
@@ -189,6 +193,26 @@ type entry struct {
 	IsMeta  bool            `json:"isMeta"`
 	UUID    string          `json:"uuid"`
 	Message json.RawMessage `json:"message"`
+	// ⛔⛔ A USAGE-LIMIT MESSAGE IS NOT A REPLY, AND IT IS THE MOST COMMON LAST
+	// TEXT IN A TRANSCRIPT. Measured over the 50 transcripts on this machine:
+	// 14 of them end on `You've hit your 5-hour limit · resets 8:50pm`, text
+	// the model never wrote, recorded as an ordinary assistant text entry.
+	//
+	// Judging it refuses a reply nobody composed — and the refusal lands
+	// exactly when the session has no requests left, so the retry it asks for
+	// walks straight back into the limit. It is the worst moment this gate
+	// could choose to speak.
+	//
+	// The entry says so itself: isApiErrorMessage, beside apiError
+	// ("usage_limit_reached") and apiErrorStatus (429). A FIELD, not a text
+	// pattern — matching on the words would be a gate that breaks when the
+	// message is reworded, and would refuse a real reply that quoted it.
+	IsAPIErrorMessage bool `json:"isApiErrorMessage"`
+	// A subagent's entries are written into the same transcript with this set.
+	// Its replies are not this session's replies and carry no stamp.
+	IsSidechain bool `json:"isSidechain"`
+	// Timestamp is when the entry was recorded, RFC 3339.
+	Timestamp string `json:"timestamp"`
 }
 
 type message struct {
@@ -252,14 +276,23 @@ func readReply(r io.Reader) (aReply, error) {
 		if len(e.Message) > 0 {
 			_ = json.Unmarshal(e.Message, &m)
 		}
+		// A subagent writes into this same file. Nothing it says is this
+		// session's reply, and its turns must not move the anchor either.
+		if e.IsSidechain {
+			continue
+		}
 		switch {
 		case e.Type == "user" && isUserTurn(e, m):
 			// A new turn: whatever reply we were holding belonged to the
 			// previous one.
 			reply, haveReply = aReply{}, false
-		case e.Type == "assistant" && !haveReply:
+		case e.Type == "assistant" && !haveReply && !e.IsAPIErrorMessage:
 			if t, ok := firstText(m.Content); ok {
-				reply, haveReply = aReply{text: t, uuid: e.UUID}, true
+				r := aReply{text: t, uuid: e.UUID}
+				if at, err := time.Parse(time.RFC3339, e.Timestamp); err == nil {
+					r.at, r.haveAt = at.Local(), true
+				}
+				reply, haveReply = r, true
 			}
 		}
 	}
@@ -298,6 +331,31 @@ func isUserTurn(e entry, m message) bool {
 		}
 	}
 	return false
+}
+
+// judgedAgainst returns the clock a reply's stamp is compared with: the
+// instant the transcript recorded that reply.
+//
+// ⛔⛔ time.Now() WAS THE WRONG CLOCK, and it made the verdict a function of
+// when you happened to run the command. Measured over the 50 transcripts on
+// this machine: 8 reported STALE, by 18 hours to 19 days — every one of them a
+// reply that was correctly stamped WHEN IT WAS WRITTEN, in a session that has
+// since ended. The command was answering "is this reply's stamp close to now",
+// and the rule is "was it stamped with the time it was written".
+//
+// Under the hook the two agree, because Stop fires seconds after the reply —
+// which is exactly why the defect was invisible there and obvious the moment
+// the same binary was pointed at an old file. Reading the entry's own
+// timestamp makes the answer the same on both paths and reproducible on a
+// transcript of any age, which is what a baseline has to be.
+//
+// It falls back to the clock when the entry carries no usable timestamp,
+// because a reply with no recorded time still has to be judged on something.
+func judgedAgainst(f aReply) time.Time {
+	if f.haveAt {
+		return f.at
+	}
+	return now()
 }
 
 func firstText(raw json.RawMessage) (string, bool) {
@@ -504,7 +562,7 @@ func runHook(cmd *cobra.Command, o *options) error {
 	if err != nil {
 		return allow(out, errOut, "%v", err)
 	}
-	v := judge(f.text, now(), o.tolerance)
+	v := judge(f.text, judgedAgainst(f), o.tolerance)
 	if v.kind == stamped {
 		clearBlocks(p.SessionID)
 		return allow(out, errOut, "")
