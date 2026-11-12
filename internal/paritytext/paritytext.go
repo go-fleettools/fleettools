@@ -111,7 +111,7 @@ var (
 		`(keep|keeps|kept|keeping|stay|stays|remain|remains|leave|leaves|left)\s+(the\s+)?(scalar|generic|reference|existing|current|old|plain|portable|pure-go|as\s+is|unchanged|on\s+the))\b`)
 
 	// because ties the decline to the parity cue.
-	because = regexp.MustCompile(`(?i)\b(because|since|due\s+to|owing\s+to|on\s+account\s+of|as\s+(it|that|this|they|doing)|given|so\s+as\s+to|in\s+order\s+to|to\s+(keep|preserve|maintain|retain|stay|remain|honou?r|protect)|for\s+the\s+sake\s+of|which\s+(would\s+|will\s+|could\s+)?(break|violate|lose|change|alter|give\s+up|sacrific\w+|forfeit)|would\s+(break|violate|lose|change|alter|give\s+up|sacrific\w+|forfeit|void|invalidate)|breaks?|violat\w+|invalidat\w+|conflict\w*|incompatible|contract|guarantee|forbid\w*|prevent\w*|precludes?|so|therefore|hence|thus|means)\b`)
+	because = regexp.MustCompile(`(?i)\b(because|since|due\s+to|owing\s+to|on\s+account\s+of|as\s+(it|that|this|they|doing)|given|so\s+as\s+to|in\s+order\s+to|to\s+(keep|preserve|maintain|retain|stay|remain|honou?r|protect)|for\s+the\s+sake\s+of|which\s+(would\s+|will\s+|could\s+)?(break|violate|lose|change|alter|give\s+up|sacrific\w+|forfeit)|would\s+(break|violate|lose|change|alter|give\s+up|sacrific\w+|forfeit|void|invalidate)|breaks?|violat\w+|invalidat\w+|conflict\w*|incompatible|contract|guarantee|forbid\w*|prevent\w*|precludes?)\b`)
 
 	// wouldBreak: "<perf change> would break bit parity".
 	wouldBreak = regexp.MustCompile(`(?i)\b(would|will|could|might|may|can)\s+(also\s+)?(break|violate|lose|give\s+up|sacrifice|forfeit|void|invalidate|change|alter)\b[^.]{0,60}?(` + parity.String() + `)`)
@@ -124,7 +124,21 @@ var (
 
 	// noBitIdentical: "no bit-identical reduction exists; no code change" — the
 	// gap is left because no kernel keeps the bits.
-	noBitIdentical = regexp.MustCompile(`(?i)\bno\s+(\w+\s+)?bit[\s-]*(identical|exact)\s+\w+`)
+	noBitIdentical = regexp.MustCompile(`(?i)\bno\s+(\w+\s+)?bit[\s-]*(identical|exact)\s+\w+` +
+		`|bit[\s-]*(identical|exact)\s+(\w+\s+){1,3}?(is|are)\s+(not|never)\s+(expressible|possible|available|achievable)` +
+		`|bit[\s-]*(identical|exact)\s+(\w+\s+){1,3}?(cannot|can'?t)\s+be\s+(built|expressed|made|done|written)`)
+
+	// reductionIdentity: "no bit-identical reduction identity to feed combine" is
+	// about an identity ELEMENT of a reduction, not a missing kernel.
+	reductionIdentity = regexp.MustCompile(`(?i)\bidentity\s+(element|value|to\b)`)
+
+	// leftOnParity: a table row validated "bit for bit" whose change is
+	// "**left**" — the gap is left open, and the row says what it is held by.
+	leftOnParity = regexp.MustCompile(`(?i)\*\*left\*\*|\bleft\s+(open|as\s+is|alone|for\s+now)\b`)
+
+	// stayToKeep: "each sum must stay sequential to keep the results
+	// bit-identical" — an order is frozen for the sake of the bits.
+	stayToKeep = regexp.MustCompile(`(?i)\b(must|has\s+to|have\s+to|needs?\s+to|can\s+only)\b[^.;]{0,50}?\bto\s+(keep|preserve|maintain|retain)\b[^.;]{0,40}?(` + parity.String() + `)`)
 
 	// noLonger: "the outputs are no longer bit-identical" ANNOUNCES the end of
 	// bit identity (the decision's own direction); it is not "no bit-identical
@@ -397,8 +411,12 @@ func classify(s string, perfSent, inPerf bool, win func() string) string {
 		return "contract-change"
 	case inPerf && keepContract.MatchString(s) && optionWords.MatchString(win()):
 		return "keep-parity-contract"
-	case noBitIdentical.MatchString(s) && !noLonger.MatchString(s):
+	case noBitIdentical.MatchString(s) && !noLonger.MatchString(s) && !reductionIdentity.MatchString(s):
 		return "no-bit-identical-way"
+	case leftOnParity.MatchString(s):
+		return "left-on-parity"
+	case inPerf && stayToKeep.MatchString(s):
+		return "stay-to-keep-parity"
 	case inPerf && blocksParity.MatchString(s):
 		return "parity-blocks-kernel"
 	}
@@ -413,10 +431,14 @@ func classify(s string, perfSent, inPerf bool, win func() string) string {
 func governs(s string) bool {
 	clauses := clauseSplit.Split(s, -1)
 	for i, c := range clauses {
-		if !parity.MatchString(c) {
+		loc := parity.FindStringIndex(c)
+		if loc == nil {
 			continue
 		}
-		if because.MatchString(c) {
+		// The cause comes BEFORE the cue it makes a reason: "because it would
+		// break bit parity". "…bit-identical because every product is rounded the
+		// same" explains the identity; it does not defer anything for it.
+		if because.MatchString(c[:loc[0]]) {
 			return true
 		}
 		if i+1 < len(clauses) && leadingSo.MatchString(clauses[i+1]) {
