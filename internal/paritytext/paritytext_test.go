@@ -539,7 +539,6 @@ func TestNoVectorISAIsNotParity(t *testing.T) {
 	for _, passes := range []string{
 		"- **ppc64le**: the Go ppc64 assembler exposes **no vector double arithmetic** (the VSX surface is loads/stores, logicals, permutes), so likewise no bit-identical vector kernel is expressible.",
 		"Where no bit-identical kernel is expressible (loong64/ppc64le, no vector double arithmetic in the Go assembler) the scalar oracle stands.",
-		"The assembler has no vector double arithmetic on loong64. As on ppc64le, a bit-identical vector complex multiply cannot be built.",
 	} {
 		if got := Scan(passes); len(got) != 0 {
 			t.Errorf("refused: %q %v", passes, got)
@@ -560,4 +559,23 @@ func TestLeftButAlreadyClosed(t *testing.T) {
 	if got := Scan(open); len(got) == 0 {
 		t.Error("an open gap passed")
 	}
+}
+
+// The no-vector-ISA exemption is paired, and bounded to ONE sentence.
+func TestNoVectorISAExemptionPairs(t *testing.T) {
+	t.Run("fires without the reason", func(t *testing.T) {
+		if len(Scan("No bit-identical vector kernel is expressible on ppc64le.")) == 0 {
+			t.Error("passed")
+		}
+	})
+	t.Run("passes with the reason in the sentence", func(t *testing.T) {
+		if got := Scan("The Go assembler has no vector double arithmetic, so no bit-identical vector kernel is expressible on ppc64le."); len(got) != 0 {
+			t.Errorf("refused: %v", got)
+		}
+	})
+	t.Run("a neighbouring sentence does not exempt", func(t *testing.T) {
+		if len(Scan("The assembler has no vector double arithmetic on loong64. No bit-identical vector kernel is expressible on ppc64le.")) == 0 {
+			t.Error("a neighbour's reason excused a different sentence")
+		}
+	})
 }

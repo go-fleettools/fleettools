@@ -453,3 +453,27 @@ func TestOversizedSurfaceIsUnread(t *testing.T) {
 		t.Errorf("go: %+v", r)
 	}
 }
+
+// The MaxText -> UNREAD rule, paired: just under the bound is read (PASS), just
+// over is UNREAD.
+func TestSurfaceJustUnderMaxTextIsRead(t *testing.T) {
+	line := "A line of prose with nothing to find.\n"
+	under := strings.Repeat(line, (paritytext.MaxText/len(line))-1)
+	if len(under) > paritytext.MaxText {
+		t.Fatalf("fixture size %d", len(under))
+	}
+	if r := check(t, map[string]string{"README.md": "Fine.\n", "docs/big.md": under}); r.Verdict != Pass || len(r.Unread) != 0 {
+		t.Errorf("%+v", r)
+	}
+}
+
+func TestSurfaceJustOverMaxTextIsUnread(t *testing.T) {
+	line := "A line of prose with nothing to find.\n"
+	over := strings.Repeat(line, (paritytext.MaxText/len(line))+2)
+	if len(over) <= paritytext.MaxText {
+		t.Fatalf("fixture size %d", len(over))
+	}
+	if r := check(t, map[string]string{"README.md": "Fine.\n", "docs/big.md": over}); r.Verdict != Unread {
+		t.Errorf("%+v", r)
+	}
+}
