@@ -202,6 +202,36 @@ func unquote(q string) string {
 	return " " + inner + " "
 }
 
+// citing says the words just before a quotation FRAME it as text being cited —
+// what a repository's comment says, what a pull request removes or replaces —
+// and not as the author's own claim. The frame must name a TEXT ("the comment
+// says", "the old text said") or an act on text ("removed", "replaced", "was:"):
+// "the maintainers said" is a person's claim, and a quoted deferral after it is
+// still a deferral.
+var citing = regexp.MustCompile(`(?i)\b(?:(?:comments?|text|docs?|docstring|godoc|readme|line|sentence|note|paragraph|section|code)\s+(?:says?|said|reads?|read|states?|stated|claims?|claimed)|(?:removes?|removed|removing|replaces?|replaced|replacing|deletes?|deleted|deleting|drops?|dropped)\s*:?|(?:was|were)\s*:)\s*$`)
+
+// unquoteLine applies unquote to every quotation of a line, blanking the ones
+// that cite text (their words are not the author's statement).
+func unquoteLine(l string) string {
+	idx := quoted.FindAllStringIndex(l, -1)
+	if idx == nil {
+		return l
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range idx {
+		b.WriteString(l[last:m[0]])
+		if citing.MatchString(l[:m[0]]) {
+			b.WriteString(" ")
+		} else {
+			b.WriteString(unquote(l[m[0]:m[1]]))
+		}
+		last = m[1]
+	}
+	b.WriteString(l[last:])
+	return b.String()
+}
+
 // Strip blanks what is not the author's statement, keeping every newline so
 // that line numbers survive.
 func Strip(text string) string {
@@ -246,7 +276,7 @@ func Strip(text string) string {
 			inCmt = true
 		}
 		l = inline.ReplaceAllString(l, " ")
-		l = quoted.ReplaceAllStringFunc(l, unquote)
+		l = unquoteLine(l)
 		l = urlRe.ReplaceAllString(l, " ")
 		lines[i] = l
 	}
