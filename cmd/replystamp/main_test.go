@@ -793,6 +793,12 @@ func TestHookModeIsDecidedBeforeTheFlagsAreParsed(t *testing.T) {
 		{"--hook=t"},
 		{"--hook=TRUE"},
 		{"-hook=T"},
+		// ⛔ A value pflag REJECTS still meant "hook": --hook=yes exited 2,
+		// which the Stop protocol reads as a block. An unparseable value
+		// fails open.
+		{"--hook=yes"},
+		{"--hook=on"},
+		{"--hook=", "--tolerance=zzz"},
 	} {
 		if !hookMode(args) {
 			t.Errorf("hookMode(%q) = false; a hook would then fail CLOSED", args)
@@ -802,9 +808,10 @@ func TestHookModeIsDecidedBeforeTheFlagsAreParsed(t *testing.T) {
 		{"--transcript", "x.jsonl"},
 		{},
 		{"--hooks"},
+		// Only an explicit, parseable false asks for the command-line mode.
 		{"--hook=false"},
 		{"--hook=0"},
-		{"--hook=zzz"},
+		{"--hook=F"},
 	} {
 		if hookMode(args) {
 			t.Errorf("hookMode(%q) = true", args)

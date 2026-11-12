@@ -147,7 +147,17 @@ func hookMode(args []string) bool {
 		if !hasValue {
 			return true
 		}
-		if on, err := strconv.ParseBool(value); err == nil && on {
+		// ⛔⛔ A VALUE pflag REJECTS STILL MEANT "HOOK". Review measured the
+		// residual after the ParseBool fix: `--hook=yes` exits 2, which the
+		// Stop protocol reads as a BLOCK — the wedge again, for a typo.
+		//
+		// So an UNPARSEABLE value fails open: whoever wrote --hook=yes meant a
+		// hook, and the cost of reading it that way is one run that answers
+		// `{}` instead of refusing a reply. Only an explicit, parseable false
+		// is taken as "not a hook", because that is the one spelling that
+		// unambiguously asks for the command-line mode.
+		on, err := strconv.ParseBool(value)
+		if err != nil || on {
 			return true
 		}
 	}
