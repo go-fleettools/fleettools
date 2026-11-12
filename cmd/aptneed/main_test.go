@@ -13,7 +13,12 @@ import (
 // calls records every command line, because what several of these assert is
 // how MANY times apt was asked, not only what it answered.
 type fake struct {
-	calls   []string
+	calls []string
+	// update is what `apt-get update` answers. ⛔ IT IS ITS OWN FIELD because
+	// the first version of this fake hardcoded update's reply, which made the
+	// defect below INVISIBLE BY CONSTRUCTION: a test cannot catch an update
+	// failure being read as the install's verdict if update can never fail.
+	update  *answer
 	answers []answer
 	path    map[string]bool
 	written map[string]string
@@ -42,9 +47,10 @@ func (f *fake) install(t *testing.T) {
 	runCommand = func(name string, args ...string) (string, int) {
 		line := name + " " + strings.Join(args, " ")
 		f.calls = append(f.calls, line)
-		// `update` is not what decides anything, so it always answers 0 here
-		// unless a test says otherwise through an answer of its own.
 		if len(args) > 0 && args[len(args)-1] == "update" {
+			if f.update != nil {
+				return f.update.output, f.update.status
+			}
 			return "Reading package lists...\n", 0
 		}
 		if len(f.answers) == 0 {
@@ -80,6 +86,17 @@ func (f *fake) installs() int {
 	n := 0
 	for _, c := range f.calls {
 		if strings.Contains(c, " install ") {
+			n++
+		}
+	}
+	return n
+}
+
+// updates counts the apt-get update calls.
+func (f *fake) updates() int {
+	n := 0
+	for _, c := range f.calls {
+		if strings.HasSuffix(c, " update") {
 			n++
 		}
 	}
@@ -216,6 +233,125 @@ func TestTheMirrorlistIsRewrittenOnlyOnce(t *testing.T) {
 	// ⛔ AND IT BLAMES THE NETWORK, not the package. A job told the wrong one
 	// of those goes looking in the wrong repository.
 	if !strings.Contains(errb, "this is the network, not the package") {
+		t.Errorf("it said %q", errb)
+	}
+}
+
+// ⛔ THE LISTS ARE REFRESHED BEFORE INSTALLING. Nothing asserted this, so
+// deleting the `apt-get update` call outright left the suite green — on a
+// runner whose lists predate the package, the install would then fail for a
+// reason the tool would report as a missing package.
+func TestTheListsAreRefreshedBeforeInstalling(t *testing.T) {
+	f := &fake{answers: []answer{{status: 0, grants: []string{"pdftoppm"}}}}
+	f.install(t)
+	if code, _, errb := drive(t, "--need", "pdftoppm", "poppler-utils"); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb)
+	}
+	if f.updates() != 1 {
+		t.Errorf("%d update call(s): %v", f.updates(), f.calls)
+	}
+}
+
+// ⛔⛔ A FAILING `update` MUST NOT TURN A TYPO INTO AN OUTAGE. One unreachable
+// PPA is enough to make `apt-get update` print "Temporary failure resolving"
+// while the install goes on to answer, correctly, that the package does not
+// exist. The first version judged the two outputs TOGETHER, and since mirror
+// phrases are read first, that typo was classified as an outage: three
+// attempts, two sleeps, the mirrorlist rewritten, and a verdict blaming the
+// network — the precise mistake this command exists to refuse, built into it
+// by the line meant to refuse it. Found in review, not by me.
+func TestAFailingUpdateDoesNotTurnATypoIntoAnOutage(t *testing.T) {
+	f := &fake{
+		update: &answer{
+			output: "Err:1 http://ppa.launchpadcontent.net/x/ubuntu noble InRelease\n" +
+				"  Temporary failure resolving 'ppa.launchpadcontent.net'\n", status: 100},
+		answers: []answer{{output: "E: Unable to locate package poppler-util\n", status: 100}},
+	}
+	f.install(t)
+	code, _, errb := drive(t, "--need", "pdftoppm", "--retries", "2", "poppler-util")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if f.installs() != 1 {
+		t.Errorf("a typo was retried %d times because `update` had failed: %v", f.installs(), f.calls)
+	}
+	if f.slept != 0 {
+		t.Errorf("it slept %d time(s) over a typo", f.slept)
+	}
+	if len(f.written) != 0 {
+		t.Errorf("it rewrote %v over a typo", f.written)
+	}
+	if !strings.Contains(errb, "that is a name, not an outage") {
+		t.Errorf("it said %q", errb)
+	}
+}
+
+// ⛔ THE VERDICT COMES FROM THE LAST ATTEMPT, and nothing said so: pinning it
+// to the first left the suite green. Here the mirror fails, then apt fails for
+// a reason this does not recognise — so the closing sentence must be the
+// second one, and must not blame the network.
+func TestTheVerdictComesFromTheLastAttempt(t *testing.T) {
+	f := &fake{answers: []answer{
+		{output: "Temporary failure resolving 'azure.archive.ubuntu.com'\n", status: 100},
+		{output: "E: dpkg was interrupted\n", status: 100},
+	}}
+	f.install(t)
+	code, _, errb := drive(t, "--need", "pdftoppm", "--retries", "1", "poppler-utils")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(errb, "said nothing this recognises") {
+		t.Errorf("the verdict is not the last attempt's: %q", errb)
+	}
+	if strings.Contains(errb, "this is the network, not the package") {
+		t.Errorf("it blamed the network for a failure that was not one: %q", errb)
+	}
+}
+
+// ⛔ AND IT DOES NOT CLAIM A FALLBACK IT NEVER TRIED. The sentence said
+// "including the canonical archive" whatever had happened, so with the
+// fallback off it described an attempt that was never made.
+func TestTheCanonicalArchiveIsNotClaimedWhenItWasNotTried(t *testing.T) {
+	down := answer{output: "Temporary failure resolving 'azure.archive.ubuntu.com'\n", status: 100}
+	f := &fake{answers: []answer{down}}
+	f.install(t)
+	code, _, errb := drive(t, "--need", "pdftoppm", "--retries", "1",
+		"--fallback-mirror=false", "poppler-utils")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(errb, "the canonical archive was not tried") {
+		t.Errorf("it claimed an untried fallback: %q", errb)
+	}
+}
+
+// ⛔ THE MIRRORLIST IS NOT REWRITTEN ON THE LAST ATTEMPT. Doing so changes the
+// runner permanently, for every later step of the job, and tries nothing with
+// it — a side effect with no measurement attached.
+func TestTheMirrorlistIsNotRewrittenWithNoAttemptLeftToUseIt(t *testing.T) {
+	f := &fake{answers: []answer{
+		{output: "Temporary failure resolving 'azure.archive.ubuntu.com'\n", status: 100}}}
+	f.install(t)
+	code, _, _ := drive(t, "--need", "pdftoppm", "--retries", "0", "poppler-utils")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if len(f.written) != 0 {
+		t.Errorf("it rewrote %v with no attempt left to use it", f.written)
+	}
+}
+
+func TestANegativeRetryCountIsRefused(t *testing.T) {
+	f := &fake{}
+	f.install(t)
+	code, _, errb := drive(t, "--need", "pdftoppm", "--retries", "-1", "poppler-utils")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("it ran %v", f.calls)
+	}
+	if !strings.Contains(errb, "cannot be -1") {
 		t.Errorf("it said %q", errb)
 	}
 }

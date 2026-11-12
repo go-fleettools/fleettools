@@ -195,19 +195,29 @@ func why(output string) kind {
 // single dropped connection this would otherwise sleep twenty seconds over.
 func install(pkgs []string) (string, kind, bool) {
 	var all strings.Builder
-	out, status := runCommand("apt-get", "-o", "Acquire::Retries=3", "update")
+	out, _ := runCommand("apt-get", "-o", "Acquire::Retries=3", "update")
 	all.WriteString(out)
 	// ⛔ A FAILED `update` IS NOT FATAL ON ITS OWN. apt exits non-zero when any
 	// index is unreachable while the cached lists are still usable, and the
 	// install below may well succeed from them. What decides is the install.
 	args := append([]string{"-o", "Acquire::Retries=3", "install", "-y",
 		"--no-install-recommends"}, pkgs...)
-	out, status = runCommand("apt-get", args...)
+	out, status := runCommand("apt-get", args...)
 	all.WriteString(out)
 	if status == 0 {
 		return all.String(), otherFailure, true
 	}
-	return all.String(), why(all.String()), false
+	// ⛔⛔ THE INSTALL'S OWN WORDS DECIDE, NOT THE PAIR'S. The first version
+	// passed both outputs to why() — the sentence above saying "what decides is
+	// the install" while the code handed over the update's text as well. One
+	// unreachable PPA makes `update` print "Temporary failure resolving", and
+	// why() reads mirror phrases first, so a genuine "Unable to locate package"
+	// from the install was classified as an outage: retried, slept over, and
+	// the mirrorlist rewritten, for a typo. That is the exact mistake this
+	// command exists to refuse, built into it by the line that was supposed to
+	// refuse it. The pair is still RETURNED, because apt's whole account of the
+	// attempt belongs in the log; it is only the VERDICT that narrows.
+	return all.String(), why(out), false
 }
 
 func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Duration, fallback bool) error {
@@ -218,6 +228,13 @@ func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Du
 	if len(need) == 0 {
 		return cli.Unanswerable("--need names the binary the package must provide, and is " +
 			"required: apt reporting success is not the binary being there")
+	}
+	// ⛔ A NEGATIVE --retries RAN ZERO ATTEMPTS and then reported that apt had
+	// failed with its output above, there being no output: a verdict about a
+	// command never run.
+	if retries < 0 {
+		return cli.Unanswerable("--retries is the number of attempts AFTER the first, so it "+
+			"cannot be %d: 0 means try once", retries)
 	}
 
 	// ⛔ ALREADY THERE IS A PASS, AND A SILENT ONE. A warm runner, a container
@@ -256,6 +273,12 @@ func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Du
 				strings.Join(pkgs, ", "), strings.Join(need, ", "))
 			return nil
 		}
+		// ⛔ APT'S OWN WORDS, ON EVERY FAILED ATTEMPT. They used to be printed
+		// only for a failure this did not recognise, so a `Failed to fetch …
+		// 404 Not Found` — a stale index, not an outage — was classified as a
+		// mirror failure, retried, and shown to nobody. A reader cannot
+		// disagree with a classification whose evidence was swallowed.
+		fmt.Fprint(stderr, output)
 		switch k {
 		case noSuchPackage:
 			fmt.Fprintf(stderr, "aptneed: apt cannot locate %s — that is a name, not an "+
@@ -263,7 +286,10 @@ func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Du
 			return cli.Found("no such package: %s", strings.Join(pkgs, ", "))
 		case mirrorFailure:
 			fmt.Fprintf(stderr, "aptneed: the runner's mirror could not be reached\n")
-			if fallback && !swapped {
+			// ⛔ AND NOT WHEN THERE IS NO ATTEMPT LEFT TO USE IT. Rewriting the
+			// mirrorlist on the last turn changes the runner permanently for
+			// every later step of the job and tries nothing with it.
+			if fallback && !swapped && attempt < retries {
 				if err := writeFile(mirrorList, []byte(canonicalMirror)); err != nil {
 					fmt.Fprintf(stderr, "aptneed: could not rewrite %s: %v\n", mirrorList, err)
 				} else {
@@ -272,8 +298,6 @@ func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Du
 						"through it\n", mirrorList, strings.TrimSpace(canonicalMirror))
 				}
 			}
-		default:
-			fmt.Fprint(stderr, output)
 		}
 		last = k
 	}
@@ -281,7 +305,7 @@ func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Du
 	// the other way it needed a `return nil` underneath that nothing could
 	// reach — and an unreachable line is a line no test can defend.
 	fmt.Fprintf(stderr, "aptneed: could not install %s in %d attempt(s): %s\n",
-		strings.Join(pkgs, ", "), retries+1, reason(last))
+		strings.Join(pkgs, ", "), retries+1, reason(last, swapped))
 	return cli.Found("could not install %s", strings.Join(pkgs, ", "))
 }
 
@@ -290,10 +314,19 @@ func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Du
 // ⛔ THERE IS NO noSuchPackage CASE. That one returns the moment it is seen,
 // because retrying a name cannot change it — so a branch for it here would be
 // dead code dressed as thoroughness. The coverage gate is what said so.
-func reason(k kind) string {
-	if k == mirrorFailure {
+// ⛔ AND IT IS TOLD WHETHER THE CANONICAL ARCHIVE WAS ACTUALLY TRIED. The
+// first version said "including the canonical archive" unconditionally — so
+// with --fallback-mirror=false, which rewrites nothing, the verdict claimed a
+// fallback that had never been attempted. A sentence about what was tried has
+// to be a function of what was tried.
+func reason(k kind, triedCanonical bool) string {
+	if k != mirrorFailure {
+		return "apt failed and said nothing this recognises; its output is above"
+	}
+	if triedCanonical {
 		return "the apt mirror could not be reached, including the canonical archive — " +
 			"this is the network, not the package"
 	}
-	return "apt failed and said nothing this recognises; its output is above"
+	return "the apt mirror could not be reached, and the canonical archive was not tried — " +
+		"this is the network, not the package"
 }
