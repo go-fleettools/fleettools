@@ -586,21 +586,60 @@ func TestTheWinningPairIsTheOneThatMatchesTheCase(t *testing.T) {
 	}
 }
 
-// ⛔⛔ EVERY EXEMPTED VERDICT COUNTS, NOT JUST DOUBLED. The half-fix left the
-// clean-tree line lying about the other four.
-func TestAnyExemptedVerdictMakesTheTreeNotClean(t *testing.T) {
-	byRoot := map[string][]finding{"zbk": {{
-		File: "FILIATION.md", Line: 2, Verdict: citation, Was: stale,
-		Kind: "the old name is this page's subject (--allow)", Text: "go-pkgx/zbk",
-	}}}
-	var b strings.Builder
-	report(&b, byRoot, map[string]int{"zbk": 1}, false, true)
-	out := b.String()
-	if !strings.Contains(out, "NOT a clean tree") {
-		t.Errorf("an exempted STALE did not mark the run unclean:\n%s", out)
+// ⛔⛔ A SURPRISING EXEMPTION MAKES THE TREE UNCLEAN; THE DECLARED ONE DOES
+// NOT. Counting them together broke the designed use of --allow: a filiation
+// page with bare `pkgx` in prose — exactly what the flag is for — reported
+// "NOT a clean tree", so every healthy run would have said it.
+func TestOnlyASurprisingExemptionMakesTheTreeUnclean(t *testing.T) {
+	report1 := func(f finding) string {
+		var b strings.Builder
+		report(&b, map[string][]finding{"zbk": {f}}, map[string]int{"zbk": 1}, false, true)
+		return b.String()
 	}
-	if strings.Contains(out, "nothing stale and nothing unsure") {
-		t.Errorf("it still claimed a clean tree:\n%s", out)
+
+	declared := report1(finding{
+		File: "FILIATION.md", Line: 2, Verdict: citation, Was: unsure,
+		Kind: "the old name is this page's subject (--allow)", Text: "forked from pkgx",
+	})
+	if strings.Contains(declared, "NOT a clean tree") {
+		t.Errorf("the declared use of --allow was called unclean:\n%s", declared)
+	}
+	if !strings.Contains(declared, "UNSURE finding(s) were exempted") {
+		t.Errorf("the declared exemption was silent:\n%s", declared)
+	}
+
+	for _, was := range []verdict{stale, debt, doubled} {
+		out := report1(finding{
+			File: "FILIATION.md", Line: 2, Verdict: citation, Was: was,
+			Kind: "the old name is this page's subject (--allow)", Text: "go-pkgx/zbk",
+		})
+		if !strings.Contains(out, "NOT a clean tree") {
+			t.Errorf("an exempted %s did not mark the run unclean:\n%s", was, out)
+		}
+		if strings.Contains(out, "nothing stale and nothing unsure") {
+			t.Errorf("an exempted %s still claimed a clean tree:\n%s", was, out)
+		}
+	}
+}
+
+// ⛔ A QUOTED IDENTIFIER MAY CARRY A NON-ASCII LETTER, and this fleet's
+// documentation is French. The byte-wise widening was safe and still wrong:
+// it stopped at the first such letter and reported the name.
+func TestAQuotedNameWithANonASCIILetterIsStillQuoted(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"pkgx=zpkgx"}, map[string]bool{})
+	tick := "`"
+	for _, line := range []string{
+		"voir " + tick + "ZzpkgxBinÉtat" + tick + " pour la forme",
+		"see " + tick + "ZzpkgxBin設定" + tick + " there",
+		"l'option " + tick + "ZzpkgxBin" + tick + " est prête",
+	} {
+		if n := countVerdict(c.classifyLine("README.md", 1, line), doubled); n != 0 {
+			t.Errorf("%d doubled finding(s) for a quoted name, want 0: %s", n, line)
+		}
+	}
+	// ...and an UNquoted one beside non-ASCII text is still reported.
+	if n := countVerdict(c.classifyLine("README.md", 1, "élève ZzpkgxBin élève"), doubled); n != 1 {
+		t.Errorf("%d doubled finding(s) for an unquoted name, want 1", n)
 	}
 }
 

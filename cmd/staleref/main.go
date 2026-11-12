@@ -54,6 +54,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
@@ -714,18 +715,34 @@ func quoted(line string, lo, hi int) bool {
 }
 
 // wordAround widens a span to the identifier it sits inside.
+//
+// ⛔ IT WIDENS BY RUNE, NOT BY BYTE. The byte version was SAFE — a UTF-8
+// continuation byte is ≥ 0x80 so an ASCII test stops on a rune boundary, and
+// 0x60 cannot occur inside a multi-byte sequence, so the delimiter test could
+// not be fooled — but it stopped at the first non-ASCII letter, and review
+// measured the cost: `ZzpkgxBinÉtat` and `ZzpkgxBin設定`, both quoted, were
+// reported. Safe and wrong is still wrong, and this fleet's documentation is
+// written in French.
 func wordAround(line string, lo, hi int) (int, int) {
-	for lo > 0 && isWordByte(line[lo-1]) {
-		lo--
+	for lo > 0 {
+		r, size := utf8.DecodeLastRuneInString(line[:lo])
+		if !isWordRune(r) {
+			break
+		}
+		lo -= size
 	}
-	for hi < len(line) && isWordByte(line[hi]) {
-		hi++
+	for hi < len(line) {
+		r, size := utf8.DecodeRuneInString(line[hi:])
+		if !isWordRune(r) {
+			break
+		}
+		hi += size
 	}
 	return lo, hi
 }
 
-func isWordByte(b byte) bool {
-	return b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
+func isWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 // spansOf converts regexp index pairs into spans, widened by one on each side
@@ -956,15 +973,32 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 	// because this counted only `f.Was == doubled`. I had fixed the sentence
 	// for the verdict I was thinking about and left it lying about the other
 	// four.
-	totalExempt, exemptedDoubled := 0, 0
+	// ⛔⛔ AND THE TWO KINDS OF EXEMPTION ARE NOT THE SAME NEWS. Counting them
+	// together broke the DECLARED use of --allow: review measured a filiation
+	// page with two bare `pkgx` mentions — exactly what the help says the flag
+	// is for — reporting "this run is NOT a clean tree". Every healthy run
+	// with a filiation page would have said it, which drains the sentence of
+	// the signal it was added to carry, and a warning that is always on is one
+	// nobody reads.
+	//
+	// An exempted UNSURE is the narrow, intended case: a page about the rename
+	// says the old name in prose. An exempted STALE, DEBT or DOUBLED is the
+	// surprising one — a dead address, unmigrated code, or damage, on a page
+	// somebody declared. Those keep the warning; the intended case gets its
+	// own line and leaves the verdict alone.
+	exemptUnsure, exemptHard, exemptedDoubled := 0, 0, 0
 	clean := true
 	for _, root := range roots {
 		counts := map[verdict]int{}
 		for _, f := range byRoot[root] {
 			counts[f.Verdict]++
 			totals[f.Verdict]++
-			if f.Was != "" {
-				totalExempt++
+			switch f.Was {
+			case "":
+			case unsure:
+				exemptUnsure++
+			default:
+				exemptHard++
 				if f.Was == doubled {
 					exemptedDoubled++
 				}
@@ -1013,10 +1047,13 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 	// were exempted by --allow" and then "nothing stale and nothing unsure".
 	// The second is true of the verdicts and false of the tree, which is the
 	// reading a lane takes from it.
-	if totalExempt > 0 {
-		fmt.Fprintf(w, "staleref: this run is NOT a clean tree — %d finding(s) of every verdict were exempted by --allow, and the exit status cannot tell a lane about them\n", totalExempt)
+	if exemptUnsure > 0 {
+		fmt.Fprintf(w, "staleref: %d UNSURE finding(s) were exempted by --allow — the declared case, a page whose subject is the rename saying the old name in prose\n", exemptUnsure)
 	}
-	if totalExempt == 0 && totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
+	if exemptHard > 0 {
+		fmt.Fprintf(w, "staleref: this run is NOT a clean tree — %d STALE/DEBT/DOUBLED finding(s) were exempted by --allow, which is not what that flag is for, and the exit status cannot tell a lane about them\n", exemptHard)
+	}
+	if exemptHard == 0 && totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
 		// ⛔ A tree with no documentation files reports no findings, which is
 		// the same output as a clean one. The file count is what tells them
 		// apart, so it is always printed.
