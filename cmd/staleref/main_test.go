@@ -512,27 +512,95 @@ func TestABacktickInSourceIsNotAQuotation(t *testing.T) {
 		if n := countVerdict(c.classifyLine("main.go", 1, line), doubled); n != 1 {
 			t.Errorf("%d doubled finding(s) in Go source, want 1: %s", n, line)
 		}
-		// The same text in markup IS a quotation.
-		if n := countVerdict(c.classifyLine("README.md", 1, line), doubled); n != 0 {
-			t.Errorf("%d doubled finding(s) in markup, want 0: %s", n, line)
+	}
+	// ⛔ The file type is what decides, and the control says so: the SAME
+	// quoted identifier is a quotation in markup and an identifier in source.
+	//
+	// (These lines are deliberately not the ones above. Under the adjacency
+	// rule a name inside a longer quoted PHRASE — `Usage: ZzpkgxBin [flags]` —
+	// is reported even in markup, which is the stated trade for closing the
+	// two ways backtick PAIRING hid a name. Asserting the old behaviour here
+	// would have been changing a test to match the code.)
+	quotedName := "see `ZzpkgxBin` for the shape"
+	if n := countVerdict(c.classifyLine("README.md", 1, quotedName), doubled); n != 0 {
+		t.Errorf("%d doubled finding(s) for a quoted name in markup, want 0", n)
+	}
+	if n := countVerdict(c.classifyLine("main.go", 1, quotedName), doubled); n != 1 {
+		t.Errorf("%d doubled finding(s) for the same text in source, want 1", n)
+	}
+}
+
+// ⛔⛔ PAIRING BACKTICKS ACROSS A LINE WAS THE WRONG MODEL, TWICE: by position
+// (three backticks paired across the name) and then by parity (two apostrophe
+// typos make an EVEN count and pair across it again). Adjacency asks a
+// question about the NAME, so nothing between the backticks can fool it.
+func TestABacktickElsewhereOnTheLineDoesNotHideAName(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"pkgx=zpkgx"}, map[string]bool{})
+	tick := "`"
+	for _, tc := range []struct {
+		name, line string
+		want       int
+	}{
+		{"three backticks", "don" + tick + "t use ZzpkgxBin yet, see " + tick + "--help" + tick, 1},
+		{"two apostrophe typos", "don" + tick + "t use ZzpkgxBin, isn" + tick + "t it odd", 1},
+		{"properly quoted", "see " + tick + "ZzpkgxBin" + tick + " for the shape", 0},
+		{"double backticks", "see " + tick + tick + "ZzpkgxBin" + tick + tick + " there", 0},
+		{"quoted phrase containing it", "run " + tick + "ZzpkgxBin [flags]" + tick + " now", 1},
+		{"no backticks at all", "dirs = append(dirs, ZzpkgxBin)", 1},
+	} {
+		if n := countVerdict(c.classifyLine("README.md", 1, tc.line), doubled); n != tc.want {
+			t.Errorf("%s: %d doubled finding(s), want %d", tc.name, n, tc.want)
 		}
 	}
 }
 
-// ⛔ AN ODD NUMBER OF BACKTICKS PAIRS NOTHING. Review measured the hole:
-// `don`+"`"+`t use ZzpkgxBin yet, see ` + backticked --help — the first two
-// backticks paired across the name and hid it.
-func TestAStrayBacktickDoesNotHideAName(t *testing.T) {
-	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"pkgx=zpkgx"}, map[string]bool{})
-	tick := "`"
-	odd := "don" + tick + "t use ZzpkgxBin yet, see " + tick + "--help" + tick
-	if n := countVerdict(c.classifyLine("README.md", 1, odd), doubled); n != 1 {
-		t.Errorf("%d doubled finding(s) on a line with three backticks, want 1", n)
+// ⛔⛔ DE-DUPLICATION BY EXACT SPAN WAS TOO LITERAL. Two pairs can match the
+// same NAME over spans differing by a byte, and a [2]int key sees two things.
+func TestOverlappingPairsAreOneFinding(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil,
+		[]string{"pkgx=zpkgx", "pkg=zpkg"}, map[string]bool{})
+	got := c.classifyLine("main.go", 1, "dirs = append(dirs, ZzpkgxBin)")
+	if n := countVerdict(got, doubled); n != 1 {
+		t.Fatalf("%d doubled finding(s) for one name: %+v", n, got)
 	}
-	// An even, well-formed line still quotes.
-	even := "see " + tick + "ZzpkgxBin" + tick + " for the shape"
-	if n := countVerdict(c.classifyLine("README.md", 1, even), doubled); n != 0 {
-		t.Errorf("%d doubled finding(s) on a properly quoted line, want 0", n)
+}
+
+// ⛔⛔ AND "FIRST PAIR WINS" PICKED THE WRONG WINNER IN EITHER ORDER, because
+// newClassifier puts the stem's pair at index 0. The pair that matches the
+// name's capitals is the one that knows how it is spelled.
+func TestTheWinningPairIsTheOneThatMatchesTheCase(t *testing.T) {
+	for _, order := range [][]string{
+		{"PkgX=ZPkgX", "pkgx=zpkgx"},
+		{"pkgx=zpkgx", "PkgX=ZPkgX"},
+	} {
+		c := newClassifier("go-pkgx", "go-zpkg", nil, nil, order, map[string]bool{})
+		got := c.classifyLine("main.go", 1, "dirs = append(dirs, ZZPkgXBin)")
+		if n := countVerdict(got, doubled); n != 1 {
+			t.Fatalf("%v: %d finding(s), want 1: %+v", order, n, got)
+		}
+		for _, f := range got {
+			if f.Verdict == doubled && f.Suggest != "ZPkgX" {
+				t.Errorf("%v: suggests %q, want ZPkgX", order, f.Suggest)
+			}
+		}
+	}
+}
+
+// ⛔⛔ EVERY EXEMPTED VERDICT COUNTS, NOT JUST DOUBLED. The half-fix left the
+// clean-tree line lying about the other four.
+func TestAnyExemptedVerdictMakesTheTreeNotClean(t *testing.T) {
+	byRoot := map[string][]finding{"zbk": {{
+		File: "FILIATION.md", Line: 2, Verdict: citation, Was: stale,
+		Kind: "the old name is this page's subject (--allow)", Text: "go-pkgx/zbk",
+	}}}
+	var b strings.Builder
+	report(&b, byRoot, map[string]int{"zbk": 1}, false, true)
+	out := b.String()
+	if !strings.Contains(out, "NOT a clean tree") {
+		t.Errorf("an exempted STALE did not mark the run unclean:\n%s", out)
+	}
+	if strings.Contains(out, "nothing stale and nothing unsure") {
+		t.Errorf("it still claimed a clean tree:\n%s", out)
 	}
 }
 

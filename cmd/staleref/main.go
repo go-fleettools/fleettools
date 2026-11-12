@@ -552,45 +552,115 @@ func (c *classifier) classifyLine(file string, n int, line string) []finding {
 	// Removing `cover` is what allowed it (deliberately, so the address around
 	// a doubled name keeps its own verdict), so the de-duplication is local:
 	// one finding per span, first pair wins.
-	reported := map[[2]int]bool{}
+	for _, h := range c.doubledHits(file, line) {
+		was := line[h.lo:h.hi]
+		out = append(out, finding{File: file, Line: n, Verdict: doubled,
+			Kind: fmt.Sprintf(
+				"%s doubled: the rename ran %s→%s over its own output — it COMPILES, and a search for %q cannot find it",
+				h.r.new, h.r.old, h.r.new, h.r.old),
+			Text:    strings.TrimSpace(trimAround(line, h.lo, h.hi)),
+			Suggest: matchCase(was, h.r.new)})
+	}
+	return out
+}
+
+// a dblHit is one doubled match, with the retired pair that found it.
+type dblHit struct {
+	lo, hi int
+	r      retired
+}
+
+// doubledHits returns the doubled matches to report on one line: at most one
+// per region of the line, with the pair that describes it best.
+//
+// ⛔⛤ DE-DUPLICATING BY EXACT SPAN WAS TOO LITERAL, and review measured it:
+// `--retired pkgx=zpkgx --retired pkg=zpkg` on `ZzpkgxBin` produced TWO
+// findings, `→ Zpkgx` and `→ Zpkg`, because the spans [20,26] and [20,25]
+// differ by one byte and a [2]int key sees two different things. Two
+// contradictory repairs for one name is worse than none: whichever a reader
+// pastes, one of them was wrong.
+//
+// ⛔⛔ AND "FIRST PAIR WINS" PICKED THE WRONG WINNER, in EITHER command-line
+// order. `newClassifier` puts the pair whose `was` equals the organisation's
+// stem at index 0, so `ZZPkgXBin` was always described by `pkgx=zpkgx` —
+// suggesting `Zpkgx` — while the pair that actually matched its capitals,
+// `PkgX=ZPkgX`, was the one suppressed. Reordering the command line could not
+// fix it, which is the tell that the rule was wrong rather than the input.
+//
+// The winner is the pair whose replacement matches the text CASE-SENSITIVELY,
+// because that is the one that knows how the name is really spelled; then the
+// longer match, which is the more specific pair; then the earlier one, so the
+// result does not depend on map order.
+func (c *classifier) doubledHits(file, line string) []dblHit {
+	var hits []dblHit
 	for _, r := range c.retired {
 		if r.dbl == nil {
 			continue
 		}
-		spans := codeSpans(file, line)
-		// ⛔ --keep STILL WINS, and that had to be restored by hand once this
-		// stopped reading `covered`. A kept address is one somebody checked and
-		// declared live — `ghcr.io/go-pkgx/packages` is the measured case — so
-		// a doubled-looking name INSIDE one is part of a real address, not
-		// damage. Reporting it would propose the rewrite that `--keep` exists
-		// to prevent, which is how an empty registry got published.
-		if c.keepRE != nil {
-			spans = append(spans, spansOf(c.keepRE.FindAllStringIndex(line, -1))...)
-		}
 		for _, m := range r.dbl.FindAllStringIndex(line, -1) {
-			// ⛔ A NAME INSIDE BACKTICKS IS BEING QUOTED, NOT USED. Measured:
-			// run against its own directory this command reported 15 DOUBLED,
-			// every one a comment or fixture explaining the defect, seven of
-			// them inside code spans — a report whose bulk is the thing it
-			// checks FOR (`a-sweep-that-measured-its-own-regex`).
-			if inSpan(spans, m[0]) {
-				continue
-			}
-			key := [2]int{m[0], m[1]}
-			if reported[key] {
-				continue
-			}
-			reported[key] = true
-			was := line[m[0]:m[1]]
-			out = append(out, finding{File: file, Line: n, Verdict: doubled,
-				Kind: fmt.Sprintf(
-					"%s doubled: the rename ran %s→%s over its own output — it COMPILES, and a search for %q cannot find it",
-					r.new, r.old, r.new, r.old),
-				Text:    strings.TrimSpace(trimAround(line, m[0], m[1])),
-				Suggest: matchCase(was, r.new)})
+			hits = append(hits, dblHit{lo: m[0], hi: m[1], r: r})
 		}
 	}
-	return out
+	if len(hits) == 0 {
+		return nil
+	}
+
+	// ⛔ --keep STILL WINS. A kept address is one somebody checked and declared
+	// live — `ghcr.io/go-pkgx/packages` is the measured case — so a
+	// doubled-looking name inside one is part of a real address, not damage.
+	// Reporting it would propose the rewrite that `--keep` exists to prevent,
+	// which is how an empty registry got published.
+	var kept [][2]int
+	if c.keepRE != nil {
+		kept = spansOf(c.keepRE.FindAllStringIndex(line, -1))
+	}
+	markup := markupExts[strings.ToLower(path.Ext(file))]
+
+	keep := hits[:0]
+	for _, h := range hits {
+		if inSpan(kept, h.lo) {
+			continue
+		}
+		if markup && quoted(line, h.lo, h.hi) {
+			continue
+		}
+		keep = append(keep, h)
+	}
+	hits = keep
+
+	sort.SliceStable(hits, func(i, j int) bool {
+		ei := line[hits[i].lo:hits[i].hi] == hits[i].r.dblText
+		ej := line[hits[j].lo:hits[j].hi] == hits[j].r.dblText
+		if ei != ej {
+			return ei
+		}
+		if li, lj := hits[i].hi-hits[i].lo, hits[j].hi-hits[j].lo; li != lj {
+			return li > lj
+		}
+		return hits[i].lo < hits[j].lo
+	})
+
+	var chosen []dblHit
+	for _, h := range hits {
+		if overlapsAny(chosen, h) {
+			continue
+		}
+		chosen = append(chosen, h)
+	}
+	sort.Slice(chosen, func(i, j int) bool { return chosen[i].lo < chosen[j].lo })
+	return chosen
+}
+
+// overlapsAny reports whether h shares any byte with a hit already chosen.
+// Equality is not enough: two pairs can match the same NAME over spans that
+// differ by a byte.
+func overlapsAny(chosen []dblHit, h dblHit) bool {
+	for _, c := range chosen {
+		if h.lo < c.hi && c.lo < h.hi {
+			return true
+		}
+	}
+	return false
 }
 
 // markupExts are the files where a backtick delimits a QUOTATION. Nowhere
@@ -610,41 +680,52 @@ var markupExts = map[string]bool{
 	".md": true, ".rst": true, ".txt": true, ".html": true,
 }
 
-// codeSpans returns the byte ranges of backtick-delimited quotations on a
-// line of markup. For any other file it returns nothing, because a backtick
-// there is syntax rather than quoting.
+// quoted reports whether the match at [lo,hi) is immediately delimited by
+// backticks, which is how a name is quoted in markup.
 //
-// ⛔ AN ODD NUMBER OF BACKTICKS PAIRS NOTHING. Review measured the hole: on
+// ⛔⛔ PAIRING BACKTICKS ACROSS A LINE WAS THE WRONG MODEL, TWICE. The first
+// version paired them by position, and review measured
 //
 //	don`t use ZzpkgxBin yet, see `--help`
 //
-// the first and second backticks paired across the name and hid it. Three
-// backticks cannot be paired by position, and guessing which two belong
-// together is how a check loses a finding silently, so a line whose backticks
-// do not pair evenly is treated as having no quotations at all. That errs
-// towards reporting, which is the right direction for a verdict nothing else
-// can see.
-func codeSpans(file, line string) [][2]int {
-	if !markupExts[strings.ToLower(path.Ext(file))] {
-		return nil
+// where the first two paired ACROSS the name and hid it. The second version
+// refused to pair on an odd count — and review measured that too:
+//
+//	don`t use ZzpkgxBin, isn`t it odd
+//
+// has an EVEN count, two apostrophe typos, and pairs across the name again.
+// The parity rule narrowed the hole without closing it, and “ double
+// backticks “ stayed a false positive on top.
+//
+// Adjacency has no such hole, because it asks a question about the name
+// rather than about the line: a quoted identifier has a backtick against each
+// end of it. Nothing in between matters, so nothing in between can fool it.
+// A quoted phrase CONTAINING the name — `ZzpkgxBin [flags]` — is reported,
+// which is the safe direction: a page that quotes the damage in running text
+// is a page about the rename, and that is what --allow is for.
+// ⛔ IT ASKS ABOUT THE WHOLE NAME, NOT ABOUT THE MATCH. The doubled pattern
+// matches `Zzpkgx`, while what is quoted is the identifier `ZzpkgxBin` — so
+// the byte after the match is `B` and never a backtick. The first version of
+// this function tested the match's own edges and therefore fired on nothing;
+// its tests caught it immediately.
+func quoted(line string, lo, hi int) bool {
+	lo, hi = wordAround(line, lo, hi)
+	return lo > 0 && line[lo-1] == '`' && hi < len(line) && line[hi] == '`'
+}
+
+// wordAround widens a span to the identifier it sits inside.
+func wordAround(line string, lo, hi int) (int, int) {
+	for lo > 0 && isWordByte(line[lo-1]) {
+		lo--
 	}
-	if strings.Count(line, "`")%2 != 0 {
-		return nil
+	for hi < len(line) && isWordByte(line[hi]) {
+		hi++
 	}
-	var spans [][2]int
-	open := -1
-	for i := 0; i < len(line); i++ {
-		if line[i] != '`' {
-			continue
-		}
-		if open < 0 {
-			open = i
-			continue
-		}
-		spans = append(spans, [2]int{open, i})
-		open = -1
-	}
-	return spans
+	return lo, hi
+}
+
+func isWordByte(b byte) bool {
+	return b == '_' || b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z'
 }
 
 // spansOf converts regexp index pairs into spans, widened by one on each side
@@ -869,15 +950,24 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 	sort.Strings(roots)
 
 	totals := map[verdict]int{}
-	exempted := 0
+	// ⛔⛔ EVERY EXEMPTED VERDICT COUNTS, NOT JUST DOUBLED. Review measured the
+	// half-fix: `--allow FILIATION.md` on a page holding a stale ORG PATH gave
+	// exit 0 and "nothing stale and nothing unsure", with no not-clean line,
+	// because this counted only `f.Was == doubled`. I had fixed the sentence
+	// for the verdict I was thinking about and left it lying about the other
+	// four.
+	totalExempt, exemptedDoubled := 0, 0
 	clean := true
 	for _, root := range roots {
 		counts := map[verdict]int{}
 		for _, f := range byRoot[root] {
 			counts[f.Verdict]++
 			totals[f.Verdict]++
-			if f.Was == doubled {
-				exempted++
+			if f.Was != "" {
+				totalExempt++
+				if f.Was == doubled {
+					exemptedDoubled++
+				}
 			}
 		}
 		fmt.Fprintf(w, "%s: %d doc file(s), %d DOUBLED, %d STALE, %d DEBT, %d UNSURE, %d CITATION\n",
@@ -912,8 +1002,8 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 		fmt.Fprintf(w, "staleref: %d name(s) carry their replacement's prefix twice — a rename that ran over its own output. It compiles, the tests pass, and looking for the RETIRED spelling cannot find it; re-run the rename with the lowercase pairs first\n", totals[doubled])
 	}
 	// ⛔ An exemption of the one verdict nothing else can see is never silent.
-	if exempted > 0 {
-		fmt.Fprintf(w, "staleref: %d DOUBLED finding(s) were exempted by --allow — a page whose subject is the rename may spell the damage, but check that each one is QUOTED and not a doubled name the page itself still carries\n", exempted)
+	if exemptedDoubled > 0 {
+		fmt.Fprintf(w, "staleref: %d DOUBLED finding(s) were exempted by --allow — a page whose subject is the rename may spell the damage, but check that each one is QUOTED and not a doubled name the page itself still carries\n", exemptedDoubled)
 	}
 	if totals[debt] > 0 {
 		fmt.Fprintf(w, "staleref: %d name(s) the code reads and the rename retired — declaring them with --code-var does not make them correct, it records that the CODE has not been migrated\n", totals[debt])
@@ -923,10 +1013,10 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 	// were exempted by --allow" and then "nothing stale and nothing unsure".
 	// The second is true of the verdicts and false of the tree, which is the
 	// reading a lane takes from it.
-	if exempted > 0 {
-		fmt.Fprintf(w, "staleref: this run is NOT a clean tree — %d finding(s) were exempted, and the exit status cannot tell a lane about them\n", exempted)
+	if totalExempt > 0 {
+		fmt.Fprintf(w, "staleref: this run is NOT a clean tree — %d finding(s) of every verdict were exempted by --allow, and the exit status cannot tell a lane about them\n", totalExempt)
 	}
-	if exempted == 0 && totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
+	if totalExempt == 0 && totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
 		// ⛔ A tree with no documentation files reports no findings, which is
 		// the same output as a clean one. The file count is what tells them
 		// apart, so it is always printed.
