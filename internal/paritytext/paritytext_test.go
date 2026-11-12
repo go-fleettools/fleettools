@@ -26,6 +26,9 @@ var refusing = []struct{ name, text, rule string }{
 	{"blocks",
 		"What blocks a bit-identical kernel on loong64 is the missing vector FMA.",
 		"parity-blocks-kernel"},
+	{"so we skip",
+		"Output must stay bit-identical, so we skip the SIMD kernel.",
+		"declined-because-parity"},
 	{"skip simd",
 		"We skip the AVX2 kernel since it is not bit-exact with the scalar path.",
 		"declined-because-parity"},
@@ -44,6 +47,21 @@ var passing = []string{
 	"We do not need a fallback; the kernel is bit-identical.",
 	"A plain sentence with no cue at all.",
 	"The radix-32 pass was built bit-identical and lost on every length, so no length is routed to it.",
+	// go-avkit/decode#37, which follows go-fft/fft#121: the end of bit identity,
+	// announced, with the accuracy gate named.
+	"The outputs are no longer bit-identical to main (a different FFT); the gate is accuracy: TestAACAccuracy, TestAACMDCTMatchesDefinition, conformance, copycheck 0, covergate, race, vet (386) green.",
+	"The outputs are no longer bit-identical to main, which is fine: the AVX2 kernel is 2x faster.",
+	// A quote of the rule is not a deferral.
+	`The gate refuses "we skip FMA because it would break bit-parity" unless the text cites a bound.`,
+	"The gate refuses “the SIMD kernel is skipped because it breaks bit-parity”.",
+	// The "because" is about something else; parity is only mentioned.
+	"We kept the scalar path because the SIMD kernel was slower on M4; output is bit-identical either way.",
+	"We do not use FMA here; output is bit-identical.",
+	// No performance cue anywhere: these are about something else.
+	"This would break bit-identical output.",
+	"That is a contract change (bit identity with the documented definition).",
+	"Keep the bit-identity contract, as an option.",
+	"What blocks a bit-identical match is the host's endianness.",
 }
 
 func TestRefusing(t *testing.T) {
@@ -114,6 +132,37 @@ func TestMeasuredBoundExempts(t *testing.T) {
 	// A number with no error word is not one either.
 	if _, err := Gate(base+" It ran 3.5e-3 seconds.", "", "--parity-waiver"); err == nil {
 		t.Error("a bare number passed as a measurement")
+	}
+}
+
+// A bound elsewhere in the text does not excuse a deferral: it must be in the
+// finding's own paragraph.
+func TestBoundMustBeInTheFindingsParagraph(t *testing.T) {
+	deferral := "We skip the AVX2 kernel because it would break bit-parity."
+	bound := "Measured relative RMS error 3.1e-16 against double-double."
+	if got := Scan(deferral + "\n\n" + bound); len(got) != 1 {
+		t.Errorf("a bound in another paragraph excused the deferral: %v", got)
+	}
+	if got := Scan(deferral + " " + bound); len(got) != 0 {
+		t.Errorf("a bound in the same paragraph did not: %v", got)
+	}
+	if got := Scan("- " + deferral + "\n- " + bound); len(got) != 1 {
+		t.Errorf("a bound in the next list item excused it: %v", got)
+	}
+}
+
+func TestTitleInBackticks(t *testing.T) {
+	if err := GateTitle("perf: `FMA` skipped because it would break bit-parity", "--parity-waiver"); err == nil {
+		t.Error("a title whose subject is in backticks passed")
+	}
+}
+
+func TestNoLongerIsNotNoWay(t *testing.T) {
+	if got := Scan("No bit-identical way exists."); len(got) != 1 || got[0].Rule != "no-bit-identical-way" {
+		t.Errorf("%v", got)
+	}
+	if got := Scan("The outputs are no longer bit-identical to main."); len(got) != 0 {
+		t.Errorf("%v", got)
 	}
 }
 
@@ -314,7 +363,7 @@ func FuzzScan(f *testing.F) {
 		if err != nil {
 			t.Fatalf("a waiver must pass any text: %v", err)
 		}
-		if strings.TrimSpace(s) != "" && len(found) > 0 && !HasMeasuredBound(Units(s)) && !strings.Contains(out, StampPrefix) {
+		if strings.TrimSpace(s) != "" && len(found) > 0 && !strings.Contains(out, StampPrefix) {
 			t.Fatalf("a waived finding must be stamped")
 		}
 		// The stamp is never read back: stamping does not change the findings.

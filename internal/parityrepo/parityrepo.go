@@ -120,7 +120,7 @@ type Report struct {
 
 var (
 	// negated: a statement that is not a contract claim.
-	negated = regexp.MustCompile(`(?i)\b(not|never|no\s+longer|isn'?t|aren'?t|without|opt-in|opt\s+in|optional|option|options|exact\s+mode|non-goal|was\s+a\s+(porting\s+)?step|oracle\s+only|unless|neither|nor)\b`)
+	negated = regexp.MustCompile(`(?i)\b(not|never|no\s+longer|isn'?t|aren'?t|without|opt-in|opt\s+in|optional|option|options|exact\s+mode|non-goal|was\s+a\s+(porting\s+)?step|oracle\s+only|unless|neither|nor|were|measured|found)\b`)
 
 	// floatCue says a repository is about floating-point results: where
 	// results are integers or bytes there is no rounding, no error bound can
@@ -355,7 +355,13 @@ func parseKeys(sec []string) Marker {
 		case "exact":
 			m.Exact = true
 		case "domain":
-			m.ExactDomain = strings.HasPrefix(strings.ToLower(strings.TrimSpace(k[2])), "exact")
+			// `Domain: exact - <why>`: the reason is required, because "exact"
+			// alone is a way to silence the check without saying anything.
+			v := strings.TrimSpace(k[2])
+			if strings.HasPrefix(strings.ToLower(v), "exact") {
+				why := strings.Trim(strings.TrimSpace(v[len("exact"):]), "-–—:. ")
+				m.ExactDomain = len(strings.Fields(why)) >= 3
+			}
 		}
 	}
 	return m

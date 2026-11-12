@@ -96,8 +96,7 @@ var (
 	// parity is bit identity with a reference, or its paraphrase in the
 	// parking pattern ("rounds differently").
 	bitIdentity = regexp.MustCompile(`(?i)bit[\s-]*(identical(ly)?|identity|exact(ness|ly)?|for[\s-]*bit|parity|equal|compatib\w+|reproducib\w+)` +
-		`|bitwise[\s-]*(identical|equal|same|exact|reproducib\w+)` +
-		`|byte[\s-]*(identical|for[\s-]*byte)`)
+		`|bitwise[\s-]*(identical|equal|same|exact|reproducib\w+)`)
 	parity = regexp.MustCompile(bitIdentity.String() +
 		`|rounds?\s+differently` +
 		`|differs?\s+in\s+the\s+last\s+(bits?|digits?|ulps?)` +
@@ -126,6 +125,22 @@ var (
 	// noBitIdentical: "no bit-identical reduction exists; no code change" — the
 	// gap is left because no kernel keeps the bits.
 	noBitIdentical = regexp.MustCompile(`(?i)\bno\s+(\w+\s+)?bit[\s-]*(identical|exact)\s+\w+`)
+
+	// noLonger: "the outputs are no longer bit-identical" ANNOUNCES the end of
+	// bit identity (the decision's own direction); it is not "no bit-identical
+	// way exists".
+	noLonger = regexp.MustCompile(`(?i)\bno\s+longer\s+bit`)
+
+	// quoted: text inside double quotes is quoted, not asserted — a body that
+	// quotes the rule ("we skip FMA because it breaks bit-parity") is not
+	// deferring anything.
+	quoted = regexp.MustCompile("\"[^\"\n]*\"|“[^”\n]*”")
+
+	// clauseSplit cuts a sentence where a new thought starts, so that "because"
+	// is read together with the parity cue it governs and not with one three
+	// clauses away.
+	clauseSplit = regexp.MustCompile(`[;:,]|\s+(?:but|and|while|though|although|whereas)\s+`)
+	leadingSo   = regexp.MustCompile(`(?i)^\s*(so|therefore|hence|thus|which\s+means)\b`)
 
 	// blocksParity: "what blocks a bit-identical kernel is the missing FMA".
 	blocksParity = regexp.MustCompile(`(?i)\b(blocks?|blocked|prevents?|forbids?|rules?\s+out|precludes?|stops?)\b[^.]{0,30}?bit[\s-]*(identical|exact)`)
@@ -189,6 +204,7 @@ func Strip(text string) string {
 			inCmt = true
 		}
 		l = inline.ReplaceAllString(l, " ")
+		l = quoted.ReplaceAllString(l, " ")
 		l = urlRe.ReplaceAllString(l, " ")
 		lines[i] = l
 	}
@@ -316,6 +332,18 @@ func HasMeasuredBound(us []Unit) bool {
 	return false
 }
 
+// boundInParagraph says the measured bound sits in the SAME paragraph (or list
+// item) as sentence i: a number three sections away does not excuse a deferral.
+func boundInParagraph(us []Unit, i int) bool {
+	var para []Unit
+	for _, u := range us {
+		if u.para == us[i].para {
+			para = append(para, u)
+		}
+	}
+	return HasMeasuredBound(para)
+}
+
 // Scan returns the sentences of text that defer or decline a performance change
 // because of bit identity. It reads at most MaxText bytes; the rest is not
 // looked at, which the caller must say (see Gate).
@@ -326,7 +354,7 @@ func Scan(text string) []Finding {
 	us := Units(text)
 	var out []Finding
 	for i, u := range us {
-		if rule := classify(u.Text, Window(us, i)); rule != "" {
+		if rule := classify(u.Text, Window(us, i)); rule != "" && !boundInParagraph(us, i) {
 			out = append(out, Finding{Rule: rule, Sentence: u.Text, Line: u.Line})
 		}
 	}
@@ -341,7 +369,7 @@ func classify(s, win string) string {
 	}
 	inPerf := perf.MatchString(win)
 	switch {
-	case perf.MatchString(s) && decline.MatchString(s) && because.MatchString(s):
+	case perf.MatchString(s) && decline.MatchString(s) && governs(s):
 		return "declined-because-parity"
 	case inPerf && wouldBreak.MatchString(s):
 		return "would-break-parity"
@@ -349,12 +377,33 @@ func classify(s, win string) string {
 		return "contract-change"
 	case inPerf && keepContract.MatchString(s) && optionWords.MatchString(win):
 		return "keep-parity-contract"
-	case noBitIdentical.MatchString(s):
+	case noBitIdentical.MatchString(s) && !noLonger.MatchString(s):
 		return "no-bit-identical-way"
 	case inPerf && blocksParity.MatchString(s):
 		return "parity-blocks-kernel"
 	}
 	return ""
+}
+
+// governs says the "because" is about the parity cue: a clause holds both, or a
+// clause with the cue is followed by one that opens with "so"/"therefore".
+// "We kept the scalar path because the kernel was slower; output is bit-identical
+// either way" has a because and a parity cue three words apart and no link
+// between them.
+func governs(s string) bool {
+	clauses := clauseSplit.Split(s, -1)
+	for i, c := range clauses {
+		if !parity.MatchString(c) {
+			continue
+		}
+		if because.MatchString(c) {
+			return true
+		}
+		if i+1 < len(clauses) && leadingSo.MatchString(clauses[i+1]) {
+			return true
+		}
+	}
+	return false
 }
 
 // Stamp is the line a waiver publishes beside the text it excused.
@@ -388,10 +437,7 @@ func Gate(text, waiver, flag string) (string, error) {
 	if len(text) > MaxText {
 		return "", fmt.Errorf("the text is over %d bytes, which the bit-parity gate does not read; shorten it", MaxText)
 	}
-	if HasMeasuredBound(Units(text)) {
-		return text, nil
-	}
-	found := Scan(text)
+	found := Scan(text) // a finding with a measured bound in its paragraph is not one
 	if len(found) == 0 {
 		return text, nil
 	}
@@ -404,7 +450,9 @@ func Gate(text, waiver, flag string) (string, error) {
 // GateTitle refuses a title that defers a performance change because of bit
 // identity. No waiver covers a title: it cannot carry the reason.
 func GateTitle(t, flag string) error {
-	if found := Scan(t); len(found) > 0 {
+	// Backticks are dropped, not blanked: a title cannot be a code span's
+	// neighbour ("`FMA` skipped because bit-parity") and lose its subject.
+	if found := Scan(strings.ReplaceAll(t, "`", " ")); len(found) > 0 {
 		return Refusal("title (no waiver covers a title: it cannot carry the reason; rewrite it)", found, flag)
 	}
 	return nil

@@ -123,6 +123,40 @@ func TestExactDomainPasses(t *testing.T) {
 	}
 }
 
+// `Domain: exact` needs a stated reason: bare, it is a way to silence the check.
+func TestExactDomainNeedsAReason(t *testing.T) {
+	for _, d := range []string{"Domain: exact", "Domain: exact -", "Domain: exact - ok", "Domain: exact."} {
+		r := check(t, map[string]string{"README.md": floaty + "\nThe digest is bit-identical to the reference.\n\n## Accuracy contract\n\n" + d + "\n"})
+		if r.Verdict != Fail || r.Marker.ExactDomain {
+			t.Errorf("%q passed: %+v", d, r)
+		}
+	}
+}
+
+// UNREAD outranks FAIL: a FAIL read off part of a repository is not a verdict
+// while a surface that could hold the marker was never read.
+func TestUnreadOutranksFail(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	root := repo(t, map[string]string{"README.md": floaty + "\nOutput is bit-identical to the reference.\n", "docs/a.md": "x\n"})
+	locked := filepath.Join(root, "docs", "a.md")
+	os.Chmod(locked, 0)
+	t.Cleanup(func() { os.Chmod(locked, 0o644) })
+	r, err := Check(root)
+	if err != nil || len(r.Statements) == 0 || r.Verdict != Unread {
+		t.Errorf("%+v %v", r, err)
+	}
+}
+
+// Measured past-tense facts and byte-level identity are not a float contract.
+func TestMeasuredFactsAndBytesAreNotContracts(t *testing.T) {
+	r := check(t, map[string]string{"README.md": floaty + "\nResults were bit identical over 1e6 random inputs.\nThe ABI0 offsets are byte-for-byte identical to arm64.\nWe measured it bit-identical on Zen 3.\n"})
+	if r.Verdict != Pass {
+		t.Errorf("%+v", r)
+	}
+}
+
 func TestIntegerRepositoriesAreNotFloatingPoint(t *testing.T) {
 	r := check(t, map[string]string{"README.md": "Output is byte-identical to the standard library. Uses float64 once.\n"})
 	if r.Verdict != Pass || len(r.Statements) != 0 || r.FloatCues != 1 {
