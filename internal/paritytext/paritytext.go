@@ -135,7 +135,8 @@ var (
 	// noVectorISA: where the assembler or the instruction set has no vector
 	// double arithmetic, the kernel is INEXPRESSIBLE and parity is not what blocks
 	// it ("the Go ppc64 assembler exposes no vector double arithmetic"). Read in
-	// the sentence and its paragraph neighbours.
+	// the SAME sentence only: a neighbour's "no vector FMA" must not excuse a
+	// different sentence's deferral.
 	noVectorISA = regexp.MustCompile(`(?i)\b(assembler|isa|instruction\s+set|hardware|cpu|vector\s+facility)\b[^.;]{0,60}?\b(has|have|exposes?|provides?|offers?|lacks?|without)\s+(\*\*)?(no|a)?\s*(vector|simd)` +
 		`|\bno\s+vector\s+(double|float|arithmetic|instruction|fma|multiply|add)` +
 		`|\binexpressible\b|\bcannot\s+be\s+expressed\s+in\s+(the\s+)?(go\s+)?assembler`)
@@ -423,7 +424,7 @@ func classify(s string, perfSent, inPerf bool, win func() string) string {
 		return "contract-change"
 	case inPerf && keepContract.MatchString(s) && optionWords.MatchString(win()):
 		return "keep-parity-contract"
-	case noBitIdentical.MatchString(s) && !noLonger.MatchString(s) && !reductionIdentity.MatchString(s) && !noVectorISA.MatchString(win()):
+	case noBitIdentical.MatchString(s) && !noLonger.MatchString(s) && !reductionIdentity.MatchString(s) && !noVectorISA.MatchString(s):
 		return "no-bit-identical-way"
 	case leftOnParity.MatchString(s) && !leftButClosed.MatchString(s):
 		return "left-on-parity"
