@@ -36,6 +36,7 @@ import (
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/go-fleettools/fleettools/internal/ghtoken"
+	"github.com/go-fleettools/fleettools/internal/paritytext"
 	"github.com/spf13/cobra"
 )
 
@@ -86,6 +87,7 @@ type opts struct {
 	dryRun                         bool
 	approve, comment, reqChanges   bool
 	titleSet                       bool
+	parityWaiver                   string
 }
 
 // RootCmd builds the command; tests drive it with SetArgs/SetOut/SetErr.
@@ -107,6 +109,7 @@ func RootCmd() *cobra.Command {
 	f.StringVar(&o.tokFile, "token-file", "", "file holding the token (default ~/.github-token)")
 	f.StringVar(&o.bodyFile, "body-file", "", "file holding the body (edit, review)")
 	f.StringVar(&o.title, "title", "", "new title, one line (edit)")
+	f.StringVar(&o.parityWaiver, "parity-waiver", "", "why this body may defer a performance change because it breaks bit identity (STAMPED into the body; no waiver covers a title)")
 	f.BoolVar(&o.dryRun, "dry-run", false, "show the pull request and what would be sent; send nothing")
 	f.BoolVar(&o.approve, "approve", false, "review: approve")
 	f.BoolVar(&o.comment, "comment", false, "review: comment only")
@@ -198,7 +201,7 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		}
 	}
 	if o.bodyFile != "" {
-		if body, err = readBody(o.bodyFile); err != nil {
+		if body, err = readBody(o.bodyFile, o.parityWaiver); err != nil {
 			return err
 		}
 	}
@@ -409,6 +412,10 @@ func checkTitle(t string) (string, error) {
 	case len([]rune(t)) > maxTitle:
 		return "", fmt.Errorf("--title: over %d characters", maxTitle)
 	}
+	// No waiver covers a title: it cannot carry the reason.
+	if err := paritytext.GateTitle(t, "--parity-waiver"); err != nil {
+		return "", err
+	}
 	return t, nil
 }
 
@@ -439,7 +446,7 @@ func splitRepo(s string) (owner, repo string, err error) {
 	return owner, repo, nil
 }
 
-func readBody(path string) (string, error) {
+func readBody(path, parityWaiver string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("body file: %w", err)
@@ -455,7 +462,10 @@ func readBody(path string) (string, error) {
 	if strings.TrimSpace(string(b)) == "" {
 		return "", errors.New("body file: empty")
 	}
-	return string(b), nil
+	// The bit-parity gate (go-fft/fft#121): a body that defers a performance
+	// change because of bit identity is refused unless it cites a measured bound
+	// or carries a waiver, whose reason is STAMPED into the text.
+	return paritytext.Gate(string(b), parityWaiver, "--parity-waiver")
 }
 
 // readToken is ghtoken.Read: the token from a file only its owner may read.
