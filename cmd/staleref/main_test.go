@@ -495,6 +495,70 @@ func TestAQuotedDoubledNameIsNotDrift(t *testing.T) {
 	}
 }
 
+// ⛔⛔ A BACKTICK IN GO OPENS A RAW STRING LITERAL, AND THAT IS WHERE THIS BUG
+// LIVES. Skipping code spans in SOURCE blinded the check in exactly the files
+// --ext go exists to open: review measured a usage string, a path default and
+// a struct tag, all holding the doubled name, reported as 0 DOUBLED, exit 0.
+// The fix for a false positive had made a blind spot bigger than the false
+// positive.
+func TestABacktickInSourceIsNotAQuotation(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"pkgx=zpkgx"}, map[string]bool{})
+	tick := "`"
+	for _, line := range []string{
+		"var usage = " + tick + "Usage: ZzpkgxBin [flags]" + tick,
+		"const home = " + tick + "$HOME/.config/ZzpkgxBin" + tick,
+		"Field string " + tick + `json:"ZzpkgxBin"` + tick,
+	} {
+		if n := countVerdict(c.classifyLine("main.go", 1, line), doubled); n != 1 {
+			t.Errorf("%d doubled finding(s) in Go source, want 1: %s", n, line)
+		}
+		// The same text in markup IS a quotation.
+		if n := countVerdict(c.classifyLine("README.md", 1, line), doubled); n != 0 {
+			t.Errorf("%d doubled finding(s) in markup, want 0: %s", n, line)
+		}
+	}
+}
+
+// ⛔ AN ODD NUMBER OF BACKTICKS PAIRS NOTHING. Review measured the hole:
+// `don`+"`"+`t use ZzpkgxBin yet, see ` + backticked --help — the first two
+// backticks paired across the name and hid it.
+func TestAStrayBacktickDoesNotHideAName(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"pkgx=zpkgx"}, map[string]bool{})
+	tick := "`"
+	odd := "don" + tick + "t use ZzpkgxBin yet, see " + tick + "--help" + tick
+	if n := countVerdict(c.classifyLine("README.md", 1, odd), doubled); n != 1 {
+		t.Errorf("%d doubled finding(s) on a line with three backticks, want 1", n)
+	}
+	// An even, well-formed line still quotes.
+	even := "see " + tick + "ZzpkgxBin" + tick + " for the shape"
+	if n := countVerdict(c.classifyLine("README.md", 1, even), doubled); n != 0 {
+		t.Errorf("%d doubled finding(s) on a properly quoted line, want 0", n)
+	}
+}
+
+// ⛔⛔ TWO PAIRS, ONE SPAN, TWO CONTRADICTORY REPAIRS. Review measured the
+// fleet's real configuration — the pair set whose ORDER causes this defect —
+// reporting one occurrence twice.
+func TestOneOccurrenceIsOneFinding(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil,
+		[]string{"PkgX=ZPkgX", "pkgx=zpkgx"}, map[string]bool{})
+	got := c.classifyLine("main.go", 1, "dirs = append(dirs, ZZPkgXBin)")
+	if n := countVerdict(got, doubled); n != 1 {
+		t.Fatalf("%d doubled finding(s) for one occurrence: %+v", n, got)
+	}
+}
+
+// ⛔ A dead condition reads as a guard and is not one: len(d) < 4 could never
+// fire, because d is prefix+prefix+was.
+func TestTheThresholdIsTheOneThatCanFire(t *testing.T) {
+	if _, ok := doubledForm("a", "ca"); ok {
+		t.Error("a one-letter retired spelling armed the check")
+	}
+	if d, ok := doubledForm("bk", "zbk"); !ok || d != "zzbk" {
+		t.Errorf("doubledForm(bk, zbk) = %q, %v; want zzbk, true", d, ok)
+	}
+}
+
 // ⛔⛔ THE DOUBLED CHECK IS AN OVERLAY: it must not steal another rule's
 // verdict. Measured in review: `https://github.com/go-pkgx/zzpkgx` reported
 // 1 DOUBLED and ZERO STALE, so a stale organisation URL lost its verdict and

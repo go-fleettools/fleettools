@@ -410,15 +410,21 @@ func doubledForm(was, now string) (string, bool) {
 	// that cited it. `--retired` is CALLER-SUPPLIED, and review measured the
 	// consequence: `--retired a=ca` reports `The yucca is a plant.` as drift.
 	//
-	// A one- or two-letter doubled form is a substring, not a name. The check
-	// arms only for a retired spelling of at least two characters whose doubled
-	// form is at least four, which keeps every pair this fleet has (`bk`→`zbk`
-	// gives `zzbk`) and drops the ones that are too short to mean anything.
+	// A one-letter retired spelling makes a doubled form that is a substring,
+	// not a name. The check arms only from two characters up, which keeps every
+	// pair this fleet has (`bk`→`zbk` gives `zzbk`).
 	//
-	// ⛔ This is a THRESHOLD, not a proof: a caller can still supply a pair
-	// whose doubled form is an ordinary word. `--allow` is the escape, and the
-	// help says so rather than implying the collision cannot happen.
-	if len(was) < 2 || len(d) < 4 {
+	// ⛔ THIS IS A THRESHOLD, NOT A PROOF, and the class survives it: review
+	// measured `--retired ll=all` reporting `for all intents aall the same`.
+	// `--allow` is the escape. Saying so is the point — the previous version
+	// of this comment asserted that no word contains a doubled form, which was
+	// true of one pair and written as a law.
+	//
+	// ⛔ A second condition here, `len(d) < 4`, was DEAD: d is prefix+prefix+was
+	// with a prefix of at least one character, so two characters of `was`
+	// already force four. Review found it. A condition that cannot fire reads
+	// as a guard and is not one.
+	if len(was) < 2 {
 		return "", false
 	}
 	return d, true
@@ -537,11 +543,21 @@ func (c *classifier) classifyLine(file string, n int, line string) []finding {
 	// findings, and neither may hide the other. Not covering is safe for the
 	// bare-name rule by construction: `Zzpkgx` contains `pkgx` only with a word
 	// character in front of it, which `\b` already refuses.
+	// ⛔⛔ TWO PAIRS CAN MATCH THE SAME SPAN, AND THE FLEET'S REAL CONFIGURATION
+	// DOES. Review measured it: `--retired PkgX=ZPkgX --retired pkgx=zpkgx` —
+	// the very pair set whose ORDER causes this defect — reported
+	// `ZZPkgXBin` twice, suggesting `ZPkgX` and `Zpkgx`, two contradictory
+	// repairs for one occurrence; four findings for two names on a line.
+	//
+	// Removing `cover` is what allowed it (deliberately, so the address around
+	// a doubled name keeps its own verdict), so the de-duplication is local:
+	// one finding per span, first pair wins.
+	reported := map[[2]int]bool{}
 	for _, r := range c.retired {
 		if r.dbl == nil {
 			continue
 		}
-		spans := codeSpans(line)
+		spans := codeSpans(file, line)
 		// ⛔ --keep STILL WINS, and that had to be restored by hand once this
 		// stopped reading `covered`. A kept address is one somebody checked and
 		// declared live — `ghcr.io/go-pkgx/packages` is the measured case — so
@@ -560,6 +576,11 @@ func (c *classifier) classifyLine(file string, n int, line string) []finding {
 			if inSpan(spans, m[0]) {
 				continue
 			}
+			key := [2]int{m[0], m[1]}
+			if reported[key] {
+				continue
+			}
+			reported[key] = true
 			was := line[m[0]:m[1]]
 			out = append(out, finding{File: file, Line: n, Verdict: doubled,
 				Kind: fmt.Sprintf(
@@ -572,9 +593,44 @@ func (c *classifier) classifyLine(file string, n int, line string) []finding {
 	return out
 }
 
-// codeSpans returns the byte ranges of backtick-delimited spans on a line.
-// Unpaired backticks open nothing, so a line with one is unaffected.
-func codeSpans(line string) [][2]int {
+// markupExts are the files where a backtick delimits a QUOTATION. Nowhere
+// else.
+//
+// ⛔⛔ A BACKTICK IN GO OPENS A RAW STRING LITERAL, AND THAT IS WHERE THIS
+// BUG LIVES. Skipping code spans in source blinded the check in precisely the
+// files --ext go exists to open — help text, usage blocks, flag defaults,
+// struct tags. Review measured it at 260a93f: three real occurrences, a usage
+// string, a path default and a json tag, all holding `ZzpkgxBin`, reported
+// 0 DOUBLED and exit 0 under the message "nothing stale and nothing unsure".
+//
+// The fix for a false positive had created a blind spot larger than the false
+// positive, in the one file type that matters most. A rule about PROSE must be
+// applied only to prose.
+var markupExts = map[string]bool{
+	".md": true, ".rst": true, ".txt": true, ".html": true,
+}
+
+// codeSpans returns the byte ranges of backtick-delimited quotations on a
+// line of markup. For any other file it returns nothing, because a backtick
+// there is syntax rather than quoting.
+//
+// ⛔ AN ODD NUMBER OF BACKTICKS PAIRS NOTHING. Review measured the hole: on
+//
+//	don`t use ZzpkgxBin yet, see `--help`
+//
+// the first and second backticks paired across the name and hid it. Three
+// backticks cannot be paired by position, and guessing which two belong
+// together is how a check loses a finding silently, so a line whose backticks
+// do not pair evenly is treated as having no quotations at all. That errs
+// towards reporting, which is the right direction for a verdict nothing else
+// can see.
+func codeSpans(file, line string) [][2]int {
+	if !markupExts[strings.ToLower(path.Ext(file))] {
+		return nil
+	}
+	if strings.Count(line, "`")%2 != 0 {
+		return nil
+	}
 	var spans [][2]int
 	open := -1
 	for i := 0; i < len(line); i++ {
@@ -862,7 +918,15 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 	if totals[debt] > 0 {
 		fmt.Fprintf(w, "staleref: %d name(s) the code reads and the rename retired — declaring them with --code-var does not make them correct, it records that the CODE has not been migrated\n", totals[debt])
 	}
-	if totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
+	// ⛔ AND IT MUST NOT CALL A TREE CLEAN IN THE LINE UNDER AN EXEMPTION.
+	// Review measured the two printed one after the other: "N DOUBLED findings
+	// were exempted by --allow" and then "nothing stale and nothing unsure".
+	// The second is true of the verdicts and false of the tree, which is the
+	// reading a lane takes from it.
+	if exempted > 0 {
+		fmt.Fprintf(w, "staleref: this run is NOT a clean tree — %d finding(s) were exempted, and the exit status cannot tell a lane about them\n", exempted)
+	}
+	if exempted == 0 && totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
 		// ⛔ A tree with no documentation files reports no findings, which is
 		// the same output as a clean one. The file count is what tells them
 		// apart, so it is always printed.
