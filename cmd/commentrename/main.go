@@ -53,9 +53,9 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -83,6 +83,16 @@ Which byte is inside a comment is answered by go/parser, not by looking at the
 line: in Go a backtick opens a raw string, so no line-based rule can tell a
 quotation from data.
 
+A DIRECTIVE is not prose either. //go:embed, //go:generate, //go:linkname and
+a cgo preamble are comments to a tool, and their operands are the very paths,
+identifiers and command lines this command refuses to touch elsewhere; they
+are skipped. --keep names a live address that must survive the rename, such as
+ghcr.io/go-pkgx/packages, which is org-scoped and did NOT follow a repository
+transfer.
+
+Nothing is written until every file has been read and parsed: a parse error in
+the last file used to exit 2 over a tree already half-renamed.
+
 Matching has a left word boundary, because every retired spelling in this
 fleet is a prefix of its replacement and without it every correct mention
 reads as drift. After rewriting, the doubled form (zzbk, zzpkgx) is counted:
@@ -104,8 +114,8 @@ type pair struct {
 
 type opts struct {
 	retired []string
+	keep    []string
 	write   bool
-	exts    []string
 }
 
 // RootCmd builds the command.
@@ -114,6 +124,7 @@ func RootCmd() *cobra.Command {
 	c := cli.New("commentrename --retired was=now [--write] DIR...",
 		"rename a retired name in Go comments, and nowhere else", longHelp)
 	c.Flags().StringArrayVar(&o.retired, "retired", nil, "a retired spelling and its replacement, was=now (repeatable)")
+	c.Flags().StringArrayVar(&o.keep, "keep", nil, "a live address the rename must not touch, e.g. ghcr.io/go-pkgx/packages (repeatable)")
 	c.Flags().BoolVar(&o.write, "write", false, "rewrite the files; without it, report and change nothing")
 	c.RunE = func(cmd *cobra.Command, args []string) error { return run(cmd, &o, args) }
 	return c
@@ -145,15 +156,36 @@ func run(cmd *cobra.Command, o *opts, dirs []string) error {
 	}
 	sort.Strings(files)
 
+	// ⛔⛔ EVERY FILE IS READ BEFORE ANY FILE IS WRITTEN. Review measured the
+	// alternative: a parse error in a later file aborted with status 2 AFTER
+	// earlier files had been rewritten, leaving the tree half-renamed under a
+	// status that means "the question could not be put". A caller who trusts
+	// that status does not even know to look.
+	type edit struct {
+		path string
+		body []byte
+		n    int
+	}
+	var edits []edit
 	changed, counts := 0, map[string]int{}
 	for _, f := range files {
-		n, err := one(out, f, pairs, o.write)
+		body, n, err := plan(f, pairs, o.keep)
 		if err != nil {
 			return cli.Unanswerable("%s: %v", f, err)
 		}
-		if n > 0 {
-			changed++
-			counts[f] = n
+		if n == 0 {
+			continue
+		}
+		fmt.Fprintf(out, "  %-4d %s\n", n, f)
+		edits = append(edits, edit{f, body, n})
+		changed++
+		counts[f] = n
+	}
+	if o.write {
+		for _, e := range edits {
+			if err := os.WriteFile(e.path, e.body, 0o644); err != nil {
+				return cli.Unanswerable("%s: %v", e.path, err)
+			}
 		}
 	}
 
@@ -174,11 +206,24 @@ func run(cmd *cobra.Command, o *opts, dirs []string) error {
 
 func compile(spec []string) ([]pair, error) {
 	var ps []pair
+	seen := map[string]string{}
 	for _, s := range spec {
 		was, now, ok := strings.Cut(s, "=")
 		if !ok || was == "" || now == "" {
 			return nil, fmt.Errorf("--retired %q is not was=now", s)
 		}
+		// ⛔ THE SAME SPELLING TWICE IS A QUESTION WITH TWO ANSWERS. The
+		// alternation would match it once and the first pair in the sorted
+		// order would win — silently, and the sort is by LENGTH, so equal
+		// lengths make the winner depend on Go's sort being stable. Refuse:
+		// a caller who wrote both wants to know which one is wrong.
+		if prev, dup := seen[was]; dup {
+			if prev == now {
+				return nil, fmt.Errorf("--retired %s=%s given twice", was, now)
+			}
+			return nil, fmt.Errorf("--retired %s given twice, as %s and %s: which one?", was, prev, now)
+		}
+		seen[was] = now
 		// ⛔ THE LEFT BOUNDARY IS THE WHOLE OF IT: `zbk` must not read as `bk`.
 		// The right side is deliberately open, because a retired name is often
 		// the head of a longer word in prose (pkgx's, bk-shaped) and those are
@@ -202,6 +247,60 @@ func doubledForm(was, now string) string {
 	return now[:len(now)-len(was)] + now
 }
 
+// directive reports whether a comment is an instruction to a tool rather than
+// prose: a //go: line, or a C preprocessor line from a cgo preamble.
+//
+// Its operands are paths, identifiers and command lines — the very things this
+// command refuses to touch when they appear as string literals. That they are
+// spelled inside a comment does not make them prose.
+func directive(text string) bool {
+	t := strings.TrimSpace(text)
+	switch {
+	case strings.HasPrefix(t, "//go:"), strings.HasPrefix(t, "//extern"):
+		return true
+	case strings.HasPrefix(t, "// #"), strings.HasPrefix(t, "//#"):
+		return true
+	}
+	return false
+}
+
+// cgoPreamble returns the comment group immediately above `import "C"`, whose
+// contents are C SOURCE and not Go prose at all.
+//
+// ⛔ The `// #include` test above catches most of it line by line; this catches
+// the rest of the preamble — a typedef, a macro, a C comment — which carries no
+// marker of its own and would otherwise read as English.
+func cgoPreamble(f *ast.File, fset *token.FileSet) *ast.CommentGroup {
+	for _, d := range f.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.IMPORT {
+			continue
+		}
+		for _, s := range gd.Specs {
+			is, ok := s.(*ast.ImportSpec)
+			if !ok || is.Path == nil || is.Path.Value != `"C"` {
+				continue
+			}
+			if gd.Doc != nil {
+				return gd.Doc
+			}
+			// The preamble may hang off the spec rather than the decl.
+			if is.Doc != nil {
+				return is.Doc
+			}
+			// Otherwise it is the last group ending before the import.
+			var best *ast.CommentGroup
+			for _, g := range f.Comments {
+				if g.End() <= is.Pos() && (best == nil || g.End() > best.End()) {
+					best = g
+				}
+			}
+			return best
+		}
+	}
+	return nil
+}
+
 // rewriteComment replaces every retired name in one comment, in a SINGLE
 // left-to-right pass that never re-reads what it wrote.
 //
@@ -217,10 +316,21 @@ func doubledForm(was, now string) string {
 // produce it. Longer spellings are tried first, because Go's regexp
 // alternation is leftmost-FIRST rather than leftmost-longest and `pkg` would
 // otherwise shadow `pkgx`.
-func rewriteComment(text string, pairs []pair) (string, int) {
+func rewriteComment(text string, pairs []pair, keep []string) (string, int) {
 	if len(pairs) == 0 {
 		return text, 0
 	}
+	// ⛔⛔ AN ADDRESS IN A COMMENT IS STILL AN ADDRESS. Review measured
+	//
+	//	// bottles live at ghcr.io/go-pkgx/packages
+	//
+	// becoming ghcr.io/go-zpkgx/packages — an organisation that does not
+	// exist. GitHub's container packages are ORG-SCOPED and did NOT follow the
+	// repository transfer, so that registry is live under the old name; the
+	// assumption that it moved is what shipped an empty registry in v0.64.0
+	// through v0.68.0. staleref carries --keep for exactly this, and this
+	// command had no such door.
+	kept := keptSpans(text, keep)
 	ordered := make([]pair, len(pairs))
 	copy(ordered, pairs)
 	sort.Slice(ordered, func(i, j int) bool { return len(ordered[i].old) > len(ordered[j].old) })
@@ -232,16 +342,60 @@ func rewriteComment(text string, pairs []pair) (string, int) {
 	all := regexp.MustCompile(`\b(?:` + strings.Join(alts, "|") + `)`)
 
 	n := 0
-	out := all.ReplaceAllStringFunc(text, func(m string) string {
-		for _, p := range ordered {
-			if m == p.old {
-				n++
-				return p.now
+	var out strings.Builder
+	out.Grow(len(text))
+	last := 0
+	for _, loc := range all.FindAllStringIndex(text, -1) {
+		out.WriteString(text[last:loc[0]])
+		m := text[loc[0]:loc[1]]
+		if inAny(kept, loc[0]) {
+			out.WriteString(m) // a live address: left exactly as written
+		} else {
+			replaced := m
+			for _, p := range ordered {
+				if m == p.old {
+					replaced = p.now
+					n++
+					break
+				}
 			}
+			out.WriteString(replaced)
 		}
-		return m
-	})
-	return out, n
+		last = loc[1]
+	}
+	out.WriteString(text[last:])
+	return out.String(), n
+}
+
+// keptSpans returns the byte ranges of the --keep addresses found in a
+// comment, which the rename steps over.
+func keptSpans(text string, keep []string) [][2]int {
+	var spans [][2]int
+	for _, k := range keep {
+		if k == "" {
+			continue
+		}
+		from := 0
+		for {
+			i := strings.Index(text[from:], k)
+			if i < 0 {
+				break
+			}
+			lo := from + i
+			spans = append(spans, [2]int{lo, lo + len(k)})
+			from = lo + len(k)
+		}
+	}
+	return spans
+}
+
+func inAny(spans [][2]int, i int) bool {
+	for _, s := range spans {
+		if i >= s[0] && i < s[1] {
+			return true
+		}
+	}
+	return false
 }
 
 func goFiles(dir string) ([]string, error) {
@@ -264,33 +418,52 @@ func goFiles(dir string) ([]string, error) {
 	return out, err
 }
 
-// one rewrites the comments of a single file and returns how many occurrences
-// it found.
+// plan returns what a single file WOULD contain once its comments are
+// rewritten, and how many occurrences that is. It writes nothing: the caller
+// writes only after every file has been read and parsed.
 //
 // ⛔ IT EDITS BYTES, NOT THE AST. Printing a parsed file reformats it, and a
 // reformat buried inside a rename is a diff nobody can review. The parser is
 // used only to say WHERE the comments are; the bytes between them are never
 // touched.
-func one(out io.Writer, path string, pairs []pair, write bool) (int, error) {
+func plan(path string, pairs []pair, keep []string) ([]byte, int, error) {
 	src, err := os.ReadFile(path)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, path, src, parser.ParseComments)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 
+	// ⛔⛔ A DIRECTIVE IS A COMMENT TO THE PARSER AND IS NOT PROSE, and this is
+	// the finding that breaks builds. Measured in review, 2026-11-12:
+	//
+	//	//go:embed assets/pkgx.json   -> assets/zpkgx.json, and the build then
+	//	                                 fails with "no matching files"
+	//	//go:linkname pkgxHook …      -> an IDENTIFIER rewritten, which this
+	//	                                 command's own documentation excludes
+	//	//go:generate pkgx gen ./...  -> a command line
+	//	// #include "pkgx/shim.h"     -> C SOURCE naming a file on disk
+	//
+	// Four of the five hits in one file were exactly the two categories the
+	// design refuses — paths and identifiers — arriving through the one door
+	// the design trusts. A comment is prose only when it is prose.
+	cgo := cgoPreamble(f, fset)
 	type span struct{ lo, hi int }
 	var spans []span
 	for _, g := range f.Comments {
 		for _, c := range g.List {
 			lo := fset.Position(c.Pos()).Offset
 			hi := fset.Position(c.End()).Offset
-			if lo >= 0 && hi <= len(src) && lo < hi {
-				spans = append(spans, span{lo, hi})
+			if lo < 0 || hi > len(src) || lo >= hi {
+				continue
 			}
+			if directive(c.Text) || (cgo != nil && g == cgo) {
+				continue
+			}
+			spans = append(spans, span{lo, hi})
 		}
 	}
 	sort.Slice(spans, func(i, j int) bool { return spans[i].lo < spans[j].lo })
@@ -300,7 +473,7 @@ func one(out io.Writer, path string, pairs []pair, write bool) (int, error) {
 	last, found := 0, 0
 	for _, s := range spans {
 		buf.Write(src[last:s.lo])
-		text, n := rewriteComment(string(src[s.lo:s.hi]), pairs)
+		text, n := rewriteComment(string(src[s.lo:s.hi]), pairs, keep)
 		found += n
 		buf.WriteString(text)
 		last = s.hi
@@ -308,11 +481,17 @@ func one(out io.Writer, path string, pairs []pair, write bool) (int, error) {
 	buf.Write(src[last:])
 
 	if found == 0 {
-		return 0, nil
+		return nil, 0, nil
 	}
-	// ⛔ A PASS THAT DOUBLED A PREFIX WRITES NOTHING. The replacement contains
+	// ⛔ A PASS THAT DOUBLED A PREFIX PLANS NOTHING. The replacement contains
 	// what it replaces, so an occurrence already correct would become ZzpkgxBin
 	// — which compiles, which is why nothing downstream would catch it.
+	//
+	// The one alternation above is what MAKES this unreachable for a word-shaped
+	// pair, and that is the point: this counts the result rather than trusting
+	// the reasoning. It is reachable, and TestADoubledPrefixIsRefused measures
+	// it, when the replacement's added prefix is not a word character — then the
+	// left boundary falls INSIDE the already-renamed form and matches it again.
 	for _, p := range pairs {
 		if p.doubled == "" {
 			continue
@@ -320,15 +499,9 @@ func one(out io.Writer, path string, pairs []pair, write bool) (int, error) {
 		before := strings.Count(strings.ToLower(string(src)), strings.ToLower(p.doubled))
 		after := strings.Count(strings.ToLower(buf.String()), strings.ToLower(p.doubled))
 		if after > before {
-			return 0, fmt.Errorf("would create %d doubled %q (%d before, %d after): nothing written",
+			return nil, 0, fmt.Errorf("would create %d doubled %q (%d before, %d after): nothing written",
 				after-before, p.doubled, before, after)
 		}
 	}
-	fmt.Fprintf(out, "  %-4d %s\n", found, path)
-	if write {
-		if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
-			return 0, err
-		}
-	}
-	return found, nil
+	return buf.Bytes(), found, nil
 }

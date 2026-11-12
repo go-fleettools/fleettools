@@ -243,3 +243,151 @@ func TestAFileThatDoesNotParseIsUnanswerable(t *testing.T) {
 		t.Errorf("code = %d, want 2", code)
 	}
 }
+
+// ⛔⛔ AND IT WRITES NOTHING WHEN IT CANNOT READ EVERYTHING. The earlier
+// version rewrote each file as it went, so a parse error in the SECOND file
+// exited 2 — "the question could not be put" — over a tree the command had
+// already half-renamed. A caller who trusts that status does not even know to
+// look.
+func TestAParseErrorLateLeavesTheEarlierFilesAlone(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "a_good.go")
+	bad := filepath.Join(dir, "b_bad.go")
+	body := "package a\n\n// pkgx here\nfunc a() {}\n"
+	for p, src := range map[string]string{good: body, bad: "package a\nfunc broken( {\n"} {
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code, _, _ := drive(t, "--retired", "pkgx=zpkgx", "--write", dir); code != 2 {
+		t.Fatalf("code = %d, want 2", code)
+	}
+	if got := read(t, good); got != body {
+		t.Errorf("the readable file was rewritten before the unreadable one was reached:\n%s", got)
+	}
+}
+
+// ⛔⛔ A DIRECTIVE IS A COMMENT TO THE PARSER AND IS NOT PROSE. Its operands
+// are paths, identifiers and command lines — the two categories this command
+// refuses to touch as string literals, arriving through the one door it
+// trusts. //go:embed assets/pkgx.json renamed is a build that fails with "no
+// matching files".
+func TestADirectiveIsNotProse(t *testing.T) {
+	dir, p := write(t, `package a
+
+import _ "embed"
+
+// pkgx holds it.
+//
+//go:embed pkgx.json
+var blob string
+
+//go:generate pkgx gen ./...
+//go:linkname pkgxHook runtime.pkgxHook
+func m() {}
+`)
+	code, out, _ := drive(t, "--retired", "pkgx=zpkgx", "--write", dir)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (the prose line); out %q", code, out)
+	}
+	got := read(t, p)
+	for _, keep := range []string{"//go:embed pkgx.json", "//go:generate pkgx gen", "//go:linkname pkgxHook runtime.pkgxHook"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("a directive was rewritten; %q is gone:\n%s", keep, got)
+		}
+	}
+	if !strings.Contains(got, "// zpkgx holds it.") {
+		t.Errorf("the prose above it was not renamed:\n%s", got)
+	}
+}
+
+// ⛔ AND THE CGO PREAMBLE IS C SOURCE, not English. The `// #` test catches
+// the preprocessor lines; a typedef or a C comment carries no marker of its
+// own, so the preamble is excluded as a whole.
+func TestTheCgoPreambleIsCSourceAndNotProse(t *testing.T) {
+	dir, p := write(t, `package a
+
+// #include "pkgx/shim.h"
+// typedef struct pkgx_t pkgx_t;
+// /* the pkgx handle */
+import "C"
+
+// pkgx wraps it.
+func n() {}
+`)
+	if code, out, _ := drive(t, "--retired", "pkgx=zpkgx", "--write", dir); code != 1 {
+		t.Fatalf("code = %d, want 1; out %q", code, out)
+	}
+	got := read(t, p)
+	for _, keep := range []string{`// #include "pkgx/shim.h"`, "// typedef struct pkgx_t pkgx_t;", "// /* the pkgx handle */"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("the cgo preamble was rewritten; %q is gone:\n%s", keep, got)
+		}
+	}
+	if !strings.Contains(got, "// zpkgx wraps it.") {
+		t.Errorf("the prose below it was not renamed:\n%s", got)
+	}
+}
+
+// ⛔⛔ AN ADDRESS IN A COMMENT IS STILL AN ADDRESS. ghcr.io/go-pkgx/packages is
+// LIVE: GitHub's container packages are org-scoped and did not follow the
+// repository transfer. Renaming it in prose names an organisation that does
+// not exist, which is how an empty registry shipped in v0.64.0.
+func TestAKeptAddressIsNotRenamed(t *testing.T) {
+	dir, p := write(t, `package a
+
+// Bottles live at ghcr.io/go-pkgx/packages, and pkgx fetches them.
+func o() {}
+`)
+	if code, out, _ := drive(t, "--retired", "pkgx=zpkgx",
+		"--keep", "ghcr.io/go-pkgx/packages", "--write", dir); code != 1 {
+		t.Fatalf("code = %d, want 1; out %q", code, out)
+	}
+	got := read(t, p)
+	if !strings.Contains(got, "ghcr.io/go-pkgx/packages") {
+		t.Errorf("a live address was rewritten:\n%s", got)
+	}
+	if !strings.Contains(got, "and zpkgx fetches them") {
+		t.Errorf("the mention beside it was not renamed:\n%s", got)
+	}
+}
+
+// ⛔⛔ THE DOUBLED-FORM COUNT IS NOT DEAD CODE, and this is the measurement
+// that says so. One alternation makes doubling unreachable for a WORD-shaped
+// pair — but \b falls between a non-word character and a word one, so when the
+// replacement's added prefix is punctuation the boundary lands INSIDE the
+// already-renamed form and matches it again. Then the guard fires, and the
+// file is not written.
+func TestADoubledPrefixIsRefusedAndNothingIsWritten(t *testing.T) {
+	body := "package a\n\n// -bk is already the flag.\nfunc p() {}\n"
+	dir, p := write(t, body)
+	code, _, errOut := drive(t, "--retired", "bk=-bk", "--write", dir)
+	if code != 2 {
+		t.Fatalf("code = %d, want 2 (unanswerable); stderr %q", code, errOut)
+	}
+	if !strings.Contains(errOut, "doubled") {
+		t.Errorf("it did not say what it refused: %q", errOut)
+	}
+	if got := read(t, p); got != body {
+		t.Errorf("a doubled pass was written anyway:\n%s", got)
+	}
+}
+
+// ⛔ THE SAME SPELLING TWICE IS A QUESTION WITH TWO ANSWERS, and the winner
+// would be decided by a length sort that cannot separate them.
+func TestASpellingGivenTwiceIsRefused(t *testing.T) {
+	dir, _ := write(t, "package a\n")
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"two answers", []string{"--retired", "pkgx=zpkgx", "--retired", "pkgx=zpkg", dir}},
+		{"the same answer twice", []string{"--retired", "pkgx=zpkgx", "--retired", "pkgx=zpkgx", dir}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if code, _, _ := drive(t, tc.args...); code != 2 {
+				t.Errorf("code = %d, want 2", code)
+			}
+		})
+	}
+}
