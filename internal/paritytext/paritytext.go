@@ -208,7 +208,16 @@ func unquote(q string) string {
 // says", "the old text said") or an act on text ("removed", "replaced", "was:"):
 // "the maintainers said" is a person's claim, and a quoted deferral after it is
 // still a deferral.
-var citing = regexp.MustCompile(`(?i)\b(?:(?:comments?|text|docs?|docstring|godoc|readme|line|sentence|note|paragraph|section|code)\s+(?:says?|said|reads?|read|states?|stated|claims?|claimed)|(?:removes?|removed|removing|replaces?|replaced|replacing|deletes?|deleted|deleting|drops?|dropped)\s*:?|(?:was|were)\s*:)\s*$`)
+var citing = regexp.MustCompile(`(?i)\b(?:` + citedNoun + `\s+(?:says?|said|reads?|read|states?|stated|claims?|claimed|(?:was|were)\s*:)` +
+	`|(?:remov(?:es?|ed|ing)|replac(?:es?|ed|ing)|delet(?:es?|ed|ing)|drop(?:s|ped|ping)?)\s+(?:(?:the|this|that|a|an)\s+)?(?:(?:old|following)\s+)?` + citedNoun + `\s*:?)\s*$`)
+
+// citedNoun is what a frame must name: a TEXT. "Our reason was:", "dropped" with
+// no text object, or "the maintainers said" name a claim or an act, not a text.
+const citedNoun = `(?:comments?|text|docs?|docstring|godoc|readme|line|sentence|note|paragraph|section|code)`
+
+// ownText: "my note says", "our comment reads" — the author's own words are a
+// claim, never a citation.
+var ownText = regexp.MustCompile(`(?i)\b(?:my|our)\s+(?:\w+\s+)?$`)
 
 // unquoteLine applies unquote to every quotation of a line, blanking the ones
 // that cite text (their words are not the author's statement).
@@ -221,7 +230,8 @@ func unquoteLine(l string) string {
 	last := 0
 	for _, m := range idx {
 		b.WriteString(l[last:m[0]])
-		if citing.MatchString(l[:m[0]]) {
+		pre := l[:m[0]]
+		if loc := citing.FindStringIndex(pre); loc != nil && !ownText.MatchString(pre[:loc[0]]) {
 			b.WriteString(" ")
 		} else {
 			b.WriteString(unquote(l[m[0]:m[1]]))
