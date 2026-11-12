@@ -129,9 +129,25 @@ func main() {
 
 // hookMode reports whether this run answers the hook protocol, read from the
 // raw arguments because the answer has to be known BEFORE cobra parses them.
+// ⛔⛔ AND IT MUST ACCEPT EVERY SPELLING pflag DOES. The version above this one
+// listed three by hand, and review measured what that missed: `--hook=1`,
+// `--hook=t` and `--hook=TRUE` each exited 2 with a malformed --tolerance —
+// the wedge this function exists to prevent, still open, for a value pflag
+// accepts without comment.
+//
+// pflag parses a boolean flag's value with strconv.ParseBool, so this does
+// too. Guessing which spellings a library accepts is how a list of three
+// covers four cases out of seven.
 func hookMode(args []string) bool {
 	for _, a := range args {
-		if a == "--hook" || a == "-hook" || a == "--hook=true" {
+		name, value, hasValue := strings.Cut(a, "=")
+		if name != "--hook" && name != "-hook" {
+			continue
+		}
+		if !hasValue {
+			return true
+		}
+		if on, err := strconv.ParseBool(value); err == nil && on {
 			return true
 		}
 	}
@@ -199,6 +215,7 @@ func run(cmd *cobra.Command, o *options) error {
 		return cli.Unanswerable("%v", err)
 	}
 	v := judge(f.text, judgedAgainst(f), o.tolerance)
+	v.fallback = f.fallback
 	fmt.Fprintln(cli.Out(cmd), v.report(f))
 	if v.kind == stamped {
 		return nil
@@ -217,6 +234,9 @@ type aReply struct {
 	// stamp is judged against; see judgedAgainst.
 	at     time.Time
 	haveAt bool
+	// fallback records that this is an EARLIER turn's reply, reached because
+	// the newest turn produced no text at all.
+	fallback bool
 }
 
 type entry struct {
@@ -352,6 +372,7 @@ func readReply(r io.Reader) (aReply, error) {
 	// still unanswerable, and still allows.
 	if !haveReply {
 		if havePrev {
+			prev.fallback = true
 			return prev, nil
 		}
 		return aReply{}, fmt.Errorf("no reply text after the last turn the user took: the turn ended on a tool call, or the transcript holds no turn")
@@ -456,6 +477,19 @@ type verdict struct {
 	// got is the opening of the reply, quoted back so the reason names what
 	// was actually there rather than what was missing.
 	got string
+	// fallback records that this verdict is about an EARLIER reply, reached
+	// because the turn after it produced no text at all. Saying "the reply you
+	// just ended" about it would be wrong, and a refusal that names the wrong
+	// message is one nobody can act on.
+	fallback bool
+}
+
+// subject names which reply a reason is about.
+func (v verdict) subject() string {
+	if v.fallback {
+		return "An earlier reply of yours (judged now because the turn after it produced no text)"
+	}
+	return "The reply you just ended"
 }
 
 // ⛔ THE LEFT ANCHOR IS THE WHOLE CHECK. Without `^` this matches a stamp
@@ -487,8 +521,15 @@ func judge(text string, clock time.Time, tolerance time.Duration) verdict {
 	// This matters for this fleet specifically: the user writes French, where a
 	// narrow no-break space before punctuation is ordinary typography and is
 	// inserted by editors without being asked for.
-	t := foldSpaces(strings.TrimLeftFunc(text, isSpaceOrMark))
-	got := opening(t)
+	// ⛔ THE COMMENT ABOVE foldSpaces CLAIMED THE ORIGINAL WAS WHAT GOT QUOTED,
+	// AND IT WAS NOT: `got` was taken from the folded string. Review found the
+	// mismatch. Nothing downstream used a match offset, so it was a false
+	// comment rather than a bug — which is its own defect, because the next
+	// person to change this would have trusted it. The code does what the
+	// comment says now: quote the ORIGINAL, match the NORMALISED.
+	raw := strings.TrimLeftFunc(text, isSpaceOrMark)
+	t := normalise(raw)
+	got := opening(raw)
 
 	if twelveHourRe.MatchString(t) {
 		return verdict{kind: twelveHour, got: got}
@@ -535,30 +576,37 @@ func judge(text string, clock time.Time, tolerance time.Duration) verdict {
 // the whole argument for this function, in its own source.
 const byteOrderMark = rune(0xFEFF)
 
+// ⛔⛔ AND THE CLASS IS `Cf`, NOT ONE CHARACTER. The version above this one
+// named U+FEFF alone, and review measured what it still missed: U+200B (zero
+// width space), U+200F (right-to-left mark) and U+2060 (word joiner) before a
+// correct stamp were all reported MISSING. None of them is White_Space; all of
+// them are FORMAT characters, which is the category U+FEFF belongs to as well.
+//
+// Naming the one character I had seen left the class open. unicode.IsFormat is
+// the class.
 func isSpaceOrMark(r rune) bool {
-	return unicode.IsSpace(r) || r == byteOrderMark
+	return unicode.IsSpace(r) || isFormat(r)
 }
 
-// foldSpaces replaces every Unicode space with an ASCII one, so that the
-// pattern can stay written in ordinary spaces.
+// isFormat reports whether r is a Unicode FORMAT character (category Cf):
+// U+FEFF, U+200B, U+200F, U+2060 and the rest of them. There is no
+// unicode.IsFormat, which is part of why the first version named one
+// character instead of the class.
+func isFormat(r rune) bool { return unicode.Is(unicode.Cf, r) }
+
+// normalise is the string the pattern is matched against: format characters
+// removed wherever they appear, Unicode spaces folded to ASCII.
 //
-// ⛔ It folds rather than rejects. A no-break space inside `**[… CET]**` is
-// correct typography and a correct stamp; the rule is about the TIME being
-// there and being right, never about which space character separates it. A
-// gate that enforced ASCII would be enforcing something nobody wrote down.
-//
-// ⛔ It must not change the string's LENGTH, or `opening` would quote back a
-// different span than was matched. U+00A0 and U+202F are two and three bytes
-// against one, so this builds a new string for MATCHING only; the original is
-// what gets quoted.
-func foldSpaces(s string) string {
-	if !strings.ContainsFunc(s, func(r rune) bool { return r != ' ' && unicode.IsSpace(r) && r != '\n' && r != '\t' && r != '\r' }) {
-		return s
-	}
+// ⛔ A format character INSIDE the brackets is as invisible as one in front of
+// them, so removing them only at the start would leave the same defect one
+// column further in.
+func normalise(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
 		switch {
+		case isFormat(r):
+			// dropped: it has no width and no meaning here
 		case r == '\n' || r == '\t' || r == '\r':
 			b.WriteRune(r)
 		case unicode.IsSpace(r):
@@ -569,6 +617,12 @@ func foldSpaces(s string) string {
 	}
 	return b.String()
 }
+
+// Folding rather than rejecting is deliberate. A no-break space inside
+// `**[… CET]**` is correct typography and a correct stamp; the rule is about
+// the TIME being there and being right, never about which space character
+// separates it. A gate enforcing ASCII would be enforcing something nobody
+// wrote down.
 
 // opening quotes the first line of the reply, shortened, so that a reason can
 // show what was there.
@@ -601,20 +655,21 @@ const wanted = "**[2026-11-01 21:05 CET]**"
 func (v verdict) reason() string {
 	switch v.kind {
 	case missing:
-		return fmt.Sprintf("The reply you just ended did not START with the local date and time. Its first text was: %s\n"+
+		return fmt.Sprintf("%s did not START with the local date and time. Its first text was: %q\n"+
 			"CLAUDE.md's first rule: start EVERY reply with %s -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … ».\n"+
 			"⛔ What is judged is the FIRST text block of the turn, not the last: a stamp on a closing summary does not satisfy it, and text written between tool calls is where a reply begins.\n"+
-			"That text is already written and cannot be edited, so open your NEXT turn with the stamp. This reply will not be refused again.", v.got, wanted)
+			"That text is already written and cannot be edited, so open your NEXT turn with the stamp. This reply will not be refused again.",
+			v.subject(), v.got, wanted)
 	case twelveHour:
-		return fmt.Sprintf("Your reply opened on a 12-hour clock: %s\n"+
-			"CLAUDE.md asks for a 24-hour one and names this: never am/pm. Convert it (9:21 pm is 21:21) and write the reply again.", v.got)
+		return fmt.Sprintf("%s opened on a 12-hour clock: %q\n"+
+			"CLAUDE.md asks for a 24-hour one and names this: never am/pm. Convert it (9:21 pm is 21:21) and open your NEXT turn with the stamp.", v.subject(), v.got)
 	case impossibleHour:
-		return fmt.Sprintf("Your reply opened with an hour of 24 or more: %s\n"+
-			"Take the time from the latest PostToolUse hook line « Current date/time: … » and write the reply again.", v.got)
+		return fmt.Sprintf("%s opened with an hour of 24 or more: %q\n"+
+			"Take the time from the latest PostToolUse hook line « Current date/time: … » and open your NEXT turn with the stamp.", v.subject(), v.got)
 	case stale:
-		return fmt.Sprintf("Your reply is stamped %s, which is %s from the clock: %s\n"+
-			"CLAUDE.md: take it from the latest PostToolUse hook line « Current date/time: … », never from the session start date. Write the reply again with the current time.",
-			v.at.Format("2006-01-02 15:04 MST"), roundly(v.off), v.got)
+		return fmt.Sprintf("%s is stamped %s, which is %s from when it was written: %q\n"+
+			"CLAUDE.md: take it from the latest PostToolUse hook line « Current date/time: … », never from the session start date.",
+			v.subject(), v.at.Format("2006-01-02 15:04 MST"), roundly(v.off), v.got)
 	}
 	return ""
 }
@@ -682,6 +737,7 @@ func runHook(cmd *cobra.Command, o *options) error {
 		return allow(out, errOut, "%v", err)
 	}
 	v := judge(f.text, judgedAgainst(f), o.tolerance)
+	v.fallback = f.fallback
 	if v.kind == stamped {
 		clearBlocks(p.SessionID)
 		return allow(out, errOut, "")

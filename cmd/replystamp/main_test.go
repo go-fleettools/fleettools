@@ -130,6 +130,56 @@ func TestAUnicodeSpaceDoesNotMakeAStampInvisible(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE INVISIBLE CLASS IS `Cf`, NOT ONE CHARACTER. Naming U+FEFF alone left
+// the class open: review measured U+200B, U+200F and U+2060 before a correct
+// stamp all reported MISSING, with the reason showing a stamp that looks
+// right. None is White_Space; all are FORMAT characters.
+func TestEveryFormatCharacterIsInvisibleNotMissing(t *testing.T) {
+	good := stamp(clock)
+	for name, r := range map[string]rune{
+		"zero width space":      0x200B,
+		"right-to-left mark":    0x200F,
+		"word joiner":           0x2060,
+		"byte order mark":       0xFEFF,
+		"zero width non-joiner": 0x200C,
+		"soft hyphen":           0x00AD,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if v := judge(string(r)+good+"\n\nok", clock, 3*time.Hour); v.kind != stamped {
+				t.Errorf("before the stamp: %v", v.kind)
+			}
+			// ...and inside the brackets, which is as invisible and was not
+			// covered by trimming the front.
+			inside := strings.Replace(good, " ", string(r)+" ", 1)
+			if v := judge(inside+"\n\nok", clock, 3*time.Hour); v.kind != stamped {
+				t.Errorf("inside the brackets: %v", v.kind)
+			}
+		})
+	}
+}
+
+// ⛔ A refusal must SHOW an invisible character rather than print it. With %s
+// the model is handed a stamp that looks correct and told it is absent.
+func TestTheReasonQuotesWhatItFound(t *testing.T) {
+	v := judge("plain text, no stamp", clock, 3*time.Hour)
+	if !strings.Contains(v.reason(), `"plain text, no stamp"`) {
+		t.Errorf("the reason does not quote the opening: %q", v.reason())
+	}
+}
+
+// ⛔ A fallback verdict is about an EARLIER reply, and must not claim to be
+// about the one that just ended.
+func TestAFallbackVerdictSaysWhichReplyItIsAbout(t *testing.T) {
+	v := judge("no stamp", clock, 3*time.Hour)
+	if strings.Contains(v.reason(), "earlier reply") {
+		t.Error("a normal verdict claimed to be a fallback")
+	}
+	v.fallback = true
+	if !strings.Contains(v.reason(), "earlier reply") {
+		t.Errorf("a fallback verdict did not say so: %q", v.reason())
+	}
+}
+
 // ⛔ A ZONE NAME IS NOT TEN CHARACTERS. `Europe/Paris` is twelve, and the cap
 // refused it.
 func TestAnIANAZoneNameIsAZoneName(t *testing.T) {
@@ -730,11 +780,19 @@ func TestTheFallbackDoesNotInventAReply(t *testing.T) {
 // so none of the loop logic runs: `--hook --tolerance=zzz` exited 2, which a
 // Stop hook reads as a block whose reason is the flag error, unbounded.
 func TestHookModeIsDecidedBeforeTheFlagsAreParsed(t *testing.T) {
+	// ⛔ pflag parses a boolean value with strconv.ParseBool, so every
+	// spelling it accepts must be recognised here. A hand-written list of
+	// three missed --hook=1, --hook=t and --hook=TRUE, each of which exited 2
+	// with a malformed --tolerance: the wedge, still open.
 	for _, args := range [][]string{
 		{"--hook"},
 		{"--hook", "--tolerance=zzz"},
 		{"--tolerance=zzz", "--hook"},
 		{"--hook=true"},
+		{"--hook=1"},
+		{"--hook=t"},
+		{"--hook=TRUE"},
+		{"-hook=T"},
 	} {
 		if !hookMode(args) {
 			t.Errorf("hookMode(%q) = false; a hook would then fail CLOSED", args)
@@ -744,6 +802,9 @@ func TestHookModeIsDecidedBeforeTheFlagsAreParsed(t *testing.T) {
 		{"--transcript", "x.jsonl"},
 		{},
 		{"--hooks"},
+		{"--hook=false"},
+		{"--hook=0"},
+		{"--hook=zzz"},
 	} {
 		if hookMode(args) {
 			t.Errorf("hookMode(%q) = true", args)
