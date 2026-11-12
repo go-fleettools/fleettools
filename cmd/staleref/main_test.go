@@ -607,6 +607,13 @@ func TestOnlyASurprisingExemptionMakesTheTreeUnclean(t *testing.T) {
 	if !strings.Contains(declared, "UNSURE finding(s) were exempted") {
 		t.Errorf("the declared exemption was silent:\n%s", declared)
 	}
+	// ⛔ ...and it must not then call the tree clean. The same contradiction
+	// was fixed one round earlier for the hard verdicts and came back for
+	// UNSURE: "1 UNSURE finding(s) were exempted" followed by "nothing stale
+	// and nothing unsure".
+	if strings.Contains(declared, "nothing stale and nothing unsure") {
+		t.Errorf("it claimed a clean tree in the line under an exemption:\n%s", declared)
+	}
 
 	for _, was := range []verdict{stale, debt, doubled} {
 		out := report1(finding{

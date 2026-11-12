@@ -1053,7 +1053,15 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 	if exemptHard > 0 {
 		fmt.Fprintf(w, "staleref: this run is NOT a clean tree — %d STALE/DEBT/DOUBLED finding(s) were exempted by --allow, which is not what that flag is for, and the exit status cannot tell a lane about them\n", exemptHard)
 	}
-	if exemptHard == 0 && totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
+	// ⛔ AND THE CLEAN-TREE LINE IS SILENT WHENEVER ANYTHING WAS EXEMPTED, of
+	// either kind. Review caught the same contradiction I had rewritten one
+	// round earlier, reappearing for UNSURE: "1 UNSURE finding(s) were
+	// exempted" followed immediately by "nothing stale and nothing unsure".
+	// The second sentence is true of the VERDICTS and false of the tree, which
+	// is the reading it gets — and a declared exemption is still something
+	// rather than nothing.
+	if exemptHard == 0 && exemptUnsure == 0 &&
+		totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
 		// ⛔ A tree with no documentation files reports no findings, which is
 		// the same output as a clean one. The file count is what tells them
 		// apart, so it is always printed.
