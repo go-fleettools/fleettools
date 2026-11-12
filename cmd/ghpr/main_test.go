@@ -416,3 +416,24 @@ func TestAPIErrorIsQuoted(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 }
+
+func TestParityGateOnBodiesAndTitles(t *testing.T) {
+	parked := "We do not use FMA in the default kernel because it would break bit-parity.\n"
+	s := newServer(t)
+	_, err := exec(t, s, "o/r", "7", "edit", "--body-file", bodyFile(t, parked))
+	if err == nil || !strings.Contains(err.Error(), "go-fft/fft#121") || s.writes() != 0 {
+		t.Fatalf("a parked body was not refused: %v", err)
+	}
+	if _, err := exec(t, s, "o/r", "7", "edit", "--title", "perf: SIMD kernel skipped because it breaks bit-parity", "--parity-waiver", "why"); err == nil || !strings.Contains(err.Error(), "no waiver covers a title") {
+		t.Fatalf("a parked title: %v", err)
+	}
+	if _, err := exec(t, s, "o/r", "7", "edit", "--body-file", bodyFile(t, "Output unchanged, bit-identical.\n")); err != nil {
+		t.Fatalf("a mention was refused: %v", err)
+	}
+	if _, err := exec(t, s, "o/r", "7", "edit", "--body-file", bodyFile(t, parked), "--parity-waiver", "callers need identical bits"); err != nil {
+		t.Fatalf("the waiver did not let it through: %v", err)
+	}
+	if !strings.Contains(last(s), "bit-parity waiver") || !strings.Contains(last(s), "callers need identical bits") {
+		t.Errorf("the reason was not stamped: %s", last(s))
+	}
+}
