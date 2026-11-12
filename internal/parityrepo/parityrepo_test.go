@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/go-fleettools/fleettools/internal/paritytext"
 )
 
 // floaty makes a repository a floating-point one (FloatMin words).
@@ -359,5 +361,119 @@ func TestGoCommentsKeepLines(t *testing.T) {
 	got := strings.Split(goComments([]byte(src)), "\n")
 	if len(got) < 6 || got[2] != "one" || got[3] != "two" || got[4] != "three" || got[5] != "four" {
 		t.Errorf("%q", got)
+	}
+}
+
+// The marker does not excuse committed docs that still park a performance gap on
+// bit identity; a measured bound in the paragraph does.
+func TestMarkerDoesNotExcuseParkedDocs(t *testing.T) {
+	good := map[string]string{
+		"README.md":    floaty + "\n" + contract,
+		"a_test.go":    boundTest,
+		"docs/perf.md": "| SLSQP trsm | bit for bit against SciPy's Fortran | **left** |\n",
+	}
+	r := check(t, good)
+	if r.Verdict != Fail || len(r.Parked) != 1 || r.Parked[0].File != filepath.Join("docs", "perf.md") ||
+		r.Parked[0].Line != 1 || r.Parked[0].Cue != "left-on-parity" || !r.Marker.Complete() {
+		t.Fatalf("%+v", r)
+	}
+	// The same repository without the parked sentence passes (the control).
+	delete(good, "docs/perf.md")
+	if r := check(t, good); r.Verdict != Pass || len(r.Parked) != 0 {
+		t.Errorf("control: %+v", r)
+	}
+	// A measured bound in the same paragraph exempts it.
+	good["docs/perf.md"] = "| SLSQP trsm | bit for bit against SciPy's Fortran | **left**; error 3e-16 against double-double |\n"
+	if r := check(t, good); r.Verdict != Pass {
+		t.Errorf("bound: %+v", r)
+	}
+	// Godoc is scanned, with its own line.
+	r = check(t, map[string]string{
+		"README.md": floaty + "\n" + contract, "a_test.go": boundTest,
+		"a.go": "package p\n\n// We skip the SIMD kernel because it would break bit parity.\nfunc F() {}\n",
+	})
+	if r.Verdict != Fail || len(r.Parked) != 1 || r.Parked[0].Line != 3 || r.Parked[0].Cue != "declined-because-parity" {
+		t.Errorf("godoc: %+v", r)
+	}
+}
+
+// An exact domain is not scanned, and neither is a repository that is not
+// floating-point.
+func TestParkedDocsNeedAFloatingPointRepository(t *testing.T) {
+	parked := "| trsm | bit for bit against SciPy's Fortran | **left** |\n"
+	if r := check(t, map[string]string{"README.md": parked}); r.Verdict != Pass || len(r.Parked) != 0 {
+		t.Errorf("no float words: %+v", r)
+	}
+	r := check(t, map[string]string{"README.md": floaty + parked + "\n## Accuracy contract\n\nDomain: exact - results are integers here\n"})
+	if r.Verdict != Pass || len(r.Parked) != 0 {
+		t.Errorf("exact domain: %+v", r)
+	}
+}
+
+// Parked sentences are certain evidence: they outrank UNREAD.
+func TestParkedOutranksUnread(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	root := repo(t, map[string]string{"README.md": floaty + "| trsm | bit for bit against SciPy's Fortran | **left** |\n", "docs/a.md": "x\n"})
+	locked := filepath.Join(root, "docs", "a.md")
+	os.Chmod(locked, 0)
+	t.Cleanup(func() { os.Chmod(locked, 0o644) })
+	if r, err := Check(root); err != nil || r.Verdict != Fail || len(r.Unread) != 1 {
+		t.Errorf("%+v %v", r, err)
+	}
+}
+
+// A parking sentence INSIDE the marker section is still read: the section is
+// where an author would put it.
+func TestParkedSentenceInsideTheMarkerSection(t *testing.T) {
+	sectioned := contract + "| trsm | bit for bit against SciPy's Fortran | **left** |\n"
+	r := check(t, map[string]string{"README.md": floaty + "\n" + sectioned, "a_test.go": boundTest})
+	if r.Verdict != Fail || len(r.Parked) != 1 {
+		t.Errorf("%+v", r)
+	}
+	if r := check(t, map[string]string{"README.md": floaty + "\n" + contract, "a_test.go": boundTest}); r.Verdict != Pass {
+		t.Errorf("control: %+v", r)
+	}
+}
+
+// A surface the scanner would only half read is UNREAD, not PASS.
+func TestOversizedSurfaceIsUnread(t *testing.T) {
+	big := strings.Repeat("A line of prose with nothing to find.\n", (paritytext.MaxText/38)+10)
+	if len(big) <= paritytext.MaxText || len(big) >= MaxFile {
+		t.Fatalf("fixture size %d", len(big))
+	}
+	r := check(t, map[string]string{"README.md": "Fine.\n", "docs/big.md": big})
+	if r.Verdict != Unread || len(r.Unread) != 1 || !strings.Contains(r.Unread[0], "docs/big.md") {
+		t.Errorf("%+v", r)
+	}
+	// Go comments count by the comment text, not the source.
+	src := "package p\n" + strings.Repeat("// "+strings.Repeat("x", 70)+"\n", (paritytext.MaxText/70)+100)
+	if r := check(t, map[string]string{"README.md": "Fine.\n", "a.go": src}); r.Verdict != Unread {
+		t.Errorf("go: %+v", r)
+	}
+}
+
+// The MaxText -> UNREAD rule, paired: just under the bound is read (PASS), just
+// over is UNREAD.
+func TestSurfaceJustUnderMaxTextIsRead(t *testing.T) {
+	line := "A line of prose with nothing to find.\n"
+	under := strings.Repeat(line, (paritytext.MaxText/len(line))-1)
+	if len(under) > paritytext.MaxText {
+		t.Fatalf("fixture size %d", len(under))
+	}
+	if r := check(t, map[string]string{"README.md": "Fine.\n", "docs/big.md": under}); r.Verdict != Pass || len(r.Unread) != 0 {
+		t.Errorf("%+v", r)
+	}
+}
+
+func TestSurfaceJustOverMaxTextIsUnread(t *testing.T) {
+	line := "A line of prose with nothing to find.\n"
+	over := strings.Repeat(line, (paritytext.MaxText/len(line))+2)
+	if len(over) <= paritytext.MaxText {
+		t.Fatalf("fixture size %d", len(over))
+	}
+	if r := check(t, map[string]string{"README.md": "Fine.\n", "docs/big.md": over}); r.Verdict != Unread {
+		t.Errorf("%+v", r)
 	}
 }

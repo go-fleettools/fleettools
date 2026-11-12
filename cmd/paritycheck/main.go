@@ -53,6 +53,14 @@ in a repository whose prose and godoc use floating-point words (float32,
 float64, floating-point, ULP, FMA, NumPy, SciPy, FFTW, BLAS, IEEE-754) at least
 5 times, so most such repositories never need the line.
 
+  REFUSED a README, docs/ or godoc sentence that the text-mode gate would refuse
+          (it parks a performance change on bit identity, no measured bound in
+          its paragraph) makes the repository FAIL even with the marker present;
+          there is no waiver in repo mode: rewrite the sentence to cite its
+          measurement. Printed as file:line [cue]. Not read when the marker
+          says "Domain: exact - <why>", or in a repository that is not
+          floating-point.
+
   PASS    no bit-identity contract is stated, or the marker is complete;
   FAIL    bit identity is stated (a sentence of README*, docs/ or a non-test Go
           comment saying bit-identical, bit-exact, bit-for-bit, bit parity...,
@@ -136,6 +144,9 @@ func repoCmd() *cobra.Command {
 
 func printRepo(w io.Writer, root string, r *parityrepo.Report) {
 	fmt.Fprintf(w, "%s %s: %s\n", r.Verdict, root, r.Reason)
+	for _, s := range r.Parked {
+		fmt.Fprintf(w, "  REFUSED %s:%d [%s]: %s\n", s.File, s.Line, s.Cue, s.Sentence)
+	}
 	for _, s := range r.Statements {
 		fmt.Fprintf(w, "  statement %s:%d: %s\n", s.File, s.Line, s.Sentence)
 	}
