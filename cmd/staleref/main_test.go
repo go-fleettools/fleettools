@@ -390,6 +390,115 @@ func TestARetiredNameDoesNotMatchTheNameThatReplacedIt(t *testing.T) {
 // TestAnEnvironmentVariableIsDecidedBeforeTheBareName: `$BK_CC` is ONE
 // finding about a variable, not a bare `bk` with the rest of its name cut off.
 //
+// ⛔⛔ TestTheDoubledReplacementIsSeen is the hole ORDER opens, and the one
+// every other rule here is blind to by construction.
+//
+// Measured 2026-11-11 renaming zbk: `Pkgx`→`Zpkgx` ran before `pkgx`→`zpkgx`,
+// the second rule fired inside the first's output, and `ZpkgxBin` became
+// `ZzpkgxBin`. It COMPILED — a consistently doubled identifier is a valid
+// identifier — and every sweep called the file clean, correctly by its own
+// rule: `Zzpkgx` contains `zpkgx`, the CORRECT name, and the retired `pkgx` is
+// nowhere in it.
+//
+// ⛔ It states the STEM's replacement (`pkgx=zpkgx`), which retiredClassify
+// deliberately does not: without it there is no replacement to double, and the
+// stem's is never guessed (TestTheStemsReplacementIsNotGuessed). That is also
+// how the fleet invokes this command, and the first version of this test did
+// not — it reported the two `zpkgx` cases as clean and was right to.
+func TestTheDoubledReplacementIsSeen(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil,
+		[]string{"pkgx=zpkgx", "bk=zbk"}, map[string]bool{})
+	for _, tc := range []struct{ line, want string }{
+		{"dirs = append(dirs, ZzpkgxBin)", "Zpkgx"},
+		{"the zzpkgx binary", "zpkgx"},
+		{"export ZZBK_TARGET=x86_64", "ZBK"},
+		{"zzbk build", "zbk"},
+	} {
+		got := c.classifyLine("README.md", 1, tc.line)
+		if len(got) != 1 {
+			t.Errorf("%q: %d finding(s), want 1: %+v", tc.line, len(got), got)
+			continue
+		}
+		if got[0].Verdict != doubled {
+			t.Errorf("%q: verdict %s, want DOUBLED", tc.line, got[0].Verdict)
+		}
+		if got[0].Suggest != tc.want {
+			t.Errorf("%q: suggests %q, want %q", tc.line, got[0].Suggest, tc.want)
+		}
+	}
+}
+
+// ⛔ THE CORRECT NAME MUST NOT BE DOUBLED-MATCHED. `zpkgx` is the replacement,
+// not the replacement twice; a rule that fired on it would report every
+// migrated line as damage — the failure in `a-sweep-that-measured-its-own-regex`,
+// one layer further in.
+func TestTheCorrectNameIsNotDoubled(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil,
+		[]string{"pkgx=zpkgx", "bk=zbk", "pkgm=zpkgm"}, map[string]bool{})
+	for _, line := range []string{
+		"dirs = append(dirs, ZpkgxBin)",
+		"run `zpkgx node@22`",
+		"export ZBK_TARGET=x86_64",
+		"`zbk build` makes a bottle",
+		"the zpkgm closure",
+	} {
+		for _, f := range c.classifyLine("README.md", 1, line) {
+			if f.Verdict == doubled {
+				t.Errorf("%q: reported as doubled: %+v", line, f)
+			}
+		}
+	}
+}
+
+// ⛔ A REPLACEMENT THAT IS NOT ITS RETIRED SPELLING PLUS A PREFIX HAS NO
+// DOUBLED FORM, and one is not invented: the prefix would have to be guessed,
+// and a guessed finding is one nobody can act on.
+func TestOnlyAPrefixedRenameHasADoubledForm(t *testing.T) {
+	for _, tc := range []struct {
+		was, now, want string
+		ok             bool
+	}{
+		{"pkgx", "zpkgx", "zzpkgx", true},
+		{"bk", "zbk", "zzbk", true},
+		{"BK_", "ZBK_", "ZZBK_", true},
+		{"pkgx", "", "", false},         // no replacement stated
+		{"pkgx", "pkgx", "", false},     // unchanged
+		{"foo", "bar", "", false},       // unrelated word
+		{"foo", "fo", "", false},        // shorter
+		{"", "zpkgx", "", false},        // no retired spelling
+		{"pkgx", "zpkgxtra", "", false}, // the old name is not the TAIL
+	} {
+		got, ok := doubledForm(tc.was, tc.now)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("doubledForm(%q, %q) = %q, %v; want %q, %v",
+				tc.was, tc.now, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// ⛔ A DOUBLED FINDING SURVIVES --quiet AND FAILS. Its COUNT is the one number
+// that tells a reader nothing: nobody is looking for it, nothing else can see
+// it, and it names a file that compiles and passes its tests — so it has to
+// arrive as a location.
+func TestADoubledFindingSurvivesQuietAndFails(t *testing.T) {
+	byRoot := map[string][]finding{"zbk": {{
+		File: "cmd/zbk/builder.go", Line: 12, Verdict: doubled,
+		Kind: "zpkgx doubled", Text: "ZzpkgxBin", Suggest: "Zpkgx",
+	}}}
+	var b strings.Builder
+	clean := report(&b, byRoot, map[string]int{"zbk": 1}, false, true)
+	if clean {
+		t.Error("a doubled finding reported clean")
+	}
+	out := b.String()
+	if !strings.Contains(out, "ZzpkgxBin") {
+		t.Errorf("--quiet reduced the doubled finding to a count:\n%s", out)
+	}
+	if !strings.Contains(out, "DOUBLED") {
+		t.Errorf("the summary does not name DOUBLED:\n%s", out)
+	}
+}
+
 // ⛔ Its verdict used to be CITATION here, on the grounds that the code reads
 // it. That assertion encoded the mistake DEBT exists for: the code being on
 // the old naming is the evidence the migration is unfinished, not a reason to

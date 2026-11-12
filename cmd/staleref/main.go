@@ -22,10 +22,17 @@
 // theirs is a question about the sentence. So this reports, with the line, and
 // a person decides. What it buys is that nobody has to FIND them.
 //
-// Three verdicts, and the third is the honest one:
+// The verdicts, of which UNSURE is the honest one and DOUBLED the one nothing
+// else here can reach:
 //
 //	STALE     names our own old identity — an org path, our own old command,
 //	          our own old environment variable
+//	DEBT      the code reads it AND its name is retired: the CODE is the half
+//	          to change, and --code-var does not excuse it
+//	DOUBLED   the replacement carries its own added prefix twice, because the
+//	          rename ran over its own output: `ZpkgxBin` → `ZzpkgxBin`. It
+//	          COMPILES, and looking for the RETIRED spelling cannot find it,
+//	          because what is there is the CORRECT name with a letter in front
 //	CITATION  names upstream — their org, their domain, their tool as theirs
 //	UNSURE    says the old token with nothing around it to decide by
 //
@@ -46,6 +53,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
@@ -125,7 +133,41 @@ const (
 	citation verdict = "CITATION"
 	unsure   verdict = "UNSURE"
 	debt     verdict = "DEBT"
+	doubled  verdict = "DOUBLED"
 )
+
+// ⛔⛔ DOUBLED IS THE ONE SHAPE A RETIRED-NAME SWEEP STRUCTURALLY CANNOT SEE.
+//
+// Boundaries protect the SOURCE from over-matching. Ordering protects the
+// RESULT from being matched again, and nothing here was watching it.
+//
+// Measured 2026-11-11, renaming zbk's 410 occurrences. The capitalised pair ran
+// first — `Pkgx`→`Zpkgx` — and the lowercase pair second, `pkgx`→`zpkgx`. The
+// new name `Zpkgx` CONTAINS the old one, so the second rule fired inside the
+// first rule's output:
+//
+//	ZpkgxBin  →  ZzpkgxBin
+//
+// ⛔ AND IT COMPILED. `go build ./...` returned 0, because a consistently
+// doubled identifier is a valid identifier. The tests passed. Every sweep in
+// this command reported the file clean — correctly, by its own rule: `Zzpkgx`
+// contains `zpkgx`, which is the CORRECT name, and the retired name `pkgx` is
+// nowhere in it. Looking for what was retired can never find this.
+//
+// What CAN find it is the pair itself. In every rename this fleet has done the
+// replacement is the retired spelling with something in front of it — `z`+`pkgx`,
+// `Z`+`BK_` — so the damage a wrong order does has a fixed shape, `prefix + now`,
+// computable from `was=now` and from nothing else. That is what this looks for.
+//
+// ⛔ The match is deliberately UNANCHORED on both sides. The real occurrence was
+// `ZzpkgxBin`: a right boundary would have missed it, and a left boundary would
+// miss `getZzpkgxBin`. The string it looks for is specific enough that this
+// costs nothing — no English word, path or identifier contains `zzpkgx`.
+//
+// ⛔ A pair whose replacement is NOT its retired spelling with a prefix gets no
+// pattern and is skipped, rather than guessed at. `pkgx`→`zpkgx` qualifies;
+// a rename to an unrelated word has no doubled form to look for, and inventing
+// one would report findings nobody can act on.
 
 // ⛔⛔ DEBT EXISTS BECAUSE --code-var WAS THE INSTRUMENT OF A REPEATED MISTAKE.
 //
@@ -186,6 +228,11 @@ type retired struct {
 	old, new string
 	bare     *regexp.Regexp
 	envVar   *regexp.Regexp
+	// dbl matches the replacement with its own added prefix in front of it
+	// again — the damage a wrong rename ORDER does. nil when the replacement
+	// is not the retired spelling plus a prefix.
+	dbl     *regexp.Regexp
+	dblText string
 }
 
 // classifier holds the patterns, built from --old/--new/--upstream/--retired so
@@ -310,12 +357,38 @@ func newClassifier(old, new string, upstream, keep, alsoRetired []string, codeVa
 // newRetired compiles the two patterns one retired spelling needs: its
 // environment variables, and the bare word.
 func newRetired(was, now string) retired {
-	return retired{
+	r := retired{
 		old:    was,
 		new:    now,
 		envVar: regexp.MustCompile(`\$?\b` + strings.ToUpper(was) + `_[A-Z0-9_]+\b`),
 		bare:   regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(was) + `\b`),
 	}
+	if d, ok := doubledForm(was, now); ok {
+		r.dblText = d
+		r.dbl = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(d))
+	}
+	return r
+}
+
+// doubledForm returns what `now` looks like when the rename ran in the wrong
+// order: its own added prefix in front of it a second time.
+//
+// It answers only when `now` IS `was` with something in front of it, because
+// that is the only case where the prefix can be read off the pair rather than
+// guessed. `pkgx`→`zpkgx` gives `zzpkgx`; `bk`→`zbk` gives `zzbk`; a rename to
+// an unrelated word gives nothing.
+func doubledForm(was, now string) (string, bool) {
+	if was == "" || now == "" || len(now) <= len(was) {
+		return "", false
+	}
+	if !strings.EqualFold(now[len(now)-len(was):], was) {
+		return "", false
+	}
+	prefix := now[:len(now)-len(was)]
+	if prefix == "" {
+		return "", false
+	}
+	return prefix + now, true
 }
 
 // classifyLine returns every finding on one line.
@@ -342,6 +415,30 @@ func (c *classifier) classifyLine(file string, n int, line string) []finding {
 		return true
 	}
 
+	// ⛔ THE DOUBLED REPLACEMENT IS MATCHED BEFORE ANYTHING ELSE, because it is
+	// the one finding every other rule here is blind to by construction: it
+	// contains the CORRECT name and not the retired one. Covering its span also
+	// stops the rest of the line's correct name being reported underneath it.
+	for _, r := range c.retired {
+		if r.dbl == nil {
+			continue
+		}
+		for _, m := range r.dbl.FindAllStringIndex(line, -1) {
+			if !free(m[0], m[1]) {
+				continue
+			}
+			cover(m[0], m[1])
+			was := line[m[0]:m[1]]
+			out = append(out, finding{File: file, Line: n, Verdict: doubled,
+				Kind: fmt.Sprintf(
+					"%s doubled: the rename ran %s→%s over its own output — it COMPILES, and a search for %q cannot find it",
+					r.new, r.old, r.new, r.old),
+				Text: strings.TrimSpace(trimAround(line, m[0], m[1])),
+				// The repair is the replacement once, with whatever case the
+				// damaged text carried kept on its first letter.
+				Suggest: matchCase(was, r.new)})
+		}
+	}
 	// ⛔ KEEP IS MATCHED FIRST OF ALL, before upstream and before the org path.
 	// `ghcr.io/go-pkgx/packages` contains the old org path, so anything that
 	// looked at the org path first would report the live registry as a dead
@@ -416,6 +513,41 @@ func (c *classifier) classifyLine(file string, n int, line string) []finding {
 		}
 	}
 	return out
+}
+
+// matchCase returns s in the case SHAPE of src, so that the repair offered for
+// `ZzpkgxBin` reads `Zpkgx` and the one for `ZZBK_TARGET` reads `ZBK`.
+//
+// ⛔ The first letter is not enough, and that was the first version: an
+// environment variable is all capitals, so taking only the lead gave `Zbk` for
+// `ZZBK` — a suggestion is a string somebody pastes, so a wrongly-cased one
+// hands back a second defect in place of the first.
+func matchCase(src, s string) string {
+	if src == "" || s == "" {
+		return s
+	}
+	if allUpper(src) {
+		return strings.ToUpper(s)
+	}
+	r := []rune(strings.ToLower(s))
+	if unicode.IsUpper([]rune(src)[0]) {
+		r[0] = unicode.ToUpper(r[0])
+	}
+	return string(r)
+}
+
+// allUpper reports whether src has letters and none of them is lower case.
+func allUpper(src string) bool {
+	letters := false
+	for _, r := range src {
+		if unicode.IsLower(r) {
+			return false
+		}
+		if unicode.IsUpper(r) {
+			letters = true
+		}
+	}
+	return letters
 }
 
 // trimAround returns the match with a little of its sentence, which is what
@@ -567,8 +699,8 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 			counts[f.Verdict]++
 			totals[f.Verdict]++
 		}
-		fmt.Fprintf(w, "%s: %d doc file(s), %d STALE, %d DEBT, %d UNSURE, %d CITATION\n",
-			root, files[root], counts[stale], counts[debt], counts[unsure], counts[citation])
+		fmt.Fprintf(w, "%s: %d doc file(s), %d DOUBLED, %d STALE, %d DEBT, %d UNSURE, %d CITATION\n",
+			root, files[root], counts[doubled], counts[stale], counts[debt], counts[unsure], counts[citation])
 		for _, f := range byRoot[root] {
 			if f.Verdict != citation {
 				clean = false
@@ -576,7 +708,13 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 			// ⛔ A DEBT FINDING IS ALWAYS LISTED, even under --quiet. --quiet
 			// trades findings for counts, and the one finding that must not be
 			// reducible to a count is the one declaring a flag made disappear.
-			if f.Verdict != debt && (quiet || (f.Verdict == citation && !showCitations)) {
+			//
+			// A DOUBLED finding is always listed for the opposite reason: it is
+			// the one finding whose COUNT is uninformative. Nobody is looking
+			// for it, nothing else can see it, and it names a file that compiles
+			// and passes its tests — so it has to arrive as a location.
+			if f.Verdict != debt && f.Verdict != doubled &&
+				(quiet || (f.Verdict == citation && !showCitations)) {
 				continue
 			}
 			suffix := ""
@@ -587,12 +725,15 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 				f.Verdict, f.File, f.Line, f.Kind, suffix, f.Text)
 		}
 	}
-	fmt.Fprintf(w, "\n%d STALE, %d DEBT, %d UNSURE, %d CITATION across %d tree(s)\n",
-		totals[stale], totals[debt], totals[unsure], totals[citation], len(roots))
+	fmt.Fprintf(w, "\n%d DOUBLED, %d STALE, %d DEBT, %d UNSURE, %d CITATION across %d tree(s)\n",
+		totals[doubled], totals[stale], totals[debt], totals[unsure], totals[citation], len(roots))
+	if totals[doubled] > 0 {
+		fmt.Fprintf(w, "staleref: %d name(s) carry their replacement's prefix twice — a rename that ran over its own output. It compiles, the tests pass, and looking for the RETIRED spelling cannot find it; re-run the rename with the lowercase pairs first\n", totals[doubled])
+	}
 	if totals[debt] > 0 {
 		fmt.Fprintf(w, "staleref: %d name(s) the code reads and the rename retired — declaring them with --code-var does not make them correct, it records that the CODE has not been migrated\n", totals[debt])
 	}
-	if totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 {
+	if totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
 		// ⛔ A tree with no documentation files reports no findings, which is
 		// the same output as a clean one. The file count is what tells them
 		// apart, so it is always printed.
