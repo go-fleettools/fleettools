@@ -59,6 +59,14 @@ float64, floating-point, ULP, FMA, NumPy, SciPy, FFTW, BLAS, IEEE-754) at least
           not negated, not an option) and the marker is not complete;
   UNREAD  a surface could not be read. UNREAD is not PASS.
 
+KNOWN LIMITS (repo mode). A sentence is not parsed for what the identity is WITH:
+an equality between two paths of the repository's own code ("the vector results
+are bit-identical to calling the scalar function", go-numerics/special nd.go)
+counts as a statement, though it is not a contract against a reference. It is
+documented here rather than guessed at; say it with "Domain: exact - <why>" if
+the results really are exact, or state the accuracy contract. go-simd/strconv
+(exact parsing of floats) needs the same line.
+
 THE GATE (text mode). A text is REFUSED when a sentence defers or declines a
 performance change because it breaks bit identity ("we skip FMA because it
 would break bit-parity", "that is a contract change, so it needs a decision"),

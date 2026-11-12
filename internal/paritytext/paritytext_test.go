@@ -3,6 +3,7 @@ package paritytext
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // refusing are texts that defer or decline a performance change because of bit
@@ -52,8 +53,8 @@ var passing = []string{
 	"The outputs are no longer bit-identical to main (a different FFT); the gate is accuracy: TestAACAccuracy, TestAACMDCTMatchesDefinition, conformance, copycheck 0, covergate, race, vet (386) green.",
 	"The outputs are no longer bit-identical to main, which is fine: the AVX2 kernel is 2x faster.",
 	// A quote of the rule is not a deferral.
-	`The gate refuses "we skip FMA because it would break bit-parity" unless the text cites a bound.`,
-	"The gate refuses “the SIMD kernel is skipped because it breaks bit-parity”.",
+	`The gate enforces "a performance gap is never parked because it would break bit parity" unless the text cites a bound; we skip the SIMD kernel.`,
+	"The rule reads “A performance gap is never parked because it would break bit parity.”",
 	// The "because" is about something else; parity is only mentioned.
 	"We kept the scalar path because the SIMD kernel was slower on M4; output is bit-identical either way.",
 	"We do not use FMA here; output is bit-identical.",
@@ -148,6 +149,98 @@ func TestBoundMustBeInTheFindingsParagraph(t *testing.T) {
 	}
 	if got := Scan("- " + deferral + "\n- " + bound); len(got) != 1 {
 		t.Errorf("a bound in the next list item excused it: %v", got)
+	}
+}
+
+// Quoting is not a bypass: only the rule's own summary is exempt.
+func TestQuotingADeferralIsStillADeferral(t *testing.T) {
+	for _, s := range []string{
+		`We do not use the SIMD kernel "because it would break bit parity", per the maintainers.`,
+		"We do not use the SIMD kernel “because it would break bit parity”, per the maintainers.",
+		`The maintainers said "we skip the SIMD kernel because it would break bit parity".`,
+	} {
+		if len(Scan(s)) == 0 {
+			t.Errorf("quoting hid a deferral: %q", s)
+		}
+	}
+	quote := `The rule is "` + RuleSummary + `".`
+	if got := Scan(quote + " We skip the SIMD kernel."); len(got) != 0 {
+		t.Errorf("an exact quote of the rule was refused: %v", got)
+	}
+	if len(Scan(`We skip the SIMD kernel: "`+strings.ToUpper(RuleSummary)+`" because it would break bit parity.`)) == 0 {
+		t.Error("a quote followed by a deferral passed")
+	}
+}
+
+// A worst case the size MaxText allows must scan in well under a second: the
+// bound was once recomputed per finding, which made one 1 MiB paragraph take
+// minutes.
+func TestScanIsNotQuadratic(t *testing.T) {
+	unit := "We skip the SIMD kernel because it would break bit parity and the radix gap. "
+	text := strings.Repeat(unit, MaxText/len(unit))
+	start := time.Now()
+	got := Scan(text)
+	d := time.Since(start)
+	t.Logf("Scan of %d bytes: %v, %d findings", len(text), d, len(got))
+	budget := time.Second
+	if raceOn {
+		budget = 10 * time.Second
+	}
+	if d > budget {
+		t.Fatalf("1 MiB of findings took %v (budget %v)", d, budget)
+	}
+	if len(got) < 10000 {
+		t.Errorf("only %d findings: the worst case was not exercised", len(got))
+	}
+	start = time.Now()
+	if _, err := Gate(text, "because", "--parity-waiver"); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > budget {
+		t.Errorf("Gate took %v", d)
+	}
+	// Four times the text must cost well under sixteen times the time: a
+	// quadratic scan fails this on any machine, race detector or not.
+	unitText := func(n int) time.Duration {
+		s := strings.Repeat(unit, n)
+		t0 := time.Now()
+		Scan(s)
+		return time.Since(t0)
+	}
+	small, big := unitText(1500), unitText(6000)
+	if big > 10*small+50*time.Millisecond {
+		t.Errorf("4x the text took %v vs %v: not linear", big, small)
+	}
+}
+
+// Each cue is paired: the sentence fires, and the same sentence minus that cue
+// passes, so removing the cue from the code breaks the passing half.
+func TestPairedCues(t *testing.T) {
+	for _, c := range []struct{ cue, fires, passes string }{
+		{"because governs the parity clause",
+			"We skip the SIMD kernel because it breaks bit parity.",
+			"We skip the SIMD kernel because it is slower; it keeps bit parity."},
+		{"a performance cue",
+			"The SIMD kernel would break bit-identical output.",
+			"This would break bit-identical output."},
+		{"a decline",
+			"We skip the SIMD kernel because it breaks bit parity.",
+			"We use the SIMD kernel because it breaks bit parity records."},
+		{"a measured bound in the paragraph",
+			"We skip the SIMD kernel because it breaks bit parity.",
+			"We skip the SIMD kernel because it breaks bit parity. Measured error 3e-16."},
+		{"no longer",
+			"No bit-identical way exists.",
+			"No longer bit-identical to main."},
+	} {
+		t.Run(c.cue, func(t *testing.T) {
+			if len(Scan(c.fires)) == 0 {
+				t.Errorf("the firing sentence passed: %q", c.fires)
+			}
+			if got := Scan(c.passes); len(got) != 0 {
+				t.Errorf("the passing sentence fired: %q %v", c.passes, got)
+			}
+		})
 	}
 }
 

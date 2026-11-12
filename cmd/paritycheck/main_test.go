@@ -79,6 +79,24 @@ func TestRepoUnreadShowsItsSurface(t *testing.T) {
 	}
 }
 
+// A FAIL read off part of a repository is UNREAD while a surface could not be
+// read: status 2, not 1.
+func TestRepoUnreadOutranksFail(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	root := write(t, map[string]string{"README.md": floaty + "Output is bit-identical to the reference.\n", "docs/a.md": "x\n"})
+	locked := filepath.Join(root, "docs", "a.md")
+	if code, out, _ := drive("repo", root); code != 1 || !strings.HasPrefix(out, "FAIL ") {
+		t.Fatalf("control: %d %q", code, out)
+	}
+	os.Chmod(locked, 0)
+	t.Cleanup(func() { os.Chmod(locked, 0o644) })
+	if code, out, _ := drive("repo", root); code != 2 || !strings.HasPrefix(out, "UNREAD ") || !strings.Contains(out, "statement README.md:2") {
+		t.Errorf("%d %q", code, out)
+	}
+}
+
 func TestRepoJSON(t *testing.T) {
 	fail := write(t, map[string]string{"README.md": floaty + "Output is bit-identical to the reference.\n"})
 	code, out, _ := drive("repo", "--json", fail, write(t, map[string]string{"README.md": "x\n"}))

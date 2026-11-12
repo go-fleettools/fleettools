@@ -160,6 +160,21 @@ var (
 	heading  = regexp.MustCompile(`^\s{0,3}#{1,6}\s`)
 )
 
+// RuleSummary is the rule in one line; a text may quote it (and only it)
+// without being read as deferring anything.
+const RuleSummary = "a performance gap is never parked because it would break bit parity"
+
+// unquote blanks a quote of the rule's own summary, and otherwise keeps the
+// quoted words (without the quote marks): quoting a deferral is how an author
+// would hide one — `we do not use the kernel "because it would break bit parity"`.
+func unquote(q string) string {
+	inner := strings.Trim(q, "\"“” ")
+	if strings.EqualFold(strings.Trim(inner, ".,;: "), RuleSummary) {
+		return " "
+	}
+	return " " + inner + " "
+}
+
 // Strip blanks what is not the author's statement, keeping every newline so
 // that line numbers survive.
 func Strip(text string) string {
@@ -204,7 +219,7 @@ func Strip(text string) string {
 			inCmt = true
 		}
 		l = inline.ReplaceAllString(l, " ")
-		l = quoted.ReplaceAllString(l, " ")
+		l = quoted.ReplaceAllStringFunc(l, unquote)
 		l = urlRe.ReplaceAllString(l, " ")
 		lines[i] = l
 	}
@@ -321,27 +336,17 @@ func Window(us []Unit, i int) string {
 // paraphrases the parking pattern uses.
 func HasBitIdentity(s string) bool { return bitIdentity.MatchString(s) }
 
-// HasMeasuredBound reports whether some sentence cites an error beside a
-// number written as a number.
-func HasMeasuredBound(us []Unit) bool {
+// boundedParagraphs says which paragraphs (or list items) hold a measured bound:
+// a number three sections away does not excuse a deferral. One pass over the
+// sentences — computing it per finding made a 1 MiB paragraph take minutes.
+func boundedParagraphs(us []Unit) map[int]bool {
+	m := map[int]bool{}
 	for _, u := range us {
-		if errWord.MatchString(u.Text) && number.MatchString(u.Text) {
-			return true
+		if !m[u.para] && errWord.MatchString(u.Text) && number.MatchString(u.Text) {
+			m[u.para] = true
 		}
 	}
-	return false
-}
-
-// boundInParagraph says the measured bound sits in the SAME paragraph (or list
-// item) as sentence i: a number three sections away does not excuse a deferral.
-func boundInParagraph(us []Unit, i int) bool {
-	var para []Unit
-	for _, u := range us {
-		if u.para == us[i].para {
-			para = append(para, u)
-		}
-	}
-	return HasMeasuredBound(para)
+	return m
 }
 
 // Scan returns the sentences of text that defer or decline a performance change
@@ -352,9 +357,23 @@ func Scan(text string) []Finding {
 		text = text[:MaxText]
 	}
 	us := Units(text)
+	bounded := boundedParagraphs(us) // once per paragraph, not once per finding
+	// The performance cue is read once per sentence; a sentence's window is it
+	// and its paragraph neighbours.
+	perfS := make([]bool, len(us))
+	for i, u := range us {
+		perfS[i] = perf.MatchString(u.Text)
+	}
 	var out []Finding
 	for i, u := range us {
-		if rule := classify(u.Text, Window(us, i)); rule != "" && !boundInParagraph(us, i) {
+		inPerf := perfS[i]
+		for _, j := range [2]int{i - 1, i + 1} {
+			if j >= 0 && j < len(us) && us[j].para == u.para && perfS[j] {
+				inPerf = true
+			}
+		}
+		rule := classify(u.Text, perfS[i], inPerf, func() string { return Window(us, i) })
+		if rule != "" && !bounded[u.para] {
 			out = append(out, Finding{Rule: rule, Sentence: u.Text, Line: u.Line})
 		}
 	}
@@ -362,20 +381,21 @@ func Scan(text string) []Finding {
 }
 
 // classify names the rule a sentence fires, or "" — the sentence needs a parity
-// cue to be a candidate at all.
-func classify(s, win string) string {
+// cue to be a candidate at all. perfSent and inPerf say whether the sentence,
+// and its window, carry a performance cue; win builds the window text only for
+// the rule that reads it.
+func classify(s string, perfSent, inPerf bool, win func() string) string {
 	if !parity.MatchString(s) {
 		return ""
 	}
-	inPerf := perf.MatchString(win)
 	switch {
-	case perf.MatchString(s) && decline.MatchString(s) && governs(s):
+	case perfSent && decline.MatchString(s) && governs(s):
 		return "declined-because-parity"
 	case inPerf && wouldBreak.MatchString(s):
 		return "would-break-parity"
 	case inPerf && contractChange.MatchString(s):
 		return "contract-change"
-	case inPerf && keepContract.MatchString(s) && optionWords.MatchString(win):
+	case inPerf && keepContract.MatchString(s) && optionWords.MatchString(win()):
 		return "keep-parity-contract"
 	case noBitIdentical.MatchString(s) && !noLonger.MatchString(s):
 		return "no-bit-identical-way"
