@@ -137,6 +137,71 @@ func TestAClosedPullRequestIsReportedAsPriorArt(t *testing.T) {
 	}
 }
 
+// ⛔⛔ A MERGED PULL REQUEST IS NOT A CLOSED ONE, AND SAYING SO COST THREE DAYS.
+//
+// GitHub's search API reports `state: "closed"` for a pull request that MERGED,
+// and this command's hint tells the reader that a closed entry means "not
+// merged, and here is why". Together they said the opposite of the truth.
+//
+// Measured on 2026-11-10: a run printed `pr go-tex/engine #731 [closed]` for a
+// pull request merged two days earlier, whose TITLE named the open #722 it
+// superseded. #722 was then reported as "green and parked, awaiting a corpus
+// sweep" for three days — blocked on nothing, its subject already shipped — by
+// a reader who had looked straight at the line that said so.
+//
+// merged_at is in the payload. Nothing was reading it. See #208.
+func TestAMergedPullRequestIsNotCalledClosed(t *testing.T) {
+	stub(t, func(args []string) ([]byte, error) {
+		if args[1] == "graphql" {
+			return []byte(emptyGraphQL), nil
+		}
+		return []byte(`{"items":[
+			{"number":731,"title":"the interword space is the font's own advance (#722)","state":"closed",
+			 "body":"","repository_url":"https://api.github.com/repos/go-tex/engine",
+			 "pull_request":{"url":"x","merged_at":"2026-11-08T12:41:11Z"}},
+			{"number":352,"title":"space width rejected","state":"closed",
+			 "body":"","repository_url":"https://api.github.com/repos/go-tex/engine",
+			 "pull_request":{"url":"x","merged_at":null}}
+		]}`), nil
+	})
+	code, out, _ := drive(t, "-repo", "go-tex/engine", "interword space advance")
+	if code != 1 {
+		t.Fatalf("status %d, want 1\n%s", code, out)
+	}
+	// ⛔⛔ THE ASSERTION IS ON THE ENTRY'S OWN LINE, AND IT TOOK TWO MUTATIONS
+	// TO GET THERE. The first version asserted Contains(out, "merged") — which
+	// the standing hint "not merged, and here is why" satisfies on every run.
+	// The second asserted Contains(out, "[merged]") — which the hint THIS
+	// CHANGE ADDED satisfies, since it contains the word in brackets too. Both
+	// passed with the fix mutated out. A state is a property of one entry, so
+	// it has to be read on that entry's line and nowhere else.
+	if got := lineWith(out, "#731"); !strings.Contains(got, "[merged]") {
+		t.Errorf("#731 merged, but its line reads: %q", got)
+	}
+	// ⛔ The CONTROL. A pull request closed without merging must still read
+	// [closed] on its own line, or the fix would be "call everything merged",
+	// which loses the most valuable prior art there is.
+	if got := lineWith(out, "#352"); !strings.Contains(got, "[closed]") {
+		t.Errorf("#352 was closed unmerged, but its line reads: %q", got)
+	}
+	// And the reader is told what a merged entry means for an open one.
+	if !strings.Contains(out, "superseded") {
+		t.Errorf("nothing says what a merged entry implies:\n%s", out)
+	}
+}
+
+// lineWith returns the first line of out containing want, or "" — so an
+// assertion about one entry is made against that entry's line and cannot be
+// satisfied by prose elsewhere in the report.
+func lineWith(out, want string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, want) {
+			return l
+		}
+	}
+	return ""
+}
+
 // ⛔⛔ AN ANSWER NOT OBTAINED IS NOT A NEGATIVE ANSWER. A gate that opens when a
 // call fails opens precisely when nobody can check it.
 func TestAnUnreadableSurfaceHoldsTheGateShut(t *testing.T) {
