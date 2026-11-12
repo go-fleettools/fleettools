@@ -476,6 +476,127 @@ func TestOnlyAPrefixedRenameHasADoubledForm(t *testing.T) {
 	}
 }
 
+// ⛔⛔ A NAME INSIDE BACKTICKS IS BEING QUOTED, NOT USED. Measured in review:
+// run against its own directory this command reported 15 DOUBLED, every one a
+// comment or fixture explaining the defect, seven inside code spans — a report
+// whose bulk is the thing it checks FOR.
+func TestAQuotedDoubledNameIsNotDrift(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"pkgx=zpkgx"}, map[string]bool{})
+	quoted := c.classifyLine("README.md", 1, "a wrong order produces `ZzpkgxBin`, which compiles")
+	for _, f := range quoted {
+		if f.Verdict == doubled {
+			t.Errorf("a quoted mention was reported: %+v", f)
+		}
+	}
+	// ...and the same name unquoted on the same kind of line still is.
+	bare := c.classifyLine("README.md", 2, "a wrong order produces ZzpkgxBin, which compiles")
+	if n := countVerdict(bare, doubled); n != 1 {
+		t.Errorf("unquoted: %d doubled finding(s), want 1", n)
+	}
+}
+
+// ⛔⛔ THE DOUBLED CHECK IS AN OVERLAY: it must not steal another rule's
+// verdict. Measured in review: `https://github.com/go-pkgx/zzpkgx` reported
+// 1 DOUBLED and ZERO STALE, so a stale organisation URL lost its verdict and
+// its rewrite suggestion. Both facts are true of that line at once.
+func TestADoubledNameDoesNotSwallowTheStaleAddressAroundIt(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"pkgx=zpkgx"}, map[string]bool{})
+	got := c.classifyLine("README.md", 1, "see https://github.com/go-pkgx/zzpkgx for it")
+	if n := countVerdict(got, stale); n != 1 {
+		t.Errorf("%d STALE, want 1 (the address is still stale): %+v", n, got)
+	}
+	if n := countVerdict(got, doubled); n != 1 {
+		t.Errorf("%d DOUBLED, want 1: %+v", n, got)
+	}
+	for _, f := range got {
+		if f.Verdict == stale && f.Suggest == "" {
+			t.Error("the stale address lost its replacement suggestion")
+		}
+	}
+}
+
+// ⛔ --keep STILL WINS. A kept address is one somebody checked and declared
+// live, so a doubled-looking name inside it is part of a real address.
+func TestAKeptAddressIsNotReportedAsDoubled(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, []string{"ghcr.io/zzpkgx"},
+		[]string{"pkgx=zpkgx"}, map[string]bool{})
+	got := c.classifyLine("ci.yml", 1, "image: ghcr.io/zzpkgx/packages:latest")
+	if n := countVerdict(got, doubled); n != 0 {
+		t.Errorf("%d doubled finding(s) on a kept address: %+v", n, got)
+	}
+}
+
+// ⛔⛔ "NO WORD CONTAINS THE DOUBLED FORM" WAS TRUE OF ONE PAIR AND WRITTEN AS
+// A GENERAL LAW. --retired is caller-supplied: `a=ca` reported "The yucca is a
+// plant." as drift.
+func TestAShortPairHasNoDoubledForm(t *testing.T) {
+	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"a=ca"}, map[string]bool{})
+	got := c.classifyLine("README.md", 1, "The yucca is a plant.")
+	if n := countVerdict(got, doubled); n != 0 {
+		t.Errorf("%d doubled finding(s) in ordinary prose: %+v", n, got)
+	}
+}
+
+// ⛔⛔ matchCase MUST NOT LOWER-CASE THE REPLACEMENT'S OWN CAPITALS. Measured
+// in review: `--retired PkgX=ZPkgX` on `ZZPkgXBin` suggested `Zpkgx` — the
+// exact "a suggestion is a string somebody pastes" failure, one layer down.
+func TestTheSuggestionKeepsTheReplacementsOwnCapitals(t *testing.T) {
+	for _, tc := range []struct{ src, repl, want string }{
+		{"ZZPkgX", "ZPkgX", "ZPkgX"},
+		{"Zzpkgx", "zpkgx", "Zpkgx"},
+		{"zzpkgx", "zpkgx", "zpkgx"},
+		{"ZZBK", "zbk", "ZBK"},
+		{"zzBkTool", "zBkTool", "zBkTool"},
+	} {
+		if got := matchCase(tc.src, tc.repl); got != tc.want {
+			t.Errorf("matchCase(%q, %q) = %q, want %q", tc.src, tc.repl, got, tc.want)
+		}
+	}
+}
+
+// ⛔⛔ "0 DOUBLED" FROM A CHECK THAT WAS NEVER ARMED READS LIKE A CLEAN TREE.
+// The stem carries no replacement unless one is stated, so a run with no
+// --retired scans everything and has not looked.
+func TestTheDoubledCheckKnowsWhetherItIsArmed(t *testing.T) {
+	stemOnly := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil, map[string]bool{})
+	if stemOnly.doubledArmed() {
+		t.Error("armed with no --retired pair")
+	}
+	if n := countVerdict(stemOnly.classifyLine("a.go", 1, "ZzpkgxBin"), doubled); n != 0 {
+		t.Error("an unarmed classifier reported a doubled finding")
+	}
+	stated := newClassifier("go-pkgx", "go-zpkg", nil, nil, []string{"pkgx=zpkgx"}, map[string]bool{})
+	if !stated.doubledArmed() {
+		t.Error("not armed with --retired pkgx=zpkgx")
+	}
+}
+
+func countVerdict(fs []finding, v verdict) int {
+	n := 0
+	for _, f := range fs {
+		if f.Verdict == v {
+			n++
+		}
+	}
+	return n
+}
+
+// ⛔⛔ AN EXEMPTED DOUBLED FINDING IS COUNTED AND SAID. Measured in review:
+// `ZzpkgxBin` in an allowed CHANGELOG became a citation and the run reported
+// 0 DOUBLED, exit 0 — on exactly the page where a doubled name survives.
+func TestAnExemptedDoubledFindingIsStillCounted(t *testing.T) {
+	byRoot := map[string][]finding{"zbk": {{
+		File: "CHANGELOG.md", Line: 3, Verdict: citation, Was: doubled,
+		Kind: "a DOUBLED name on a page whose subject is the rename (--allow)",
+		Text: "ZzpkgxBin",
+	}}}
+	var b strings.Builder
+	report(&b, byRoot, map[string]int{"zbk": 1}, false, true)
+	if !strings.Contains(b.String(), "exempted by --allow") {
+		t.Errorf("the exemption was silent:\n%s", b.String())
+	}
+}
+
 // ⛔ A DOUBLED FINDING SURVIVES --quiet AND FAILS. Its COUNT is the one number
 // that tells a reader nothing: nobody is looking for it, nothing else can see
 // it, and it names a file that compiles and passes its tests — so it has to
