@@ -192,3 +192,15 @@ func TestHelpDocumentsTheMarker(t *testing.T) {
 		}
 	}
 }
+
+func TestRepoPrintsRefusedSentencesWithTheirCue(t *testing.T) {
+	root := write(t, map[string]string{
+		"README.md":    floaty + "\n" + contract,
+		"a_test.go":    "package p\nfunc TestAccuracyBound(t *testing.T) {}\n",
+		"docs/perf.md": "| trsm | bit for bit against SciPy's Fortran | **left** |\n",
+	})
+	code, out, _ := drive("repo", root)
+	if code != 1 || !strings.HasPrefix(out, "FAIL ") || !strings.Contains(out, "REFUSED docs/perf.md:1 [left-on-parity]: ") {
+		t.Errorf("%d %q", code, out)
+	}
+}

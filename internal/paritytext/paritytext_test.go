@@ -485,3 +485,79 @@ func FuzzScan(f *testing.F) {
 		}
 	})
 }
+
+// Sentences from committed docs (go-fft, go-ndarray, go-numerics) that EXPLAIN
+// why a result is bit-identical, or name an identity element: not deferrals.
+func TestExplainingIdentityIsNotParking(t *testing.T) {
+	for _, s := range []string{
+		"It is **bit-for-bit identical** to the scalar oracle because every product and the final add are separately rounded exactly as the scalar code rounds them (no fused multiply-add).",
+		"The packed layout only relocates the operands, it does not reorder the sum, so the result is bit-identical to the scalar oracle.",
+		"The rest own nothing and are dropped, and there is no bit-identical reduction identity to feed combine for Max/Min.",
+		"No term of the sums can be skipped, so the bit-exact path cannot reach SciPy's time on one core.",
+	} {
+		if got := Scan(s); len(got) != 0 {
+			t.Errorf("%q refused: %v", s, got)
+		}
+	}
+}
+
+// The parking forms found in committed docs (go-numerics/optimize docs/perf.md,
+// go-fft kernels), each paired with the same sentence minus its cue.
+func TestCommittedDocForms(t *testing.T) {
+	for _, c := range []struct{ rule, fires, passes string }{
+		{"left-on-parity",
+			"| SLSQP trsm, ldp | Quad50 | bit for bit against SciPy's Fortran | **left** |",
+			"| SLSQP trsm, ldp | Quad50 | bit for bit against SciPy's Fortran | done |"},
+		{"stay-to-keep-parity",
+			"The solver is vectorised and fast. What is left of it is the passes MINPACK's order allows (each sum must stay sequential to keep the results bit-identical).",
+			"What is left of it is the passes MINPACK's order allows (each sum must stay sequential to keep the results exact)."},
+		{"no-bit-identical-way",
+			"A max-reduction SIMD kernel is not shipped, so a bit-identical vector max is not expressible without a pre-scan.",
+			"A max-reduction SIMD kernel is not shipped, so a vector max is not expressible without a pre-scan."},
+		{"no-bit-identical-way",
+			"As on loong64, a bit-identical vector complex multiply cannot be built.",
+			"As on loong64, a vector complex multiply cannot be built."},
+	} {
+		got := Scan(c.fires)
+		if len(got) == 0 || got[0].Rule != c.rule {
+			t.Errorf("%s: %q gave %v", c.rule, c.fires, got)
+		}
+		if got := Scan(c.passes); len(got) != 0 {
+			t.Errorf("%s: the sentence minus its cue fired: %q %v", c.rule, c.passes, got)
+		}
+	}
+	// A measured bound in the same row/paragraph exempts it.
+	if got := Scan("| SLSQP | bit for bit against SciPy's Fortran | **left**; error 3e-16 against double-double |"); len(got) != 0 {
+		t.Errorf("a measured bound did not exempt the row: %v", got)
+	}
+}
+
+// Where the assembler has no vector double arithmetic the kernel is
+// inexpressible: parity is not what blocks it (go-fft docs/plan-fft.md:202).
+func TestNoVectorISAIsNotParity(t *testing.T) {
+	fires := "No bit-identical vector kernel is expressible on ppc64le."
+	for _, passes := range []string{
+		"- **ppc64le**: the Go ppc64 assembler exposes **no vector double arithmetic** (the VSX surface is loads/stores, logicals, permutes), so likewise no bit-identical vector kernel is expressible.",
+		"Where no bit-identical kernel is expressible (loong64/ppc64le, no vector double arithmetic in the Go assembler) the scalar oracle stands.",
+		"The assembler has no vector double arithmetic on loong64. As on ppc64le, a bit-identical vector complex multiply cannot be built.",
+	} {
+		if got := Scan(passes); len(got) != 0 {
+			t.Errorf("refused: %q %v", passes, got)
+		}
+	}
+	if len(Scan(fires)) == 0 {
+		t.Error("the same sentence without the ISA reason must fire")
+	}
+}
+
+// "**left** (already fused in order, PR #7)" says the gap is already closed.
+func TestLeftButAlreadyClosed(t *testing.T) {
+	closed := "| MINPACK qrfac | bit for bit (MINPACK order) | **left** (already fused in order, PR #7) |"
+	open := "| MINPACK qrfac | bit for bit (MINPACK order) | **left** (no kernel keeps that order) |"
+	if got := Scan(closed); len(got) != 0 {
+		t.Errorf("a closed gap was refused: %v", got)
+	}
+	if got := Scan(open); len(got) == 0 {
+		t.Error("an open gap passed")
+	}
+}

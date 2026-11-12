@@ -80,6 +80,8 @@ type Statement struct {
 	File     string `json:"file"`
 	Line     int    `json:"line"`
 	Sentence string `json:"sentence"`
+	// Cue names the paritytext rule that refused a parked sentence.
+	Cue string `json:"cue,omitempty"`
 }
 
 // Marker is what was found of the contract section.
@@ -111,11 +113,13 @@ func (m Marker) Complete() bool { return m.Bound && m.Oracle && m.Exact && m.Tes
 type Report struct {
 	Verdict    Verdict     `json:"verdict"`
 	Statements []Statement `json:"statements,omitempty"`
-	Marker     Marker      `json:"marker"`
-	Unread     []string    `json:"unread,omitempty"`
-	Files      int         `json:"files"`
-	FloatCues  int         `json:"float_cues"`
-	Reason     string      `json:"reason"`
+	// Parked are committed sentences the text-mode scanner refuses.
+	Parked    []Statement `json:"parked,omitempty"`
+	Marker    Marker      `json:"marker"`
+	Unread    []string    `json:"unread,omitempty"`
+	Files     int         `json:"files"`
+	FloatCues int         `json:"float_cues"`
+	Reason    string      `json:"reason"`
 }
 
 var (
@@ -177,11 +181,20 @@ func Check(root string) (*Report, error) {
 			return nil
 		}
 		r.Files++
+		add := func(text string) {
+			// The scanner reads at most MaxText bytes; a larger surface would be
+			// half-read, and a half-read file is not a PASS.
+			if len(text) > paritytext.MaxText {
+				r.Unread = append(r.Unread, fmt.Sprintf("%s: %d bytes of text, over the %d the scanner reads", rel, len(text), paritytext.MaxText))
+				return
+			}
+			surfaces = append(surfaces, surface{rel, text})
+		}
 		switch kind {
 		case prose:
-			surfaces = append(surfaces, surface{rel, string(b)})
+			add(string(b))
 		case goSource:
-			surfaces = append(surfaces, surface{rel, goComments(b)})
+			add(goComments(b))
 		case testFile:
 			if testRe.Match(b) && r.Marker.Test == "" {
 				r.Marker.Test = rel
@@ -189,7 +202,7 @@ func Check(root string) (*Report, error) {
 		}
 		return nil
 	})
-	var all []Statement
+	var all, parked []Statement
 	for _, s := range surfaces {
 		sec, rest := section(s.text)
 		if sec != nil {
@@ -197,6 +210,14 @@ func Check(root string) (*Report, error) {
 				m.File, m.Test = s.file, r.Marker.Test
 				r.Marker = m
 			}
+		}
+		// The text-mode scanner over the committed prose: a sentence that parks
+		// a performance change on bit identity is refused here as in a pull
+		// request body (a measured bound in its paragraph exempts it), and no
+		// waiver exists in repo mode: a sentence that must stay is rewritten to
+		// cite its measurement. The marker section itself is read like any.
+		for _, f := range paritytext.Scan(s.text) {
+			parked = append(parked, Statement{File: s.file, Line: f.Line, Cue: f.Rule, Sentence: strings.Join(strings.Fields(f.Sentence), " ")})
 		}
 		r.FloatCues += len(floatCue.FindAllString(s.text, -1))
 		for _, u := range paritytext.Units(rest) {
@@ -207,10 +228,18 @@ func Check(root string) (*Report, error) {
 	}
 	if r.FloatCues >= FloatMin {
 		r.Statements = all
+		if !r.Marker.ExactDomain {
+			r.Parked = parked
+		}
 	}
 	switch {
 	case r.Marker.ExactDomain:
 		r.Verdict, r.Reason = Pass, "the results are exact (Domain: exact): there is no rounding, so bit identity is the only correct answer"
+	case len(r.Parked) > 0:
+		// Certain evidence, so it outranks UNREAD and the marker: a repository
+		// can carry the marker while its docs still park perf gaps on bit identity.
+		r.Verdict = Fail
+		r.Reason = fmt.Sprintf("%d committed sentence(s) defer or decline a performance change because of bit identity, which the accuracy contract does not allow (a measured bound in the paragraph, or a rewrite, is the way out; repo mode has no waiver)", len(r.Parked))
 	case r.Marker.Complete():
 		r.Verdict, r.Reason = Pass, "the accuracy contract is stated (bound, oracle, exact option) and a TestAccuracyBound test asserts it"
 	case len(r.Unread) > 0:
