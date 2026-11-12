@@ -24,10 +24,17 @@
 // nothing: the sources still read the mirrorlist. So the fallback here
 // rewrites THE MIRRORLIST, which is the one file every source agrees to obey.
 //
-// ⛔ A PACKAGE THAT DOES NOT EXIST IS NOT RETRIED. "Unable to locate package"
-// means the name is wrong, and waiting twenty seconds to ask again dresses a
-// typo up as an outage. The two failures get different exit messages because
-// they want different people.
+// ⛔ A PACKAGE THAT DOES NOT EXIST IS NOT RETRIED — WHEN APT COULD CHECK.
+// "Unable to locate package" means the name is wrong, and waiting twenty
+// seconds to ask again dresses a typo up as an outage. The two failures get
+// different exit messages because they want different people.
+//
+// ⛔ BUT THOSE WORDS ARE ALSO WHAT A RUN WITH NO PACKAGE LISTS SAYS, about a
+// name it never checked against anything. So when `apt-get update` FAILED, the
+// same sentence is evidence of nothing, and this retries and says so rather
+// than call a name wrong on the strength of a lookup that did not happen. It
+// does not rewrite the runner's mirrorlist on that evidence until it has seen
+// it twice: see install() and the switch in aptneed().
 //
 // ⛔ AND APT SAYING YES IS NOT THE BINARY BEING THERE. --need names what must
 // end up on PATH; a package renamed upstream installs cleanly and leaves the
@@ -65,7 +72,10 @@ MIRRORLIST to the canonical archive — the one file every source obeys — and
 tries again.
 
 A package apt cannot locate is NOT retried: that is a wrong name, and asking
-again later dresses a typo up as an outage.
+again later dresses a typo up as an outage. The exception is a run whose
+package lists could not be refreshed at all — there "cannot locate" is about a
+name apt never checked, so it is retried, the verdict names both possibilities,
+and the mirrorlist is left alone until the same answer comes back twice.
 
 --need names a binary that must be on PATH when this exits, and is required:
 apt reporting success is not the binary being there, and a package renamed
@@ -201,7 +211,7 @@ func why(output string) kind {
 // single dropped connection this would otherwise sleep twenty seconds over.
 func install(pkgs []string) (string, kind, bool) {
 	var all strings.Builder
-	updateOut, _ := runCommand("apt-get", "-o", "Acquire::Retries=3", "update")
+	updateOut, updateStatus := runCommand("apt-get", "-o", "Acquire::Retries=3", "update")
 	all.WriteString(updateOut)
 	// ⛔ A FAILED `update` IS NOT FATAL ON ITS OWN. apt exits non-zero when any
 	// index is unreachable while the cached lists are still usable, and the
@@ -232,8 +242,20 @@ func install(pkgs []string) (string, kind, bool) {
 	// stale. It is retried like a mirror failure, because retrying is cheap
 	// and the fallback may settle it, and the closing verdict names BOTH
 	// facts rather than choosing between them.
+	//
+	// ⛔⛔ STALENESS IS `update`'s EXIT STATUS, NOT ITS PHRASES. An earlier
+	// version asked why(updateOut) for a mirror phrase, which answers the
+	// wrong question twice over. It said YES to a `Failed to fetch … 404 Not
+	// Found` — a stale index, which is not an outage — and so dressed a plain
+	// misspelling up as unprovable. And it said NO to every refresh that
+	// failed without naming the network: an unsigned repository (NO_PUBKEY
+	// disables the source), a held /var/lib/apt/lists/lock, a full disk. Those
+	// leave the lists exactly as stale as a dead mirror does, and the name
+	// exactly as unchecked. What matters is not why the refresh failed but
+	// THAT it failed, which is the one thing the status says and no phrase
+	// does.
 	k := why(out)
-	if k == noSuchPackage && why(updateOut) == mirrorFailure {
+	if k == noSuchPackage && updateStatus != 0 {
 		k = unprovenName
 	}
 	// The pair is still RETURNED, because apt's whole account of the attempt
@@ -313,10 +335,19 @@ func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Du
 			} else {
 				fmt.Fprintf(stderr, "aptneed: the runner's mirror could not be reached\n")
 			}
+			// ⛔⛔ AN IRREVERSIBLE ACT NEEDS MORE THAN AMBIGUOUS EVIDENCE.
+			// Rewriting the mirrorlist changes the runner for every later step
+			// of the job, and unprovenName is by construction a case this
+			// cannot read: it may be a misspelling. So a mirror failure — the
+			// install's own words, the unambiguous one — buys the rewrite at
+			// once, while an unproven name must REPEAT first. One cheap retry
+			// costs a typo the delay and nothing else; a cold cache that is
+			// still cold on the second look has earned the stronger remedy.
+			strong := k == mirrorFailure || attempt > 0
 			// ⛔ AND NOT WHEN THERE IS NO ATTEMPT LEFT TO USE IT. Rewriting the
 			// mirrorlist on the last turn changes the runner permanently for
 			// every later step of the job and tries nothing with it.
-			if fallback && !swapped && attempt < retries {
+			if fallback && !swapped && strong && attempt < retries {
 				if err := writeFile(mirrorList, []byte(canonicalMirror)); err != nil {
 					fmt.Fprintf(stderr, "aptneed: could not rewrite %s: %v\n", mirrorList, err)
 				} else {

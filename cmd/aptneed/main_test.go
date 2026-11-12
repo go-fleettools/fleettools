@@ -289,8 +289,13 @@ func TestANameAptCouldNotCheckIsNotCalledATypo(t *testing.T) {
 		t.Errorf("it decided on its own which of the two this was: %d attempt(s), %v",
 			f.installs(), f.calls)
 	}
-	if len(f.written) == 0 {
-		t.Error("the fallback was not tried on a failure that may well be the mirror")
+	// ⛔⛔ AND THE RUNNER IS NOT CHANGED ON THIS EVIDENCE. The retry is free;
+	// rewriting the mirrorlist is not, because it persists for every later step
+	// of the job — and this case MAY BE A MISSPELLING. A first look that cannot
+	// tell the two apart does not buy an irreversible act.
+	if len(f.written) != 0 {
+		t.Errorf("a name this could not check rewrote %s on the first look: %v",
+			mirrorList, f.written)
 	}
 	// ⛔ AND THE VERDICT NAMES BOTH, so the reader is sent to the spelling and
 	// to the network, in that order, rather than confidently to one of them.
@@ -306,8 +311,19 @@ func TestANameAptCouldNotCheckIsNotCalledATypo(t *testing.T) {
 
 // And a name apt COULD check is still refused outright: lists refreshed
 // cleanly, so "cannot locate" is evidence rather than a shrug.
+//
+// ⛔ THE REFRESH HERE SUCCEEDS EXPLICITLY, status 0, while printing a warning.
+// It used to rely on the fake's default reply, which made this test a strict
+// subset of TestAPackageAptCannotLocateIsNotRetried — it could not go red
+// alone, so it defended nothing. The warning is there because a refresh that
+// SAYS something alarming and still exits 0 is the case that separates reading
+// the status from reading the words.
 func TestANameAptCouldCheckIsStillRefusedOutright(t *testing.T) {
-	f := &fake{answers: []answer{{output: "E: Unable to locate package poppler-util\n", status: 100}}}
+	f := &fake{
+		update: &answer{output: "W: Skipping acquire of configured file 'main/binary-i386/Packages'\n",
+			status: 0},
+		answers: []answer{{output: "E: Unable to locate package poppler-util\n", status: 100}},
+	}
 	f.install(t)
 	code, _, errb := drive(t, "--need", "pdftoppm", "--retries", "2", "poppler-util")
 	if code != 1 {
@@ -318,6 +334,66 @@ func TestANameAptCouldCheckIsStillRefusedOutright(t *testing.T) {
 	}
 	if !strings.Contains(errb, "that is a name, not an outage") {
 		t.Errorf("it said %q", errb)
+	}
+}
+
+// ⛔⛔ A REFRESH CAN FAIL WITHOUT NAMING THE NETWORK, AND THE LISTS ARE JUST AS
+// STALE. This is the case that killed reading update's PHRASES: an unsigned
+// repository disables the source (NO_PUBKEY), so apt exits non-zero having
+// refreshed nothing, and not one of the mirror phrases appears. The name was
+// never checked against anything, exactly as in a dead-mirror cold cache.
+//
+// A held lists/lock and a full disk are the same shape. What this asserts is
+// that the staleness test is `update`'s STATUS and not its words.
+func TestARefreshThatFailedWithoutNamingTheNetworkIsStillAStaleList(t *testing.T) {
+	f := &fake{
+		update: &answer{
+			output: "W: GPG error: http://archive.ubuntu.com noble InRelease: The following " +
+				"signatures couldn't be verified: NO_PUBKEY 871920D1991BC93C\n" +
+				"E: The repository 'http://archive.ubuntu.com noble InRelease' is not signed.\n",
+			status: 100},
+		answers: []answer{{output: "E: Unable to locate package poppler-utils\n", status: 100}},
+	}
+	f.install(t)
+	code, _, errb := drive(t, "--need", "pdftoppm", "--retries", "1", "poppler-utils")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if f.installs() != 2 {
+		t.Errorf("a name apt never checked was called a typo: %d attempt(s), %v",
+			f.installs(), f.calls)
+	}
+	if !strings.Contains(errb, "could not locate it AND could not refresh") {
+		t.Errorf("the verdict does not name both facts: %q", errb)
+	}
+	if strings.Contains(errb, "that is a name, not an outage") {
+		t.Errorf("it called an unchecked name a typo: %q", errb)
+	}
+}
+
+// ⛔ AND THE RUNNER IS CHANGED ONCE THE SAME UNREADABLE ANSWER COMES BACK. The
+// escalation is the whole design: a typo pays one retry and leaves the machine
+// as it found it, while a cold cache that is still cold on the second look
+// gets the mirrorlist rewritten in time for a third attempt to use it.
+//
+// Three attempts, so attempt 1 is both a repeat and not the last.
+func TestAnUnprovenNameThatRepeatsDoesBuyTheFallback(t *testing.T) {
+	stale := answer{output: "E: Unable to locate package poppler-utils\n", status: 100}
+	f := &fake{
+		update:  &answer{output: "E: Some index files failed to download.\n", status: 100},
+		answers: []answer{stale, stale, stale},
+	}
+	f.install(t)
+	code, _, _ := drive(t, "--need", "pdftoppm", "--retries", "2", "poppler-utils")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if f.installs() != 3 {
+		t.Errorf("%d attempt(s): %v", f.installs(), f.calls)
+	}
+	if f.written[mirrorList] != canonicalMirror {
+		t.Errorf("the fallback was never tried although the same unreadable answer came back "+
+			"twice: %v", f.written)
 	}
 }
 
