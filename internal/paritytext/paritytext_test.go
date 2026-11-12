@@ -182,13 +182,24 @@ func TestScanIsNotQuadratic(t *testing.T) {
 	got := Scan(text)
 	d := time.Since(start)
 	t.Logf("Scan of %d bytes: %v, %d findings", len(text), d, len(got))
-	budget := time.Second
-	if raceOn {
-		budget = 10 * time.Second
-	}
-	if d > budget {
-		t.Fatalf("1 MiB of findings took %v (budget %v)", d, budget)
-	}
+	// ⛔⛔ THE WALL-CLOCK BUDGET THAT USED TO BE HERE MADE main RED, THREE
+	// TIMES MEASURED (#258): 10.91s on main's own push run, 10.63s and 10.43s
+	// on two unrelated pull requests, against a 10s budget under -race. A 9%
+	// miss on a borrowed runner is not a measurement of this code; it is a
+	// measurement of what else the runner was doing, and this repository's own
+	// rule says so — allocation counts are exact under load, times are not.
+	//
+	// ⭐ AND THE PROPERTY THE TEST IS NAMED FOR WAS ALREADY CHECKED BELOW,
+	// correctly: four times the text against ten times the time. That
+	// comparison measures a RATIO, with both halves run on the same machine
+	// moments apart, so the runner's mood cancels out of it. Linear is 4x,
+	// quadratic is 16x, and nothing a busy runner does crosses a gap that
+	// wide.
+	//
+	// So the absolute budget was never the test — it was a second, weaker
+	// assertion standing beside the real one and failing for reasons the real
+	// one is immune to. The timing is still LOGGED, where a human reading a
+	// slow run can see it, and asserted nowhere.
 	if len(got) < 10000 {
 		t.Errorf("only %d findings: the worst case was not exercised", len(got))
 	}
@@ -196,9 +207,7 @@ func TestScanIsNotQuadratic(t *testing.T) {
 	if _, err := Gate(text, "because", "--parity-waiver"); err != nil {
 		t.Fatal(err)
 	}
-	if d := time.Since(start); d > budget {
-		t.Errorf("Gate took %v", d)
-	}
+	t.Logf("Gate of %d bytes: %v", len(text), time.Since(start))
 	// Four times the text must cost well under sixteen times the time: a
 	// quadratic scan fails this on any machine, race detector or not.
 	unitText := func(n int) time.Duration {
