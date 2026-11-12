@@ -108,6 +108,97 @@ FAIL
 	}
 }
 
+// ⛔⛔ FALSE PASS 1, FOUND IN REVIEW AND REPRODUCED BEFORE BEING FIXED. The
+// first version refused a log only when the verdict count was ZERO. Here
+// `go test ./...` ran two packages: one compiled and failed a test, the other
+// did not compile at all. The count is not zero, so the claim about TestAlpha
+// was ACCEPTED (exit 0) while a whole package never ran.
+//
+// A gate that says yes on a half-built run is worse than no gate, because it
+// is trusted.
+func TestOnePackageFailingToBuildIsNotAPartialAnswer(t *testing.T) {
+	logs(t, map[string]string{
+		"before.log": `--- PASS: TestAlpha (0.00s)
+ok  	example.com/pkgone	0.012s
+--- PASS: TestBeta (0.00s)
+ok  	example.com/pkgtwo	0.008s
+`,
+		"after.log": `--- FAIL: TestAlpha (0.00s)
+FAIL	example.com/pkgone	0.012s
+# example.com/pkgtwo [build failed]
+./beta_test.go:9:2: declared and not used: x
+FAIL	example.com/pkgtwo [build failed]
+FAIL
+`,
+	})
+	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestAlpha")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2: a package that did not build makes this no answer\nstderr %q",
+			code, errb)
+	}
+	if !strings.Contains(errb, "did not run to completion") {
+		t.Errorf("stderr = %q", errb)
+	}
+}
+
+// ⛔⛔ FALSE PASS 2, the same hole in its other shape. A run killed by
+// `panic: test timed out` keeps every verdict already printed and loses the
+// one that was running. The count is not zero, nothing says `[build failed]`,
+// and the first version accepted a claim about a test that had finished
+// earlier — on the strength of a run that was killed.
+func TestARunKilledByATimeoutAnswersForNoTest(t *testing.T) {
+	logs(t, map[string]string{
+		"before.log": "--- PASS: TestAlpha (0.00s)\n--- PASS: TestBeta (0.00s)\nok\n",
+		"after.log": `--- FAIL: TestAlpha (0.00s)
+=== RUN   TestBeta
+panic: test timed out after 30s
+	running tests:
+		TestBeta (30s)
+FAIL	example.com/pkgone	30.012s
+`,
+	})
+	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestAlpha")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2: the run was killed\nstderr %q", code, errb)
+	}
+	if !strings.Contains(errb, "did not run to completion") {
+		t.Errorf("stderr = %q", errb)
+	}
+}
+
+// ⛔ AND THE REFUSAL IS ANCHORED, so it does not cry wolf. A test that prints
+// a recovered panic — which is a NORMAL, PASSING test — writes
+// `    foo_test.go:12: panic: boom` through t.Log, indented and prefixed. A
+// marker matched anywhere in the line would refuse that run, and a gate that
+// fires on ordinary output is a gate somebody switches off.
+func TestAPanicQuotedInATestsOutputIsNotAnAbort(t *testing.T) {
+	logs(t, map[string]string{
+		"before.log": "    foo_test.go:12: panic: boom\n--- PASS: TestAlpha (0.00s)\nok\n",
+		"after.log":  "    foo_test.go:12: panic: boom\n--- FAIL: TestAlpha (0.00s)\nFAIL\n",
+	})
+	code, out, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestAlpha")
+	if code != 0 {
+		t.Fatalf("exit %d: a test quoting a panic was called an aborted run\nstderr %q", code, errb)
+	}
+	if !strings.Contains(out, "green->red: TestAlpha") {
+		t.Errorf("stdout = %q", out)
+	}
+}
+
+// ⛔ A package with no tests is a complete run, not a broken one. `[no test
+// files]` is deliberately not a marker: refusing it would refuse most
+// `go test ./...` logs in this fleet.
+func TestAPackageWithNoTestFilesIsACompleteRun(t *testing.T) {
+	logs(t, map[string]string{
+		"before.log": "?   	example.com/empty	[no test files]\n--- PASS: TestAlpha (0.00s)\nok\n",
+		"after.log":  "?   	example.com/empty	[no test files]\n--- FAIL: TestAlpha (0.00s)\nFAIL\n",
+	})
+	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestAlpha")
+	if code != 0 {
+		t.Fatalf("exit %d: a package without tests is not a broken run\nstderr %q", code, errb)
+	}
+}
+
 // An empty log, or one whose -run filter matched nothing, is the same refusal
 // without a marker to quote.
 func TestALogWithNoVerdictsAtAllIsRefused(t *testing.T) {

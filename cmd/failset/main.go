@@ -117,19 +117,58 @@ const (
 // from the maps because a log in which NOTHING ran is the case this command
 // exists to refuse, and an empty failing set looks identical to a clean run.
 type result struct {
-	tests    map[string]outcome
-	verdicts int
-	broken   string // the line saying the package did not build or run at all
+	tests      map[string]outcome
+	verdicts   int
+	incomplete string // the line showing the run did not finish
 }
 
-// these are the ways `go test` reports that a package produced no verdicts.
-// Each leaves a log with no `--- FAIL` line in it, which a counter reads as
-// success.
-var brokenMarkers = []string{
-	"[build failed]",
-	"[setup failed]",
-	"build constraints exclude all Go files",
-	"no Go files",
+// ⛔⛔ AN INCOMPLETE RUN IS NOT A PARTIAL ANSWER, IT IS NO ANSWER — AND THE
+// FIRST VERSION OF THIS COMMAND GOT THAT WRONG IN A WAY THAT PASSED ITS OWN
+// TESTS. It refused a log only when the verdict count was ZERO, so these two
+// both exited 0 and accepted the claim:
+//
+//   - `go test ./...` where one package compiled and another did not. The
+//     package that built produced verdicts, so the count was not zero, and a
+//     whole package that never ran was invisible.
+//   - a run killed by `panic: test timed out`. Every test that had already
+//     finished kept its verdict; the one that was RUNNING got none, and the
+//     abort left no trace a counter looks at.
+//
+// In both, a claim about a test that did go red was accepted while the suite
+// around it had not answered. A gate that says yes on an aborted run is worse
+// than no gate, because it is trusted. So completeness is now its own
+// question, asked before the count.
+type marker struct {
+	text     string
+	anywhere bool // false: only at the start of the line
+}
+
+var incompleteMarkers = []marker{
+	// Go prints these at column 0 when a test binary dies. ⛔ ANCHORED, because
+	// a test whose own output quotes a recovered panic prints
+	// `    foo_test.go:12: panic: boom`, and refusing that would be a gate
+	// that cries wolf — which is how a gate comes to be switched off.
+	{text: "panic: ", anywhere: false},
+	{text: "fatal error: ", anywhere: false},
+	// These name a package that produced nothing, and appear mid-line in
+	// `FAIL\tpkg [build failed]`. ⛔ `[no test files]` is deliberately absent:
+	// a package without tests is a normal, complete run.
+	{text: "[build failed]", anywhere: true},
+	{text: "[setup failed]", anywhere: true},
+	{text: "build constraints exclude all Go files", anywhere: true},
+}
+
+// incompleteness says whether a line shows the run did not finish.
+func incompleteness(line string) bool {
+	for _, m := range incompleteMarkers {
+		if m.anywhere && strings.Contains(line, m.text) {
+			return true
+		}
+		if !m.anywhere && strings.HasPrefix(line, m.text) {
+			return true
+		}
+	}
+	return false
 }
 
 // readLog parses a `go test -v` log.
@@ -145,10 +184,8 @@ func readLog(path string) (*result, error) {
 	s.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for s.Scan() {
 		line := s.Text()
-		for _, m := range brokenMarkers {
-			if strings.Contains(line, m) {
-				r.broken = strings.TrimSpace(line)
-			}
+		if r.incomplete == "" && incompleteness(line) {
+			r.incomplete = strings.TrimSpace(line)
 		}
 		name, out, ok := verdict(line)
 		if !ok {
@@ -234,14 +271,17 @@ func failset(cmd *cobra.Command, before, after string, expect []string) error {
 		if err != nil {
 			return cli.Unanswerable("%s: %v", f.what, err)
 		}
-		// ⛔⛔ NO VERDICTS IS NO ANSWER. This is the whole reason the command
-		// exists in this shape: a log that did not build holds no `--- FAIL`
-		// line, so a counter calls it a clean run and reports that the
-		// mutation survived.
+		// ⛔⛔ COMPLETENESS FIRST, AND INDEPENDENTLY OF THE COUNT. A run that
+		// aborted, or in which one package of several did not build, HAS
+		// verdicts — just not all of them. Asking "were there none?" accepts
+		// it; asking "did it finish?" does not.
+		if r.incomplete != "" {
+			return cli.Unanswerable("%s (%s) did not run to completion, so it answers "+
+				"for no test: %s", f.what, f.path, r.incomplete)
+		}
+		// ⛔⛔ AND NO VERDICTS IS NO ANSWER EITHER — an empty file, or a -run
+		// that matched nothing, leaves a log a counter calls a clean run.
 		if r.verdicts == 0 {
-			if r.broken != "" {
-				return cli.Unanswerable("%s (%s) ran no tests: %s", f.what, f.path, r.broken)
-			}
 			return cli.Unanswerable("%s (%s) holds no test verdicts at all — "+
 				"that is no answer, not zero failures", f.what, f.path)
 		}
