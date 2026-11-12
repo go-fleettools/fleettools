@@ -1,0 +1,2 @@
+go test fuzz v1
+string("Radix-9 AVX2 kernels (go-asmgen, bit-identical to a new Go pass9): 1.149x geometric mean.\n\n```\nwe skip SIMD because it would break bit-parity\n```\n\n> quoted: no bit-identical way\n\nOutput unchanged, bit-identical.\n<!-- we skip the kernel because bit-parity -->\n")
