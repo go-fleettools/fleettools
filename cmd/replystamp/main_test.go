@@ -98,6 +98,56 @@ func TestAStampFromTheFutureIsStaleToo(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE REFUSALS NOBODY COULD ACT ON. Found in review 2026-11-12 and
+// measured with fixtures built from code points: a stamp preceded or
+// interrupted by a Unicode space, or preceded by a byte order mark, was
+// refused — and the refusal quoted it back LOOKING EXACTLY RIGHT, so there was
+// nothing in it to act on.
+//
+// The characters are written as NUMBERS here. Spelling the escapes put a
+// literal byte order mark into the source three times while this was written,
+// and the compiler answered "illegal byte order mark" each time.
+func TestAUnicodeSpaceDoesNotMakeAStampInvisible(t *testing.T) {
+	var (
+		nnbsp = string(rune(0x202F)) // narrow no-break space, routine in French
+		nbsp  = string(rune(0x00A0))
+		bom   = string(rune(0xFEFF))
+	)
+	good := stamp(clock)
+	for _, tc := range []struct{ name, text string }{
+		{"narrow no-break space before", nnbsp + good + "\n\nok"},
+		{"no-break space before", nbsp + good + "\n\nok"},
+		{"byte order mark before", bom + good + "\n\nok"},
+		{"no-break space inside", strings.Replace(good, " ", nbsp, 1) + "\n\nok"},
+		{"narrow no-break space before the zone", strings.Replace(good, " ", nnbsp, 2) + "\n\nok"},
+		{"all of them", bom + nnbsp + strings.ReplaceAll(good, " ", nbsp) + "\n\nok"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if v := judge(tc.text, clock, 3*time.Hour); v.kind != stamped {
+				t.Fatalf("kind = %v, want stamped (reason: %s)", v.kind, v.reason())
+			}
+		})
+	}
+}
+
+// ⛔ A ZONE NAME IS NOT TEN CHARACTERS. `Europe/Paris` is twelve, and the cap
+// refused it.
+func TestAnIANAZoneNameIsAZoneName(t *testing.T) {
+	for _, zone := range []string{"CET", "UTC", "GMT+1", "Europe/Paris", "America/Argentina/Buenos_Aires"} {
+		text := "**[2026-11-11 21:30 " + zone + "]**\n\nok"
+		if v := judge(text, clock, 3*time.Hour); v.kind != stamped {
+			t.Errorf("zone %q: kind = %v, want stamped", zone, v.kind)
+		}
+	}
+}
+
+// ...and the zone is still REQUIRED, so widening it did not empty the rule.
+func TestWideningTheZoneDidNotMakeItOptional(t *testing.T) {
+	if v := judge("**[2026-11-11 21:30]**\n\nok", clock, 3*time.Hour); v.kind != missing {
+		t.Fatalf("a stamp with no zone = %v, want missing", v.kind)
+	}
+}
+
 // ---------------------------------------------------------------- transcript
 
 type line map[string]any
@@ -604,6 +654,100 @@ func TestANewUnstampedReplyIsStillRefused(t *testing.T) {
 	}
 	if d := decide(second); d != "block" {
 		t.Fatalf("a different unstamped reply = %q, want block", d)
+	}
+}
+
+// ⛔⛔ IF IT CANNOT COUNT, IT MUST NOT BLOCK. Measured in review: with
+// session_id empty, countPath refuses the name, the count is always 0, and six
+// runs produced six blocks — a wedged session, and the one place this
+// command's invariant had inverted.
+func TestItDoesNotRefuseWhatItCannotCount(t *testing.T) {
+	p := transcript(t, userTurn("proceed"), assistantText("a1", "no stamp"))
+	for i := 0; i < 3; i++ {
+		code, stdout, errOut := drive(t, payload(t, p, ""), "--hook")
+		if code != 0 {
+			t.Fatalf("code = %d", code)
+		}
+		if a := decision(t, stdout); a.Decision != "" {
+			t.Fatalf("run %d refused a reply it cannot count: %q", i, a.Decision)
+		}
+		if !strings.Contains(errOut, "cannot keep a block count") {
+			t.Errorf("it must say why it stood aside; stderr was %q", errOut)
+		}
+	}
+}
+
+// ⛔ stop_hook_active is the protocol's own loop signal, and was parsed and
+// never used. A Stop that FOLLOWS a block judges a reply already written.
+func TestAStopThatFollowsABlockStandsDown(t *testing.T) {
+	p := transcript(t, userTurn("proceed"), assistantText("a1", "no stamp"))
+	raw, err := json.Marshal(stopPayload{
+		SessionID: "s", TranscriptPath: p, HookEventName: "Stop", StopHookActive: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stdout, _ := drive(t, string(raw), "--hook")
+	if a := decision(t, stdout); a.Decision != "" {
+		t.Fatalf("decision = %q, want none", a.Decision)
+	}
+}
+
+// ⛔⛔ A TURN THAT PRODUCED NO TEXT MUST NOT DISCARD THE VERDICT ON THE ONE
+// BEFORE IT. Measured in review over 187 turns: 22 ended on an injected entry
+// — a task notification, a system prompt — with no assistant text after it, and
+// each one ALLOWED the unstamped reply that came before.
+func TestANotificationBehindAnUnstampedReplyDoesNotExcuseIt(t *testing.T) {
+	p := transcript(t,
+		userTurn("proceed"),
+		assistantText("a1", "no stamp here"),
+		line{"type": "user", "uuid": "n1", "turnOrigin": "task_notification",
+			"message": line{"role": "user", "content": []line{
+				{"type": "text", "text": "<task-notification>agent finished</task-notification>"}}}},
+	)
+	r, err := findReply(p)
+	if err != nil {
+		t.Fatalf("the notification excused the reply behind it: %v", err)
+	}
+	if r.uuid != "a1" {
+		t.Fatalf("fell back to %s, want a1", r.uuid)
+	}
+	if judge(r.text, clock, 3*time.Hour).kind != missing {
+		t.Error("the unstamped reply was not refused")
+	}
+}
+
+// ...but a turn that genuinely ended on a tool call with nothing before it is
+// still unanswerable, and still allows.
+func TestTheFallbackDoesNotInventAReply(t *testing.T) {
+	p := transcript(t, userTurn("proceed"), assistantToolUse("a1"))
+	if _, err := findReply(p); err == nil {
+		t.Fatal("want an error: there is no reply to fall back to")
+	}
+}
+
+// ⛔⛔ A MALFORMED FLAG MUST NOT READ AS A REFUSAL. cobra never reaches RunE,
+// so none of the loop logic runs: `--hook --tolerance=zzz` exited 2, which a
+// Stop hook reads as a block whose reason is the flag error, unbounded.
+func TestHookModeIsDecidedBeforeTheFlagsAreParsed(t *testing.T) {
+	for _, args := range [][]string{
+		{"--hook"},
+		{"--hook", "--tolerance=zzz"},
+		{"--tolerance=zzz", "--hook"},
+		{"--hook=true"},
+	} {
+		if !hookMode(args) {
+			t.Errorf("hookMode(%q) = false; a hook would then fail CLOSED", args)
+		}
+	}
+	for _, args := range [][]string{
+		{"--transcript", "x.jsonl"},
+		{},
+		{"--hooks"},
+	} {
+		if hookMode(args) {
+			t.Errorf("hookMode(%q) = true", args)
+		}
 	}
 }
 

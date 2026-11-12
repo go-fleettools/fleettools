@@ -76,6 +76,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
@@ -104,7 +105,37 @@ JSON on stdout.`
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
+	// ⛔⛔ UNDER --hook THE STATUS BELONGS TO THE PROTOCOL, AND cobra NEVER
+	// REACHES RunE WHEN A FLAG IS MALFORMED. Review measured it:
+	// `replystamp --hook --tolerance=zzz` exits 2, and a Stop hook reads 2 as a
+	// BLOCK whose reason is the flag error — refusing every reply in the
+	// session, with nothing to bound it, because none of the loop logic ran.
+	//
+	// The careful status mapping inside runHook was therefore defeated by a
+	// typo in the settings file. A hook must fail OPEN, so the whole program
+	// does, before cobra parses anything: its own breakage can never be a
+	// refusal.
+	if hookMode(os.Args[1:]) {
+		if code := cli.Drive(RootCmd(), os.Args[1:], os.Stdout, os.Stderr); code != 0 {
+			// Say so on stderr, where a hook's output is logged and not read
+			// as a decision, and answer the protocol with an allow.
+			fmt.Fprintf(os.Stderr, "replystamp: allowing: the command itself failed (status %d)\n", code)
+			fmt.Fprintln(os.Stdout, "{}")
+		}
+		return
+	}
 	cli.Run(RootCmd())
+}
+
+// hookMode reports whether this run answers the hook protocol, read from the
+// raw arguments because the answer has to be known BEFORE cobra parses them.
+func hookMode(args []string) bool {
+	for _, a := range args {
+		if a == "--hook" || a == "-hook" || a == "--hook=true" {
+			return true
+		}
+	}
+	return false
 }
 
 // now is the seam the tests move, because every verdict about staleness is a
@@ -260,6 +291,8 @@ func readReply(r io.Reader) (aReply, error) {
 	var (
 		reply     aReply
 		haveReply bool
+		prev      aReply
+		havePrev  bool
 	)
 	for sc.Scan() {
 		line := sc.Bytes()
@@ -284,7 +317,11 @@ func readReply(r io.Reader) (aReply, error) {
 		switch {
 		case e.Type == "user" && isUserTurn(e, m):
 			// A new turn: whatever reply we were holding belonged to the
-			// previous one.
+			// previous one — keep it, because the new turn may produce no
+			// text at all and then it is the only reply there is to judge.
+			if haveReply {
+				prev, havePrev = reply, true
+			}
 			reply, haveReply = aReply{}, false
 		case e.Type == "assistant" && !haveReply && !e.IsAPIErrorMessage:
 			if t, ok := firstText(m.Content); ok {
@@ -299,7 +336,24 @@ func readReply(r io.Reader) (aReply, error) {
 	if err := sc.Err(); err != nil {
 		return aReply{}, err
 	}
+	// ⛔⛔ A TURN THAT PRODUCED NO TEXT MUST NOT DISCARD THE VERDICT ON THE ONE
+	// BEFORE IT. Found in review, 2026-11-12, measured over 187 turns in 11
+	// transcripts: 36 were `turnOrigin: "task_notification"` and 9
+	// `promptSource: "system"`, and 22 of the 187 ENDED on such an entry with
+	// no assistant text after it. A background agent finishing is exactly that
+	// event — and this command answered "no reply text", which ALLOWS.
+	//
+	// So an unstamped reply was excused by a notification arriving behind it:
+	// the gate was disarmed by something neither the user nor the model did.
+	// Falling back to the previous turn's reply keeps the verdict. It cannot
+	// cause a repeat refusal, because a reply is refused once, by UUID.
+	//
+	// A turn that genuinely ended on a tool call with nothing before it is
+	// still unanswerable, and still allows.
 	if !haveReply {
+		if havePrev {
+			return prev, nil
+		}
 		return aReply{}, fmt.Errorf("no reply text after the last turn the user took: the turn ended on a tool call, or the transcript holds no turn")
 	}
 	return reply, nil
@@ -407,7 +461,11 @@ type verdict struct {
 // ⛔ THE LEFT ANCHOR IS THE WHOLE CHECK. Without `^` this matches a stamp
 // written anywhere in the reply, and "start every reply with" is exactly the
 // part of the rule that was broken.
-var stampRe = regexp.MustCompile(`^\*\*\[(\d{4})-(\d{2})-(\d{2}) (\d{1,2}):(\d{2})(?::(\d{2}))? ([A-Za-z][A-Za-z0-9/_+-]{1,9})\]\*\*`)
+// ⛔⛔ THE ZONE TOKEN WAS CAPPED AT TEN CHARACTERS, so `Europe/Paris` — twelve
+// — could never match and a reply stamped with an IANA zone name was refused.
+// Found in review, 2026-11-12, and confirmed by measurement. A cap is a claim
+// about what a zone may be called, and I had no business making a tight one.
+var stampRe = regexp.MustCompile(`^\*\*\[(\d{4})-(\d{2})-(\d{2}) (\d{1,2}):(\d{2})(?::(\d{2}))? ([A-Za-z][A-Za-z0-9/_+-]{1,39})\]\*\*`)
 
 // twelveHourRe is checked FIRST, because a 12-hour stamp fails stampRe and
 // would otherwise be reported as "no stamp at all" -- a true statement that
@@ -417,7 +475,19 @@ var twelveHourRe = regexp.MustCompile(`(?i)^\*\*\[[^\]]*\b\d{1,2}:\d{2}(:\d{2})?
 func judge(text string, clock time.Time, tolerance time.Duration) verdict {
 	// Leading whitespace only: a stamp under a blank line is still the opening
 	// of the reply, and refusing it would be pedantry rather than the rule.
-	t := strings.TrimLeft(text, " \t\r\n")
+	//
+	// ⛔⛔ AND "WHITESPACE" MEANS UNICODE'S, NOT " \t\r\n". Found in review,
+	// 2026-11-12, measured with fixtures built from code points. A stamp
+	// preceded by U+00A0 or U+202F, or by a byte order mark, was refused — and
+	// the refusal quoted the stamp back LOOKING EXACTLY RIGHT, so there was
+	// nothing in it to act on and the same text would be re-emitted until the
+	// block count ran out. An invisible character in a refusal is worse than
+	// no refusal.
+	//
+	// This matters for this fleet specifically: the user writes French, where a
+	// narrow no-break space before punctuation is ordinary typography and is
+	// inserted by editors without being asked for.
+	t := foldSpaces(strings.TrimLeftFunc(text, isSpaceOrMark))
 	got := opening(t)
 
 	if twelveHourRe.MatchString(t) {
@@ -450,6 +520,54 @@ func judge(text string, clock time.Time, tolerance time.Duration) verdict {
 		return verdict{kind: stale, at: at, off: off, got: got}
 	}
 	return verdict{kind: stamped, at: at, off: off, got: got}
+}
+
+// isSpaceOrMark reports whether r is whitespace to be skipped before the
+// stamp. U+FEFF is included explicitly: it is a FORMAT character, not a space,
+// so unicode.IsSpace is false for it, and an editor that writes a byte order
+// mark would otherwise make every reply unstampable.
+//
+// ⛔ The code point is written as a NUMBER, and this comment names it in words
+// rather than spelling the escape. Three times while writing this fix, an
+// editor turned the written-out escape into a literal byte order mark — once
+// in a test generator, once in this expression, once inside this very comment
+// — and the Go compiler answered "illegal byte order mark" each time. That is
+// the whole argument for this function, in its own source.
+const byteOrderMark = rune(0xFEFF)
+
+func isSpaceOrMark(r rune) bool {
+	return unicode.IsSpace(r) || r == byteOrderMark
+}
+
+// foldSpaces replaces every Unicode space with an ASCII one, so that the
+// pattern can stay written in ordinary spaces.
+//
+// ⛔ It folds rather than rejects. A no-break space inside `**[… CET]**` is
+// correct typography and a correct stamp; the rule is about the TIME being
+// there and being right, never about which space character separates it. A
+// gate that enforced ASCII would be enforcing something nobody wrote down.
+//
+// ⛔ It must not change the string's LENGTH, or `opening` would quote back a
+// different span than was matched. U+00A0 and U+202F are two and three bytes
+// against one, so this builds a new string for MATCHING only; the original is
+// what gets quoted.
+func foldSpaces(s string) string {
+	if !strings.ContainsFunc(s, func(r rune) bool { return r != ' ' && unicode.IsSpace(r) && r != '\n' && r != '\t' && r != '\r' }) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\t' || r == '\r':
+			b.WriteRune(r)
+		case unicode.IsSpace(r):
+			b.WriteByte(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // opening quotes the first line of the reply, shortened, so that a reason can
@@ -585,6 +703,28 @@ func runHook(cmd *cobra.Command, o *options) error {
 	// ⛔ And the reason had to change with it: what the model can actually do is
 	// open its NEXT turn with the stamp. A gate that asks for the impossible
 	// teaches nothing and costs a turn each time it asks.
+	// ⛔⛔ IF IT CANNOT COUNT, IT MUST NOT BLOCK. This is the one place the
+	// invariant had inverted, and review measured it: with session_id empty,
+	// countPath refuses the name, blocksSoFar always answers 0, n is always 1,
+	// and six runs produced six blocks. The same holds when os.UserConfigDir
+	// fails or the state directory is unwritable, because recordBlock discards
+	// its error.
+	//
+	// Everywhere else this command allows what it cannot read. Here it refused
+	// what it could not remember — and a refusal it cannot count is a refusal
+	// it cannot stop, which is a wedged session rather than a finding.
+	//
+	// stop_hook_active is the protocol's own answer to this and was parsed and
+	// never used: it is set when this Stop follows a block, which is exactly
+	// the second refusal there is no state to recognise.
+	if _, ok := countPath(p.SessionID); !ok {
+		return allow(out, errOut,
+			"cannot keep a block count for this session, so cannot bound a refusal: allowing rather than risk a loop")
+	}
+	if p.StopHookActive {
+		return allow(out, errOut,
+			"this Stop follows a block, and the reply it would judge is already written: standing down")
+	}
 	n, last := blocksSoFar(p.SessionID)
 	if f.uuid != "" && f.uuid == last {
 		return allow(out, errOut,
