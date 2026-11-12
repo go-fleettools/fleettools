@@ -250,36 +250,71 @@ func TestTheListsAreRefreshedBeforeInstalling(t *testing.T) {
 	if f.updates() != 1 {
 		t.Errorf("%d update call(s): %v", f.updates(), f.calls)
 	}
+	// ⛔ BEFORE, not merely somewhere. Counting the call left the order free:
+	// moving `update` after the install kept this green, and an install run
+	// against lists that are refreshed afterwards is an install against stale
+	// lists.
+	if len(f.calls) == 0 || !strings.HasSuffix(f.calls[0], " update") {
+		t.Errorf("the lists were not refreshed FIRST: %v", f.calls)
+	}
 }
 
-// ⛔⛔ A FAILING `update` MUST NOT TURN A TYPO INTO AN OUTAGE. One unreachable
-// PPA is enough to make `apt-get update` print "Temporary failure resolving"
-// while the install goes on to answer, correctly, that the package does not
-// exist. The first version judged the two outputs TOGETHER, and since mirror
-// phrases are read first, that typo was classified as an outage: three
-// attempts, two sleeps, the mirrorlist rewritten, and a verdict blaming the
-// network — the precise mistake this command exists to refuse, built into it
-// by the line meant to refuse it. Found in review, not by me.
-func TestAFailingUpdateDoesNotTurnATypoIntoAnOutage(t *testing.T) {
+// ⛔⛔ "CANNOT LOCATE" MEANS NOTHING WHEN THE LISTS COULD NOT BE REFRESHED,
+// AND THIS IS THE CASE TWO REVIEWS READ OPPOSITE WAYS. The same two lines —
+// a resolver error from `update`, "Unable to locate package" from the install
+// — are a broken optional PPA beside a real misspelling, OR a cold cache in
+// which the name was never checked against anything. They cannot be told
+// apart from the text, so neither reading may be hard-coded: whichever is
+// chosen is wrong half the time and confident every time.
+//
+// What is asserted instead is that the tool does not choose. It retries, like
+// the mirror failure it might be, and its closing verdict names BOTH facts.
+func TestANameAptCouldNotCheckIsNotCalledATypo(t *testing.T) {
 	f := &fake{
 		update: &answer{
-			output: "Err:1 http://ppa.launchpadcontent.net/x/ubuntu noble InRelease\n" +
-				"  Temporary failure resolving 'ppa.launchpadcontent.net'\n", status: 100},
-		answers: []answer{{output: "E: Unable to locate package poppler-util\n", status: 100}},
+			output: "Err:1 http://azure.archive.ubuntu.com/ubuntu noble InRelease\n" +
+				"  Temporary failure resolving 'azure.archive.ubuntu.com'\n" +
+				"E: Some index files failed to download.\n", status: 100},
+		answers: []answer{{output: "Reading package lists... Done\n" +
+			"E: Unable to locate package poppler-utils\n", status: 100}},
 	}
+	f.install(t)
+	code, _, errb := drive(t, "--need", "pdftoppm", "--retries", "1", "poppler-utils")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	// ⛔ RETRIED, because retrying is cheap and the fallback may settle it,
+	// where calling it a typo ends the job on evidence that does not exist.
+	if f.installs() != 2 {
+		t.Errorf("it decided on its own which of the two this was: %d attempt(s), %v",
+			f.installs(), f.calls)
+	}
+	if len(f.written) == 0 {
+		t.Error("the fallback was not tried on a failure that may well be the mirror")
+	}
+	// ⛔ AND THE VERDICT NAMES BOTH, so the reader is sent to the spelling and
+	// to the network, in that order, rather than confidently to one of them.
+	for _, want := range []string{"could not locate it AND could not refresh", "check the spelling first"} {
+		if !strings.Contains(errb, want) {
+			t.Errorf("the verdict does not say %q: %q", want, errb)
+		}
+	}
+	if strings.Contains(errb, "that is a name, not an outage") {
+		t.Errorf("it called an unprovable name a typo: %q", errb)
+	}
+}
+
+// And a name apt COULD check is still refused outright: lists refreshed
+// cleanly, so "cannot locate" is evidence rather than a shrug.
+func TestANameAptCouldCheckIsStillRefusedOutright(t *testing.T) {
+	f := &fake{answers: []answer{{output: "E: Unable to locate package poppler-util\n", status: 100}}}
 	f.install(t)
 	code, _, errb := drive(t, "--need", "pdftoppm", "--retries", "2", "poppler-util")
 	if code != 1 {
 		t.Fatalf("exit %d", code)
 	}
 	if f.installs() != 1 {
-		t.Errorf("a typo was retried %d times because `update` had failed: %v", f.installs(), f.calls)
-	}
-	if f.slept != 0 {
-		t.Errorf("it slept %d time(s) over a typo", f.slept)
-	}
-	if len(f.written) != 0 {
-		t.Errorf("it rewrote %v over a typo", f.written)
+		t.Errorf("a name apt could check was retried %d times: %v", f.installs(), f.calls)
 	}
 	if !strings.Contains(errb, "that is a name, not an outage") {
 		t.Errorf("it said %q", errb)
@@ -332,12 +367,18 @@ func TestTheMirrorlistIsNotRewrittenWithNoAttemptLeftToUseIt(t *testing.T) {
 	f := &fake{answers: []answer{
 		{output: "Temporary failure resolving 'azure.archive.ubuntu.com'\n", status: 100}}}
 	f.install(t)
-	code, _, _ := drive(t, "--need", "pdftoppm", "--retries", "0", "poppler-utils")
+	code, _, errb := drive(t, "--need", "pdftoppm", "--retries", "0", "poppler-utils")
 	if code != 1 {
 		t.Fatalf("exit %d", code)
 	}
 	if len(f.written) != 0 {
 		t.Errorf("it rewrote %v with no attempt left to use it", f.written)
+	}
+	// ⛔ AND THE VERDICT SAYS SO. Checking only `written` left reason()'s new
+	// argument undefended: passing `fallback` instead of `swapped` kept the
+	// suite green and brought back the claim of a fallback never made.
+	if !strings.Contains(errb, "the canonical archive was not tried") {
+		t.Errorf("it claimed a fallback it never made: %q", errb)
 	}
 }
 

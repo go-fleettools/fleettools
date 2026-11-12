@@ -102,7 +102,8 @@ func RootCmd() *cobra.Command {
 	c.Flags().IntVar(&retries, "retries", 2, "attempts after the first")
 	c.Flags().DurationVar(&delay, "delay", 20*time.Second, "wait between attempts")
 	c.Flags().BoolVar(&fallback, "fallback-mirror", true,
-		"after a mirror failure, rewrite "+mirrorList+" to the canonical archive")
+		"on a mirror failure, and while an attempt remains to use it, rewrite "+
+			mirrorList+" to the canonical archive")
 	c.Args = cobra.ArbitraryArgs
 	c.RunE = func(cmd *cobra.Command, args []string) error {
 		return aptneed(cmd, args, need, retries, delay, fallback)
@@ -164,6 +165,11 @@ const (
 	otherFailure kind = iota
 	mirrorFailure
 	noSuchPackage
+	// unprovenName is "apt cannot locate it" said by a run whose package
+	// lists could not be refreshed. It is its own answer because it is
+	// genuinely two situations wearing the same words, and neither reading
+	// is safe on its own — see install().
+	unprovenName
 )
 
 func why(output string) kind {
@@ -195,8 +201,8 @@ func why(output string) kind {
 // single dropped connection this would otherwise sleep twenty seconds over.
 func install(pkgs []string) (string, kind, bool) {
 	var all strings.Builder
-	out, _ := runCommand("apt-get", "-o", "Acquire::Retries=3", "update")
-	all.WriteString(out)
+	updateOut, _ := runCommand("apt-get", "-o", "Acquire::Retries=3", "update")
+	all.WriteString(updateOut)
 	// ⛔ A FAILED `update` IS NOT FATAL ON ITS OWN. apt exits non-zero when any
 	// index is unreachable while the cached lists are still usable, and the
 	// install below may well succeed from them. What decides is the install.
@@ -207,17 +213,32 @@ func install(pkgs []string) (string, kind, bool) {
 	if status == 0 {
 		return all.String(), otherFailure, true
 	}
-	// ⛔⛔ THE INSTALL'S OWN WORDS DECIDE, NOT THE PAIR'S. The first version
-	// passed both outputs to why() — the sentence above saying "what decides is
-	// the install" while the code handed over the update's text as well. One
-	// unreachable PPA makes `update` print "Temporary failure resolving", and
-	// why() reads mirror phrases first, so a genuine "Unable to locate package"
-	// from the install was classified as an outage: retried, slept over, and
-	// the mirrorlist rewritten, for a typo. That is the exact mistake this
-	// command exists to refuse, built into it by the line that was supposed to
-	// refuse it. The pair is still RETURNED, because apt's whole account of the
-	// attempt belongs in the log; it is only the VERDICT that narrows.
-	return all.String(), why(out), false
+	// ⛔⛔ THE INSTALL'S OWN WORDS DECIDE — AND WHEN THE LISTS COULD NOT BE
+	// REFRESHED, THEY DECIDE NOTHING. Two reviews of this function returned
+	// OPPOSITE verdicts on the same two lines of apt output:
+	//
+	//	update:  Temporary failure resolving '…'
+	//	install: E: Unable to locate package poppler-utils
+	//
+	// One called it a typo wrongly retried as weather (a broken optional PPA
+	// beside a real misspelling); the other called it an outage wrongly
+	// dismissed as a typo (a cold cache, the name never checked against
+	// anything). Both are right about their own case, and the two cases are
+	// INDISTINGUISHABLE from the text — which is why neither reading may be
+	// hard-coded. A tool that picks one is wrong half the time and confident
+	// every time.
+	//
+	// So it is its own answer: "cannot locate" is UNPROVEN when the lists are
+	// stale. It is retried like a mirror failure, because retrying is cheap
+	// and the fallback may settle it, and the closing verdict names BOTH
+	// facts rather than choosing between them.
+	k := why(out)
+	if k == noSuchPackage && why(updateOut) == mirrorFailure {
+		k = unprovenName
+	}
+	// The pair is still RETURNED, because apt's whole account of the attempt
+	// belongs in the log; it is only the VERDICT that narrows.
+	return all.String(), k, false
 }
 
 func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Duration, fallback bool) error {
@@ -284,8 +305,14 @@ func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Du
 			fmt.Fprintf(stderr, "aptneed: apt cannot locate %s — that is a name, not an "+
 				"outage, so this is not retried\n", strings.Join(pkgs, ", "))
 			return cli.Found("no such package: %s", strings.Join(pkgs, ", "))
-		case mirrorFailure:
-			fmt.Fprintf(stderr, "aptneed: the runner's mirror could not be reached\n")
+		case mirrorFailure, unprovenName:
+			if k == unprovenName {
+				fmt.Fprintf(stderr, "aptneed: apt cannot locate %s, and it could not refresh "+
+					"its package lists either — so that may be the name or may be the "+
+					"mirror, and this retries rather than guess\n", strings.Join(pkgs, ", "))
+			} else {
+				fmt.Fprintf(stderr, "aptneed: the runner's mirror could not be reached\n")
+			}
 			// ⛔ AND NOT WHEN THERE IS NO ATTEMPT LEFT TO USE IT. Rewriting the
 			// mirrorlist on the last turn changes the runner permanently for
 			// every later step of the job and tries nothing with it.
@@ -320,6 +347,13 @@ func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Du
 // fallback that had never been attempted. A sentence about what was tried has
 // to be a function of what was tried.
 func reason(k kind, triedCanonical bool) string {
+	if k == unprovenName {
+		// ⛔ BOTH FACTS, AND NO VERDICT BETWEEN THEM. Naming only one sends
+		// the reader to the wrong place half the time, with full confidence.
+		return "apt could not locate it AND could not refresh its package lists, so this is " +
+			"either a wrong name or a mirror that never came back — check the spelling first, " +
+			"it is the cheaper of the two"
+	}
 	if k != mirrorFailure {
 		return "apt failed and said nothing this recognises; its output is above"
 	}
