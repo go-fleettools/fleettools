@@ -172,9 +172,20 @@ func TestQuotingADeferralIsStillADeferral(t *testing.T) {
 	}
 }
 
-// A worst case the size MaxText allows must scan in well under a second: the
-// bound was once recomputed per finding, which made one 1 MiB paragraph take
-// minutes.
+// A worst case the size MaxText allows must scan in time that grows LINEARLY,
+// not quadratically: the bound was once recomputed per finding, which made one
+// 1 MiB paragraph take minutes.
+//
+// ⛔ THE ASSERTION IS THE RATIO AT THE END, NOT A CLOCK. This comment used to
+// say "in well under a second", describing an absolute budget that is gone —
+// it made main red three times on a shared runner (#258) while the ratio it
+// stood beside was immune. A comment that describes a deleted assertion is an
+// invitation to restore it.
+//
+// ⛔ THE 1 MiB SCAN MUST RUN FIRST, and nothing below should be reordered
+// above it. It absorbs the one-time costs — regexp compilation, warm caches —
+// that would otherwise land on `small` and inflate it, and an inflated `small`
+// is exactly what would let a real regression through the ratio.
 func TestScanIsNotQuadratic(t *testing.T) {
 	unit := "We skip the SIMD kernel because it would break bit parity and the radix gap. "
 	text := strings.Repeat(unit, MaxText/len(unit))
