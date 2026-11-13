@@ -124,7 +124,7 @@ its tool_use land in the same write, and the tool_use can trail its timestamp
 by seconds (measured p90 ~1.8 s, max 4.7 s). So it polls every 50 ms until the
 payload's tool_use_id is in the transcript tail, then judges; after 3 s without
 it, it ALLOWS. With the tool_use already there the wait is ~0. A payload with
-no tool_use_id falls back to a 300 ms re-read window before a no-text deny.
+no tool_use_id is ALLOWED: the transcript cannot be known complete.
 
 Every hook mode ALLOWS whenever it cannot read -- an unreadable transcript, a
 turn it cannot locate, a payload of another event, malformed JSON, a malformed
@@ -1077,13 +1077,10 @@ func unstampedReason(v verdict) string {
 }
 
 // The transcript is written asynchronously and may lag the hook: the text the
-// model wrote a moment ago can be missing when PreToolUse runs. Before denying
-// for "no text", the tail is re-read every settleStep for up to settleWindow;
-// a deny is therefore delayed by at most settleWindow, never more.
+// model wrote a moment ago can be missing when PreToolUse runs.
 var (
-	settleWindow = 300 * time.Millisecond
-	settleStep   = 50 * time.Millisecond
-	settleSleep  = time.Sleep
+	settleStep  = 50 * time.Millisecond
+	settleSleep = time.Sleep
 )
 
 // Measured on live transcripts: the text and the tool_use of one message land
@@ -1092,7 +1089,10 @@ var (
 // batched), so with a tool_use_id the hook waits until THAT entry is in the
 // tail -- the text before it is then on disk too -- for at most toolWait, and
 // ALLOWS on timeout.
-var toolWait = 3 * time.Second
+const defaultToolWait = 3 * time.Second
+
+// toolWait is a variable only so a test can use a shorter cap.
+var toolWait = defaultToolWait
 
 // settledTurn reads the newest turn once the call being judged is on disk. A
 // non-empty allowWhy means: allow, for that reason. An error means allow too.
@@ -1101,20 +1101,15 @@ func settledTurn(path, toolUseID string) (s turnState, allowWhy string, err erro
 	if err != nil || !s.found {
 		return s, "", err
 	}
-	if toolUseID != "" {
-		for waited := time.Duration(0); !s.toolIDs[toolUseID]; waited += settleStep {
-			if waited >= toolWait {
-				return s, fmt.Sprintf("tool_use %q is not in the transcript after %v: cannot tell whether the turn wrote text", toolUseID, toolWait), nil
-			}
-			settleSleep(settleStep)
-			if s, err = lastTurn(path); err != nil || !s.found {
-				return s, "", err
-			}
-		}
-		return s, "", nil
+	if toolUseID == "" {
+		// A payload with no tool_use_id comes from a client this cannot read, and
+		// without the id there is no way to know the transcript is complete.
+		return s, "the payload names no tool_use_id, so the transcript cannot be known complete", nil
 	}
-	// No tool_use_id in the payload: the fixed window.
-	for waited := time.Duration(0); !s.hasText && waited < settleWindow; waited += settleStep {
+	for waited := time.Duration(0); !s.toolIDs[toolUseID]; waited += settleStep {
+		if waited >= toolWait {
+			return s, fmt.Sprintf("tool_use %q is not in the transcript after %v: cannot tell whether the turn wrote text", toolUseID, toolWait), nil
+		}
 		settleSleep(settleStep)
 		if s, err = lastTurn(path); err != nil || !s.found {
 			return s, "", err

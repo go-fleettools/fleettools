@@ -248,7 +248,7 @@ func stampedAt(uuid, text string, at time.Time) line {
 
 func assistantToolUse(uuid string) line {
 	return line{"type": "assistant", "uuid": uuid, "message": line{"role": "assistant",
-		"content": []line{{"type": "tool_use", "name": "Bash"}}}}
+		"content": []line{{"type": "tool_use", "name": "Bash", "id": "toolu_" + uuid}}}}
 }
 
 func assistantThinking(uuid string) line {
@@ -899,11 +899,32 @@ func TestNoArgumentsIsNotACleanResult(t *testing.T) {
 
 func pretoolPayload(t *testing.T, transcriptPath, session, event string) string {
 	t.Helper()
-	raw, err := json.Marshal(stopPayload{SessionID: session, TranscriptPath: transcriptPath, HookEventName: event})
+	raw, err := json.Marshal(stopPayload{SessionID: session, TranscriptPath: transcriptPath, HookEventName: event,
+		ToolUseID: lastToolUseID(transcriptPath)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+// lastToolUseID is the id of the transcript's newest tool_use: the call the
+// hook is being asked about. A file with none (or unreadable) gets a placeholder.
+func lastToolUseID(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "toolu_unreadable"
+	}
+	id := "toolu_none"
+	for _, l := range bytes.Split(b, []byte("\n")) {
+		_, m, ok := decodeEntry(l)
+		if !ok {
+			continue
+		}
+		if ids := toolUseIDs(m.Content); len(ids) > 0 {
+			id = ids[len(ids)-1]
+		}
+	}
+	return id
 }
 
 func turnUUID(uuid, text string) line {
@@ -985,7 +1006,7 @@ func TestPretoolDeniesAfterACompactionWhenNoText(t *testing.T) {
 func TestPretoolTextBeforeACompactionDoesNotExcuseTheNewTurn(t *testing.T) {
 	// The only text is from the previous turn; the continuation is the anchor.
 	wantDeny(t, "compaction-old-text",
-		turnUUID("t0", "old"), assistantText("a0", "old reply"), compactionTurn("c1"))
+		turnUUID("t0", "old"), assistantText("a0", "old reply"), compactionTurn("c1"), assistantToolUse("a1"))
 }
 
 func TestPretoolAToolResultIsNotAUserTurn(t *testing.T) {
@@ -1162,7 +1183,7 @@ func pretoolWithID(t *testing.T, p, session, id string) (string, time.Duration) 
 // tool_use_id wait and the first read sees no text: a false deny.
 func TestPretoolWaitsForTheToolUseThenJudgesIt(t *testing.T) {
 	p := transcript(t, turnUUID("t1", "go"))
-	done := appendLater(t, p, time.Second, assistantToolUseID("a1", "toolu_1", stamp(clock)+"\n\nlanded"))
+	done := appendLater(t, p, 400*time.Millisecond, assistantToolUseID("a1", "toolu_1", stamp(clock)+"\n\nlanded"))
 	stdout, took := pretoolWithID(t, p, "late-ok", "toolu_1")
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -1170,13 +1191,13 @@ func TestPretoolWaitsForTheToolUseThenJudgesIt(t *testing.T) {
 	if ok, _ := denied(t, stdout); ok {
 		t.Fatalf("a compliant turn was refused while its tool_use was in flight: %q", stdout)
 	}
-	if took < time.Second {
+	if took < 400*time.Millisecond {
 		t.Errorf("returned after %v, before the entry landed", took)
 	}
 
 	// Judged correctly once it lands: unstamped text is still a deny.
 	p = transcript(t, turnUUID("t1", "go"))
-	done = appendLater(t, p, time.Second, assistantToolUseID("a1", "toolu_2", "no stamp"))
+	done = appendLater(t, p, 400*time.Millisecond, assistantToolUseID("a1", "toolu_2", "no stamp"))
 	stdout, _ = pretoolWithID(t, p, "late-bad", "toolu_2")
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -1222,38 +1243,33 @@ func TestPretoolDoesNotWaitWhenTheToolUseIsPresent(t *testing.T) {
 	}
 }
 
-// A payload without tool_use_id falls back to the fixed window (the delayed
-// text test above covers the allow); a never-arriving text still denies.
-func TestPretoolWithoutAToolUseIDFallsBackToTheWindow(t *testing.T) {
+// A payload without tool_use_id comes from a client we cannot read: allow, even
+// when the turn has no text.
+func TestPretoolAllowsAPayloadWithoutAToolUseID(t *testing.T) {
 	p := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
-	stdout, took := pretoolWithID(t, p, "fallback", "")
-	if ok, _ := denied(t, stdout); !ok {
-		t.Fatalf("no text, no id: want deny after the window, got %q", stdout)
+	stdout, took := pretoolWithID(t, p, "no-id", "")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("no tool_use_id: want allow, got %q", stdout)
 	}
-	if took < settleWindow {
-		t.Errorf("fallback returned after %v, before the %v window", took, settleWindow)
+	if took > 50*time.Millisecond {
+		t.Errorf("it waited %v for nothing", took)
 	}
 }
 
 // A read error while waiting allows rather than denying on the earlier state.
+// The remover is joined before the test returns, so no goroutine outlives it.
 func TestPretoolAllowsWhenTheTranscriptVanishesDuringTheWait(t *testing.T) {
 	p := transcript(t, turnUUID("t1", "go"))
-	go func() {
+	done := make(chan struct{})
+	go func(path string) {
+		defer close(done)
 		time.Sleep(120 * time.Millisecond)
-		os.Remove(p)
-	}()
+		os.Remove(path)
+	}(p)
 	stdout, _ := pretoolWithID(t, p, "vanish", "toolu_1")
+	<-done
 	if ok, _ := denied(t, stdout); ok {
 		t.Fatalf("a read error during the wait must allow: %q", stdout)
-	}
-	p = transcript(t, turnUUID("t1", "go"))
-	go func() {
-		time.Sleep(120 * time.Millisecond)
-		os.Remove(p)
-	}()
-	stdout, _, _ = func() (string, int, error) { c, o, _ := pretool(t, p, "vanish2"); _ = c; return o, 0, nil }()
-	if ok, _ := denied(t, stdout); ok {
-		t.Fatalf("a read error during the fallback window must allow: %q", stdout)
 	}
 }
 
@@ -1304,60 +1320,6 @@ func TestPretoolBoundIsSharedByBothDenies(t *testing.T) {
 	if !run(again) {
 		t.Fatalf("a new turn must be refused again")
 	}
-}
-
-// ⛔ #277 part 2: the transcript lags the hook. The text entry lands 120 ms
-// after the hook starts looking; the call must be ALLOWED. Remove the re-read
-// window (settleWindow = 0) and this is the test that goes red.
-func TestPretoolAllowsWhenTheTextLandsAfterTheFirstRead(t *testing.T) {
-	p := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
-	raw, err := json.Marshal(assistantText("a0", stamp(clock)+"\n\nlanded late"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		time.Sleep(120 * time.Millisecond)
-		f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
-		if err == nil {
-			_, err = f.Write(append(raw, '\n'))
-			f.Close()
-		}
-		done <- err
-	}()
-	start := time.Now()
-	code, stdout, errOut := pretool(t, p, "lag")
-	took := time.Since(start)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if code != 0 {
-		t.Fatalf("exit %d", code)
-	}
-	if ok, _ := denied(t, stdout); ok {
-		t.Fatalf("a compliant turn was refused because the transcript lagged: %q (stderr %q)", stdout, errOut)
-	}
-	if took > settleWindow+250*time.Millisecond {
-		t.Errorf("allow took %v, window is %v", took, settleWindow)
-	}
-}
-
-// A text that never arrives is still a deny, and the added latency is bounded.
-func TestPretoolDenyWaitsAtMostTheWindow(t *testing.T) {
-	p := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
-	start := time.Now()
-	_, stdout, _ := pretool(t, p, "never")
-	took := time.Since(start)
-	if ok, _ := denied(t, stdout); !ok {
-		t.Fatalf("no text ever arrived but the call was allowed: %q", stdout)
-	}
-	if took < settleWindow {
-		t.Errorf("deny after %v: it did not wait the %v window", took, settleWindow)
-	}
-	if took > settleWindow+300*time.Millisecond {
-		t.Errorf("deny took %v: added latency must stay near the %v window", took, settleWindow)
-	}
-	t.Logf("deny wall time: %v (window %v, step %v)", took, settleWindow, settleStep)
 }
 
 // ------------------------------------------------- review fixes on --pretool
