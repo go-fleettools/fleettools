@@ -67,6 +67,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -95,16 +96,53 @@ blocked and written again.
 
   replystamp --transcript <file>    report on the last reply in a transcript
   replystamp --hook                 answer a Stop payload read on stdin
+  replystamp --pretool              answer a PreToolUse payload read on stdin
 
-It ALLOWS whenever it cannot read -- an unreadable transcript, a turn with no
-text in it, a payload that is not a Stop payload. A refusal is not a verdict.
+--hook is a detector: it judges a reply that is already written. --pretool is
+the prevention. It refuses a tool call when the turn (everything since the last
+genuine user turn, a compaction continuation included) has written NO text
+yet, telling the model to open with the stamp first. Text between tool calls
+counts as the turn's first text. It does not judge the stamp: unstamped text is
+--hook's business. Wire it as a PreToolUse hook with NO matcher, because a
+Bash-only matcher lets a turn that opens on Read or Edit walk past it:
+
+  command: ~/.local/bin/replystamp --pretool
+
+After --max-blocks consecutive refusals in the same turn it allows. It reads
+only the tail of the transcript (at most 32 MiB) and allows when no user turn
+is in it, allows a subagent's call (payload agent_id), and never calls the
+network. A task notification counts as a user turn on purpose: a reply to one
+must be stamped too.
+
+Honest limit: the docs say the transcript is written asynchronously and may
+lag. A lag yields a FALSE DENY (text already written but not yet on disk), not
+a safe miss; the --max-blocks bound caps the cost at that many refusals.
+
+Every hook mode ALLOWS whenever it cannot read -- an unreadable transcript, a
+turn it cannot locate, a payload of another event, malformed JSON, a malformed
+flag. A refusal is not a verdict.
 
 Exit status: 0 stamped, 1 not stamped, 2 the question could not be put. Under
---hook the status is the hook protocol's and is always 0; the verdict is the
-JSON on stdout.`
+--hook and --pretool the status is the hook protocol's and is always 0; the
+verdict is the JSON on stdout.`
 
 func main() {
-	fleet.WarnIfStale(os.Stderr)
+	if dispatch(os.Args[1:], os.Stdout, os.Stderr, func(w io.Writer) { fleet.WarnIfStale(w) }) {
+		return
+	}
+	cli.Run(RootCmd())
+}
+
+// dispatch handles hook mode and reports whether it did. warn is the staleness
+// warning, which is a `gh api` call (553 ms measured): ⛔ HOOK MODE NEVER CALLS
+// IT. A PreToolUse hook runs before every tool call, and a network round trip
+// there is paid hundreds of times a session. It is a parameter so a test can
+// assert it.
+func dispatch(args []string, stdout, stderr io.Writer, warn func(io.Writer)) bool {
+	if !hookMode(args) {
+		warn(stderr)
+		return false
+	}
 	// ⛔⛔ UNDER --hook THE STATUS BELONGS TO THE PROTOCOL, AND cobra NEVER
 	// REACHES RunE WHEN A FLAG IS MALFORMED. Review measured it:
 	// `replystamp --hook --tolerance=zzz` exits 2, and a Stop hook reads 2 as a
@@ -115,16 +153,20 @@ func main() {
 	// typo in the settings file. A hook must fail OPEN, so the whole program
 	// does, before cobra parses anything: its own breakage can never be a
 	// refusal.
-	if hookMode(os.Args[1:]) {
-		if code := cli.Drive(RootCmd(), os.Args[1:], os.Stdout, os.Stderr); code != 0 {
-			// Say so on stderr, where a hook's output is logged and not read
-			// as a decision, and answer the protocol with an allow.
-			fmt.Fprintf(os.Stderr, "replystamp: allowing: the command itself failed (status %d)\n", code)
-			fmt.Fprintln(os.Stdout, "{}")
-		}
-		return
+	driveHook(args, stdout, stderr)
+	return true
+}
+
+// driveHook runs the command in hook mode and ALWAYS leaves the process with
+// status 0 (it returns, main returns): a failure of the command itself becomes
+// an allow on stdout, never a status the protocol would read as a block.
+func driveHook(args []string, stdout, stderr io.Writer) {
+	if code := cli.Drive(RootCmd(), args, stdout, stderr); code != 0 {
+		// Say so on stderr, where a hook's output is logged and not read
+		// as a decision, and answer the protocol with an allow.
+		fmt.Fprintf(stderr, "replystamp: allowing: the command itself failed (status %d)\n", code)
+		fmt.Fprintln(stdout, "{}")
 	}
-	cli.Run(RootCmd())
 }
 
 // hookMode reports whether this run answers the hook protocol, read from the
@@ -141,7 +183,9 @@ func main() {
 func hookMode(args []string) bool {
 	for _, a := range args {
 		name, value, hasValue := strings.Cut(a, "=")
-		if name != "--hook" && name != "-hook" {
+		// --pretool is a hook too, and a worse one to wedge: it sits in front
+		// of EVERY tool call.
+		if name != "--hook" && name != "-hook" && name != "--pretool" && name != "-pretool" {
 			continue
 		}
 		if !hasValue {
@@ -183,6 +227,7 @@ func defaultStateDir() (string, error) {
 type options struct {
 	transcript string
 	hook       bool
+	pretool    bool
 	tolerance  time.Duration
 	maxBlocks  int
 }
@@ -190,10 +235,11 @@ type options struct {
 // RootCmd builds the command.
 func RootCmd() *cobra.Command {
 	var o options
-	c := cli.New("replystamp [--transcript <file> | --hook]",
+	c := cli.New("replystamp [--transcript <file> | --hook | --pretool]",
 		"refuse a reply that does not open with the local date and time", longHelp)
 	c.Flags().StringVar(&o.transcript, "transcript", "", "transcript .jsonl to read the last reply from")
 	c.Flags().BoolVar(&o.hook, "hook", false, "read a Stop hook payload on stdin and answer the hook protocol")
+	c.Flags().BoolVar(&o.pretool, "pretool", false, "read a PreToolUse hook payload on stdin and refuse a tool call made before the turn has written any text")
 	// ⛔ THREE HOURS, NOT FIFTEEN MINUTES, and the width is the point.
 	//
 	// The stamp is written at the START of a reply and this runs at its END,
@@ -213,6 +259,9 @@ func RootCmd() *cobra.Command {
 func run(cmd *cobra.Command, o *options) error {
 	if cli.HelpRequested(cmd) {
 		return nil
+	}
+	if o.pretool {
+		return runPretool(cmd, o)
 	}
 	if o.hook {
 		return runHook(cmd, o)
@@ -311,39 +360,55 @@ func findReply(path string) (aReply, error) {
 	return readReply(f)
 }
 
-func readReply(r io.Reader) (aReply, error) {
+// scanEntries calls fn for each decodable, non-sidechain entry of a transcript.
+// It is the ONE transcript parser: the Stop hook, --transcript and --pretool
+// all read through it.
+func scanEntries(r io.Reader, fn func(e entry, m message)) error {
 	sc := bufio.NewScanner(r)
 	// A transcript line holds a whole message and the default 64 KiB limit is
 	// nowhere near enough; a line that overran it would be dropped silently and
 	// the anchor would move.
 	sc.Buffer(make([]byte, 0, 1<<20), 64<<20)
+	for sc.Scan() {
+		if e, m, ok := decodeEntry(sc.Bytes()); ok {
+			fn(e, m)
+		}
+	}
+	return sc.Err()
+}
 
+// decodeEntry decodes one transcript line; ok is false for a line that is
+// empty, undecodable or a sidechain entry.
+func decodeEntry(line []byte) (entry, message, bool) {
+	if len(line) == 0 {
+		return entry{}, message{}, false
+	}
+	var e entry
+	if err := json.Unmarshal(line, &e); err != nil {
+		// A transcript is append-only and a half-written last line is
+		// ordinary; it is not a reason to refuse to judge the rest.
+		return entry{}, message{}, false
+	}
+	var m message
+	if len(e.Message) > 0 {
+		_ = json.Unmarshal(e.Message, &m)
+	}
+	// A subagent writes into this same file. Nothing it says is this
+	// session's reply, and its turns must not move the anchor either.
+	if e.IsSidechain {
+		return entry{}, message{}, false
+	}
+	return e, m, true
+}
+
+func readReply(r io.Reader) (aReply, error) {
 	var (
 		reply     aReply
 		haveReply bool
 		prev      aReply
 		havePrev  bool
 	)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var e entry
-		if err := json.Unmarshal(line, &e); err != nil {
-			// A transcript is append-only and a half-written last line is
-			// ordinary; it is not a reason to refuse to judge the rest.
-			continue
-		}
-		var m message
-		if len(e.Message) > 0 {
-			_ = json.Unmarshal(e.Message, &m)
-		}
-		// A subagent writes into this same file. Nothing it says is this
-		// session's reply, and its turns must not move the anchor either.
-		if e.IsSidechain {
-			continue
-		}
+	err := scanEntries(r, func(e entry, m message) {
 		switch {
 		case e.Type == "user" && isUserTurn(e, m):
 			// A new turn: whatever reply we were holding belonged to the
@@ -362,8 +427,8 @@ func readReply(r io.Reader) (aReply, error) {
 				reply, haveReply = r, true
 			}
 		}
-	}
-	if err := sc.Err(); err != nil {
+	})
+	if err != nil {
 		return aReply{}, err
 	}
 	// ⛔⛔ A TURN THAT PRODUCED NO TEXT MUST NOT DISCARD THE VERDICT ON THE ONE
@@ -718,6 +783,10 @@ type stopPayload struct {
 	TranscriptPath string `json:"transcript_path"`
 	StopHookActive bool   `json:"stop_hook_active"`
 	HookEventName  string `json:"hook_event_name"`
+	// AgentID is set when the hook fires for a SUBAGENT's tool call. Its
+	// session_id and transcript_path are the parent's, so the parent's turn
+	// would be judged for a call the parent did not make.
+	AgentID string `json:"agent_id"`
 }
 
 type hookAnswer struct {
@@ -824,6 +893,202 @@ func answer(out io.Writer, a hookAnswer) error {
 	}
 	fmt.Fprintln(out, string(b))
 	return nil
+}
+
+// ------------------------------------------------------------ the PreToolUse hook
+
+// turnState is what --pretool needs to know about the newest turn.
+type turnState struct {
+	found   bool   // a genuine user turn was located
+	uuid    string // that turn's uuid, the key the refusal bound is kept under
+	hasText bool   // an assistant TEXT block follows it
+}
+
+// lastTurn reads the transcript with the same parser, and the same definition
+// of a user turn, as the Stop hook. Any assistant text since the turn counts,
+// interstitial text between tool calls included: the question is "has this turn
+// written anything", not "has this turn called a tool".
+//
+// ⛔ IT READS FROM THE END. This runs before EVERY tool call, and a transcript
+// grows to hundreds of MB: scanning it whole cost 2.1 s of CPU per call on a
+// 948 MB file. The newest user turn is near the end, so it reads windows of
+// 1 MiB, doubling, up to maxTail, and stops at the first window holding one.
+// A turn not found within the cap is "cannot locate": the caller allows.
+func lastTurn(path string) (turnState, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return turnState{}, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return turnState{}, err
+	}
+	s, _, err := lastTurnAt(f, st.Size())
+	return s, err
+}
+
+const (
+	tailStart = 1 << 20
+	maxTail   = 32 << 20
+)
+
+// lastTurnAt is lastTurn over any io.ReaderAt; it also returns how many bytes
+// it read, which a test asserts stays far under the size.
+func lastTurnAt(r io.ReaderAt, size int64) (turnState, int64, error) {
+	var total int64
+	for win := int64(tailStart); ; win *= 2 {
+		if win > maxTail {
+			win = maxTail
+		}
+		if win > size {
+			win = size
+		}
+		buf := make([]byte, win)
+		n, err := r.ReadAt(buf, size-win)
+		total += int64(n)
+		if err != nil && err != io.EOF {
+			return turnState{}, total, err
+		}
+		buf = buf[:n]
+		whole := win == size
+		if !whole {
+			// The window starts mid-line, probably: drop the partial first line.
+			i := bytes.IndexByte(buf, '\n')
+			if i < 0 {
+				buf = nil
+			} else {
+				buf = buf[i+1:]
+			}
+		}
+		if s, ok := newestTurn(buf); ok {
+			return s, total, nil
+		}
+		if whole || win >= maxTail {
+			return turnState{}, total, nil
+		}
+	}
+}
+
+// newestTurn walks the lines of buf from the end to the newest genuine user
+// turn, noting whether an assistant text came after it.
+func newestTurn(buf []byte) (turnState, bool) {
+	hasText := false
+	for end := len(buf); end > 0; {
+		start := bytes.LastIndexByte(buf[:end], '\n') + 1
+		line := buf[start:end]
+		end = start - 1
+		e, m, ok := decodeEntry(line)
+		if !ok {
+			continue
+		}
+		switch {
+		case e.Type == "user" && isUserTurn(e, m):
+			return turnState{found: true, uuid: e.UUID, hasText: hasText}, true
+		case e.Type == "assistant" && !e.IsAPIErrorMessage:
+			if _, ok := firstText(m.Content); ok {
+				hasText = true
+			}
+		}
+	}
+	return turnState{}, false
+}
+
+// Schema: https://code.claude.com/docs/en/hooks (PreToolUse decision control:
+// hookSpecificOutput with permissionDecision and permissionDecisionReason).
+type preToolDeny struct {
+	HookSpecificOutput preToolDecision `json:"hookSpecificOutput"`
+}
+
+type preToolDecision struct {
+	HookEventName            string `json:"hookEventName"`
+	PermissionDecision       string `json:"permissionDecision"`
+	PermissionDecisionReason string `json:"permissionDecisionReason"`
+}
+
+const pretoolReason = "This turn has written no text yet, and CLAUDE.md's first rule is to START every reply with the local date and time.\n" +
+	"Before your first tool call, write one line opening the reply with the stamp " + wanted + " -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … » -- then repeat the tool call.\n" +
+	"A stamp is not a preface: a compaction's \"resume directly\" does not forbid it."
+
+// runPretool answers a PreToolUse payload. It returns nil whatever it decides:
+// the verdict is the JSON, never the status.
+func runPretool(cmd *cobra.Command, o *options) error {
+	out, errOut := cli.Out(cmd), cli.Err(cmd)
+	raw, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return allow(out, errOut, "cannot read the hook payload: %v", err)
+	}
+	var p stopPayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return allow(out, errOut, "the hook payload is not JSON: %v", err)
+	}
+	if p.HookEventName != "PreToolUse" {
+		return allow(out, errOut, "the payload is not a PreToolUse payload (event %q)", p.HookEventName)
+	}
+	if p.AgentID != "" {
+		return allow(out, errOut, "the call is a subagent's (agent_id %q), not the turn's own", p.AgentID)
+	}
+	if p.TranscriptPath == "" {
+		return allow(out, errOut, "the hook payload names no transcript")
+	}
+	s, err := lastTurn(p.TranscriptPath)
+	if err != nil {
+		return allow(out, errOut, "%v", err)
+	}
+	if !s.found {
+		return allow(out, errOut, "no user turn located in the transcript")
+	}
+	if s.hasText {
+		// Whether that text carries the stamp is the Stop hook's question.
+		return allow(out, errOut, "")
+	}
+	// ⛔ IF IT CANNOT COUNT, IT MUST NOT REFUSE (same invariant as --hook), and
+	// here the count is keyed on session AND turn, so a turn with no uuid cannot
+	// be bounded either.
+	path, ok := pretoolPath(p.SessionID)
+	if !ok || s.uuid == "" {
+		return allow(out, errOut, "cannot keep a refusal count for this turn, so cannot bound a refusal")
+	}
+	n, turn := pretoolCount(path)
+	if turn != s.uuid {
+		n = 0
+	}
+	n++
+	if os.MkdirAll(filepath.Dir(path), 0o755) != nil ||
+		os.WriteFile(path, []byte(strconv.Itoa(n)+" "+s.uuid+"\n"), 0o644) != nil {
+		return allow(out, errOut, "cannot record the refusal, so cannot bound it")
+	}
+	if n > o.maxBlocks {
+		return allow(out, errOut, "the turn still has no text after %d refusals; standing down for it", o.maxBlocks)
+	}
+	b, err := json.Marshal(preToolDeny{preToolDecision{"PreToolUse", "deny", pretoolReason}})
+	if err != nil {
+		return allow(out, errOut, "cannot encode the refusal: %v", err)
+	}
+	fmt.Fprintln(out, string(b))
+	return nil
+}
+
+// pretoolPath is the counter file, beside the Stop hook's own, one per session.
+func pretoolPath(session string) (string, bool) {
+	p, ok := countPath(session)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSuffix(p, ".blocks") + ".pretool", true
+}
+
+func pretoolCount(path string) (int, string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, ""
+	}
+	count, turn, _ := strings.Cut(strings.TrimSpace(string(b)), " ")
+	n, err := strconv.Atoi(count)
+	if err != nil {
+		return 0, ""
+	}
+	return n, turn
 }
 
 // ------------------------------------------------------- the block counter
