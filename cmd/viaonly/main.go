@@ -57,6 +57,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
@@ -151,8 +152,13 @@ func check(out, errOut io.Writer, o opts, args []string) int {
 		fmt.Fprintln(errOut, "viaonly: --wraps and --via are both required: without both there is no rule to enforce")
 		return 2
 	}
-	if strings.ContainsAny(o.wraps, ".(") {
-		fmt.Fprintf(errOut, "viaonly: --wraps %q is not an unqualified function name; a dotted name would half-match on the selector and report calls to any receiver\n", o.wraps)
+	// ⛔ The contract is "a Go identifier", not "contains no dot or paren". The
+	// charset form was written first and a mutation walked through it: dropping
+	// "(" changed nothing, because every method-shaped example also carries a
+	// dot. A charset says what is forbidden and keeps missing a case; this says
+	// what is required.
+	if !isIdent(o.wraps) {
+		fmt.Fprintf(errOut, "viaonly: --wraps %q is not an unqualified function name; a dotted or method-shaped name would half-match on the selector and report calls to any receiver\n", o.wraps)
 		return 2
 	}
 	waived, err := waivers(o.allow)
@@ -204,17 +210,32 @@ func check(out, errOut io.Writer, o opts, args []string) int {
 		return 2
 	}
 
-	found, examined := bypasses(fset, files, o.wraps, viaBody, dir)
+	found, values, examined := bypasses(fset, files, o.wraps, viaBody, dir)
 
 	if skipped > 0 {
 		fmt.Fprintf(out, "%d test file(s) not scanned; --tests includes them\n", skipped)
 	}
+	// ⛔ ONE DIRECTORY. go/parser does not recurse, and a run at a repository
+	// root — the natural spelling in CI — would read the root package only and
+	// call everything below it clean. Said on every run rather than documented.
+	fmt.Fprintf(out, "read %d file(s) of %s itself; subdirectories are NOT scanned\n", len(files), dir)
+
 	if o.expect >= 0 && examined != o.expect {
 		fmt.Fprintf(errOut, "viaonly: examined %d call(s) to %s, expected exactly %d\n", examined, o.wraps, o.expect)
 		return 2
 	}
+	// ⛔⛔ NOTHING EXAMINED IS NOT A CLEAN PACKAGE. `--wraps` is declared here —
+	// that was checked above — and no call to it was found, so either the rule
+	// is aimed at the wrong place or every use is a value. Printing "every one
+	// of the 0 call(s) goes through" was the exact defect this command exists
+	// to catch, written into the command itself. Exit 2 is "refused to decide",
+	// and --expect 0 is how a caller says they meant it.
+	if examined == 0 && len(values) == 0 && o.expect < 0 {
+		fmt.Fprintf(errOut, "viaonly: %s is declared in %s and never called there; refusing to report a package clean against a rule nothing exercised (--expect 0 if that is meant)\n", o.wraps, dir)
+		return 2
+	}
 
-	bad := 0
+	bad, waivedCount := 0, 0
 	for _, s := range found {
 		key := fmt.Sprintf("%s:%d", s.file, s.line)
 		// ⛔ A waiver may name the SITE or the FUNCTION that contains it, and a
@@ -228,18 +249,54 @@ func check(out, errOut io.Writer, o opts, args []string) int {
 			why, isWaived = waived[s.in]
 		}
 		if isWaived {
+			waivedCount++
 			fmt.Fprintf(out, "waived %s (%s) calls %s directly — %s\n", key, s.in, o.wraps, why)
 			continue
 		}
 		fmt.Fprintf(out, "%s: %s calls %s directly; it must go through %s\n", key, s.in, o.wraps, o.via)
 		bad++
 	}
-	if bad > 0 {
-		fmt.Fprintf(out, "%d of %d call(s) to %s bypass %s\n", bad, examined, o.wraps, o.via)
+	// ⛔ A value cannot go through the wrapper, and no waiver hides one: it is
+	// reported as what it is, a use the rule cannot cover.
+	for _, s := range values {
+		in := s.in
+		if in == "" {
+			in = "package level"
+		}
+		fmt.Fprintf(out, "%s:%d: %s takes %s as a VALUE; the call that follows it cannot be seen here\n", s.file, s.line, in, o.wraps)
+	}
+	if bad > 0 || len(values) > 0 {
+		fmt.Fprintf(out, "%d of %d call(s) to %s bypass %s, and %d use(s) take it as a value\n",
+			bad, examined, o.wraps, o.via, len(values))
 		return 1
+	}
+	// ⛔ The count says what was WAIVED too. It used to say "every one of the N
+	// goes through" while N included waived sites that plainly did not — a tail
+	// line contradicting the lines above it.
+	if waivedCount > 0 {
+		fmt.Fprintf(out, "every one of the %d call(s) to %s goes through %s, except %d waived above\n",
+			examined, o.wraps, o.via, waivedCount)
+		return 0
 	}
 	fmt.Fprintf(out, "every one of the %d call(s) to %s goes through %s\n", examined, o.wraps, o.via)
 	return 0
+}
+
+// isIdent reports whether s is a single Go identifier: what --wraps has to be
+// for an unqualified call to be recognised by spelling.
+func isIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || unicode.IsLetter(r):
+		case unicode.IsDigit(r) && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // waivers reads --allow into a map, refusing one without a reason: a waiver is
@@ -250,6 +307,12 @@ func waivers(allow []string) (map[string]string, error) {
 		site, why, ok := strings.Cut(a, "=")
 		if !ok || strings.TrimSpace(why) == "" {
 			return nil, fmt.Errorf("--allow %q needs a reason: 'file.go:LINE=why', and the reason is printed", a)
+		}
+		// ⛔ An empty SITE matched every call whose enclosing function was "" —
+		// package level — and printed `waived p.go:5 ()`. A waiver that names
+		// nothing waives by accident.
+		if strings.TrimSpace(site) == "" {
+			return nil, fmt.Errorf("--allow %q names no site: it must be 'file.go:LINE=why' or 'Func=why'", a)
 		}
 		out[strings.TrimSpace(site)] = strings.TrimSpace(why)
 	}
@@ -323,34 +386,87 @@ func receiverName(fd *ast.FuncDecl) string {
 // bypasses walks every file for unqualified calls to wraps, and reports the ones
 // outside the body of via. examined counts ALL of them, so a caller can tell a
 // clean package from a rule that matched nothing.
-func bypasses(fset *token.FileSet, files []*ast.File, wraps string, via *ast.BlockStmt, dir string) (found []site, examined int) {
+func bypasses(fset *token.FileSet, files []*ast.File, wraps string, via *ast.BlockStmt, dir string) (found, values []site, examined int) {
+	// The identifiers that ARE the declaration of wraps: `func await(...)` names
+	// it without using it.
+	declNames := map[*ast.Ident]bool{}
+	// The identifiers that are the Fun of a call to wraps: counted as calls, not
+	// as values.
+	called := map[*ast.Ident]bool{}
 	for _, f := range files {
-		var enclosing string
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == wraps {
+				declNames[fd.Name] = true
+			}
+		}
+	}
+	for _, f := range files {
+		// ⛔ A STACK, not a variable. The enclosing name used to be assigned on
+		// the way in and never cleared, so everything after the last function in
+		// a file — a package-level `var seeded = await(7)` — was reported as
+		// being inside that function, and a waiver written for the function
+		// waived a call the function does not contain.
+		var stack []string
+		where := func() string {
+			if len(stack) == 0 {
+				return "" // package level: no enclosing function
+			}
+			return stack[len(stack)-1]
+		}
 		ast.Inspect(f, func(n ast.Node) bool {
-			if fd, ok := n.(*ast.FuncDecl); ok {
-				enclosing = fd.Name.Name
-				if r := receiverName(fd); r != "" {
-					enclosing = r + "." + fd.Name.Name
+			if n == nil { // leaving a node
+				if len(stack) > 0 {
+					stack = stack[:len(stack)-1]
 				}
 				return true
 			}
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
+			if fd, ok := n.(*ast.FuncDecl); ok {
+				name := fd.Name.Name
+				if r := receiverName(fd); r != "" {
+					name = r + "." + fd.Name.Name
+				}
+				stack = append(stack, name)
 				return true
 			}
-			id, ok := call.Fun.(*ast.Ident)
-			if !ok || id.Name != wraps {
+			// Push a placeholder for every other node, so the pop on the way out
+			// stays paired with the push on the way in.
+			stack = append(stack, where())
+
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == wraps {
+					// ast.Inspect walks into the call's own Fun, so without this
+					// every call site was ALSO reported as taking the name as a
+					// value — the real collab case printed both lines for one
+					// call.
+					called[id] = true
+					examined++
+					if via.Pos() <= call.Pos() && call.Pos() <= via.End() {
+						return true
+					}
+					pos := fset.Position(call.Pos())
+					found = append(found, site{file: filepath.Base(pos.Filename), line: pos.Line, in: where()})
+				}
 				return true
 			}
-			examined++
-			if via.Pos() <= call.Pos() && call.Pos() <= via.End() {
+			// ⛔⛔ THE USE THIS PASS WAS BLIND TO. `var h = await`, `register(await)`,
+			// `go await(ctx)`'s function value — the name taken as a VALUE is
+			// exactly how a caller reaches the wrapped function without a call
+			// site to find. It was not reported and not even counted, so three
+			// such uses read as "every one of the 0 calls goes through". A value
+			// escapes the rule by construction, so it is reported, never waived
+			// silently by being invisible.
+			id, ok := n.(*ast.Ident)
+			if !ok || id.Name != wraps || declNames[id] || called[id] {
 				return true
 			}
-			pos := fset.Position(call.Pos())
-			found = append(found, site{file: filepath.Base(pos.Filename), line: pos.Line, in: enclosing})
+			if via.Pos() <= id.Pos() && id.Pos() <= via.End() {
+				return true // inside the wrapper, where naming it is the point
+			}
+			pos := fset.Position(id.Pos())
+			values = append(values, site{file: filepath.Base(pos.Filename), line: pos.Line, in: where()})
 			return true
 		})
 	}
 	_ = dir
-	return found, examined
+	return found, values, examined
 }
