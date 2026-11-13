@@ -24,6 +24,11 @@ type fake struct {
 	written map[string]string
 	writeNo error
 	slept   int
+	// ⛔ THE DURATION, NOT ONLY THE COUNT. Review measured `sleep(delay)` ->
+	// `sleep(0)` staying green: the fake dropped its argument, so --delay
+	// could be ignored entirely and every test would still pass. A flag with
+	// no test is a flag that does not exist.
+	sleptFor []time.Duration
 }
 
 type answer struct {
@@ -78,7 +83,7 @@ func (f *fake) install(t *testing.T) {
 		f.written[path] = string(data)
 		return nil
 	}
-	sleep = func(time.Duration) { f.slept++ }
+	sleep = func(d time.Duration) { f.slept++; f.sleptFor = append(f.sleptFor, d) }
 }
 
 // installs counts the apt-get install calls, which is the number of ATTEMPTS.
@@ -472,6 +477,12 @@ func TestARetryWaitsBeforeAskingAgain(t *testing.T) {
 	}
 	if f.slept != 1 {
 		t.Errorf("a retry slept %d time(s), want 1: %v", f.slept, f.calls)
+	}
+	// ⛔ AND FOR AS LONG AS IT WAS ASKED TO. Counting the call left
+	// `sleep(0)` green, so --delay could have been read, printed in "attempt
+	// 2 of 3 after 5s", and then not waited at all.
+	if len(f.sleptFor) != 1 || f.sleptFor[0] != 5*time.Second {
+		t.Errorf("it waited %v, want one wait of 5s", f.sleptFor)
 	}
 }
 
