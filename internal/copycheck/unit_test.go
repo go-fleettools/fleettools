@@ -411,7 +411,12 @@ func FuzzLex(f *testing.F) {
 }
 
 func FuzzCanon(f *testing.F) {
-	for _, s := range []string{"0", "0x10", "1e5", "1_000", "0b1", "0o7", "1.f", ".5", "0x1p3", "99999999999999999999", "1e999", "0x", "-"} {
+	// ⛔ "10000000.1" is the input the fuzzer found on 2026-11-12: not integral,
+	// so it was rounded to 7 significant digits — "1e+07", which IS integral,
+	// so a second pass answered "10000000". It is a seed now, because a corpus
+	// entry under testdata is the only part of a fuzz finding that survives the
+	// run that found it.
+	for _, s := range []string{"0", "0x10", "1e5", "1_000", "0b1", "0o7", "1.f", ".5", "0x1p3", "99999999999999999999", "1e999", "0x", "-", "10000000.1", "9007199254740991.0", "12345678.9"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
