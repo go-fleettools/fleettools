@@ -965,7 +965,7 @@ func TestPretoolDeniesATurnOpeningOnAToolCall(t *testing.T) {
 }
 
 func TestPretoolAllowsTextThenTool(t *testing.T) {
-	wantAllow(t, "text-first", turnUUID("t1", "proceed"), assistantText("a1", "Looking."), assistantToolUse("a2"))
+	wantAllow(t, "text-first", turnUUID("t1", "proceed"), assistantText("a1", stamp(clock)+"\n\nLooking."), assistantToolUse("a2"))
 }
 
 // ⛔ INTERSTITIAL TEXT IS THE TURN'S FIRST TEXT: the test is "any text since the
@@ -973,7 +973,7 @@ func TestPretoolAllowsTextThenTool(t *testing.T) {
 func TestPretoolAllowsTextBetweenTools(t *testing.T) {
 	wantAllow(t, "between",
 		turnUUID("t1", "proceed"), assistantToolUse("a1"), toolResult("ok"),
-		assistantText("a2", "Now the second step."), assistantToolUse("a3"))
+		assistantText("a2", stamp(clock)+"\n\nNow the second step."), assistantToolUse("a3"))
 }
 
 func TestPretoolDeniesAfterACompactionWhenNoText(t *testing.T) {
@@ -992,7 +992,7 @@ func TestPretoolAToolResultIsNotAUserTurn(t *testing.T) {
 	// Text, tool, tool_result, tool: the tool_result must not move the anchor
 	// to after the text, or this would deny.
 	wantAllow(t, "toolresult",
-		turnUUID("t1", "go"), assistantText("a1", "first"), assistantToolUse("a2"),
+		turnUUID("t1", "go"), assistantText("a1", stamp(clock)+"\n\nfirst"), assistantToolUse("a2"),
 		toolResult("out"), assistantToolUse("a3"))
 }
 
@@ -1085,8 +1085,133 @@ func TestPretoolMaxBlocksIsHonoured(t *testing.T) {
 	}
 }
 
-func TestPretoolUnstampedTextIsTheStopHooksBusiness(t *testing.T) {
-	wantAllow(t, "unstamped-text", turnUUID("t1", "go"), assistantText("a1", "no stamp here"), assistantToolUse("a2"))
+// ⛔ #277 part 1: the text before the tool call is already shown, and it did
+// not open with the stamp. Skip the stamp check in runPretool and this is the
+// test that goes red.
+func TestPretoolDeniesUnstampedTextThenTool(t *testing.T) {
+	code, stdout, _ := pretool(t, transcript(t, turnUUID("t1", "go"),
+		assistantText("a1", "I'm testing it on this session's transcript."), assistantToolUse("a2")), "unstamped")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	ok, d := denied(t, stdout)
+	if !ok {
+		t.Fatalf("unstamped first text then a tool was allowed: %q", stdout)
+	}
+	r := d.HookSpecificOutput.PermissionDecisionReason
+	if !strings.Contains(r, "cannot be edited") || !strings.Contains(r, "NEW line") || !strings.Contains(r, "**[") {
+		t.Errorf("the reason must say the shown text cannot be edited and ask for a stamped line now: %q", r)
+	}
+}
+
+// Only the FIRST text counts: a stamped closing line does not redeem it.
+func TestPretoolJudgesTheFirstTextNotALaterOne(t *testing.T) {
+	wantDeny(t, "first-not-last", turnUUID("t1", "go"),
+		assistantText("a1", "no stamp"), assistantToolUse("a2"), toolResult("ok"),
+		assistantText("a3", stamp(clock)+"\n\nlater"), assistantToolUse("a4"))
+}
+
+func TestPretoolDeniesAStaleStamp(t *testing.T) {
+	wantDeny(t, "stale", turnUUID("t1", "go"),
+		assistantText("a1", stamp(clock.Add(-5*time.Hour))+"\n\nok"), assistantToolUse("a2"))
+}
+
+func TestPretoolStaleStampHonoursTolerance(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"),
+		assistantText("a1", stamp(clock.Add(-5*time.Hour))+"\n\nok"), assistantToolUse("a2"))
+	_, stdout, _ := pretool(t, p, "tol", "--tolerance=6h")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a stamp inside --tolerance was refused: %q", stdout)
+	}
+}
+
+// The bound is shared by both deny kinds and keyed on the turn.
+func TestPretoolBoundIsSharedByBothDenies(t *testing.T) {
+	dir := t.TempDir()
+	saved := stateDir
+	stateDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { stateDir = saved })
+	savedNow := now
+	now = func() time.Time { return clock }
+	t.Cleanup(func() { now = savedNow })
+	run := func(p string) bool {
+		c := RootCmd()
+		c.SetIn(strings.NewReader(pretoolPayload(t, p, "shared", "PreToolUse")))
+		var out, errOut bytes.Buffer
+		if code := cli.Drive(c, []string{"--pretool"}, &out, &errOut); code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		ok, _ := denied(t, out.String())
+		return ok
+	}
+	noText := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
+	unstamped := transcript(t, turnUUID("t1", "go"), assistantText("a1", "no stamp"), assistantToolUse("a2"))
+	got := []bool{run(noText), run(unstamped), run(unstamped), run(noText)}
+	want := []bool{true, true, false, false}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("denials over one turn = %v, want %v", got, want)
+		}
+	}
+	// A new turn re-arms it.
+	again := transcript(t, turnUUID("t2", "next"), assistantText("a1", "no stamp"), assistantToolUse("a2"))
+	if !run(again) {
+		t.Fatalf("a new turn must be refused again")
+	}
+}
+
+// ⛔ #277 part 2: the transcript lags the hook. The text entry lands 120 ms
+// after the hook starts looking; the call must be ALLOWED. Remove the re-read
+// window (settleWindow = 0) and this is the test that goes red.
+func TestPretoolAllowsWhenTheTextLandsAfterTheFirstRead(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
+	raw, err := json.Marshal(assistantText("a0", stamp(clock)+"\n\nlanded late"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, err = f.Write(append(raw, '\n'))
+			f.Close()
+		}
+		done <- err
+	}()
+	start := time.Now()
+	code, stdout, errOut := pretool(t, p, "lag")
+	took := time.Since(start)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a compliant turn was refused because the transcript lagged: %q (stderr %q)", stdout, errOut)
+	}
+	if took > settleWindow+250*time.Millisecond {
+		t.Errorf("allow took %v, window is %v", took, settleWindow)
+	}
+}
+
+// A text that never arrives is still a deny, and the added latency is bounded.
+func TestPretoolDenyWaitsAtMostTheWindow(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
+	start := time.Now()
+	_, stdout, _ := pretool(t, p, "never")
+	took := time.Since(start)
+	if ok, _ := denied(t, stdout); !ok {
+		t.Fatalf("no text ever arrived but the call was allowed: %q", stdout)
+	}
+	if took < settleWindow {
+		t.Errorf("deny after %v: it did not wait the %v window", took, settleWindow)
+	}
+	if took > settleWindow+300*time.Millisecond {
+		t.Errorf("deny took %v: added latency must stay near the %v window", took, settleWindow)
+	}
+	t.Logf("deny wall time: %v (window %v, step %v)", took, settleWindow, settleStep)
 }
 
 // ------------------------------------------------- review fixes on --pretool

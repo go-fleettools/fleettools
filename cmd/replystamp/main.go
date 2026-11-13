@@ -102,21 +102,28 @@ blocked and written again.
 the prevention. It refuses a tool call when the turn (everything since the last
 genuine user turn, a compaction continuation included) has written NO text
 yet, telling the model to open with the stamp first. Text between tool calls
-counts as the turn's first text. It does not judge the stamp: unstamped text is
---hook's business. Wire it as a PreToolUse hook with NO matcher, because a
+counts as the turn's first text. When the turn HAS text, its FIRST text block
+is judged exactly as --hook judges a reply (same stamp pattern, same
+--tolerance): without a valid stamp the call is refused, and the reason says
+the text already shown cannot be edited, so a NEW stamped line must be written
+now. Wire it as a PreToolUse hook with NO matcher, because a
 Bash-only matcher lets a turn that opens on Read or Edit walk past it:
 
   command: ~/.local/bin/replystamp --pretool
 
-After --max-blocks consecutive refusals in the same turn it allows. It reads
+After --max-blocks refusals in the same turn (no-text and unstamped-text
+refusals share the one count, keyed on the turn) it allows. It reads
 only the tail of the transcript (at most 32 MiB) and allows when no user turn
 is in it, allows a subagent's call (payload agent_id), and never calls the
 network. A task notification counts as a user turn on purpose: a reply to one
 must be stamped too.
 
-Honest limit: the docs say the transcript is written asynchronously and may
-lag. A lag yields a FALSE DENY (text already written but not yet on disk), not
-a safe miss; the --max-blocks bound caps the cost at that many refusals.
+The docs say the transcript is written asynchronously and may lag, and a lag
+yields a FALSE DENY (text written but not yet on disk). So before denying for
+"no text" it re-reads the tail every 50 ms for up to 300 ms and denies only if
+there is still none: a true no-text deny costs about 300 ms more, a compliant
+turn is allowed as soon as its text lands. A lag longer than the window still
+false-denies, capped by --max-blocks.
 
 Every hook mode ALLOWS whenever it cannot read -- an unreadable transcript, a
 turn it cannot locate, a payload of another event, malformed JSON, a malformed
@@ -902,6 +909,7 @@ type turnState struct {
 	found   bool   // a genuine user turn was located
 	uuid    string // that turn's uuid, the key the refusal bound is kept under
 	hasText bool   // an assistant TEXT block follows it
+	first   aReply // the turn's FIRST text block, when hasText
 }
 
 // lastTurn reads the transcript with the same parser, and the same definition
@@ -974,6 +982,7 @@ func lastTurnAt(r io.ReaderAt, size int64) (turnState, int64, error) {
 // turn, noting whether an assistant text came after it.
 func newestTurn(buf []byte) (turnState, bool) {
 	hasText := false
+	var first aReply
 	for end := len(buf); end > 0; {
 		start := bytes.LastIndexByte(buf[:end], '\n') + 1
 		line := buf[start:end]
@@ -984,10 +993,16 @@ func newestTurn(buf []byte) (turnState, bool) {
 		}
 		switch {
 		case e.Type == "user" && isUserTurn(e, m):
-			return turnState{found: true, uuid: e.UUID, hasText: hasText}, true
+			return turnState{found: true, uuid: e.UUID, hasText: hasText, first: first}, true
 		case e.Type == "assistant" && !e.IsAPIErrorMessage:
-			if _, ok := firstText(m.Content); ok {
+			if t, ok := firstText(m.Content); ok {
+				// Walking backwards, so the last one kept is the EARLIEST: the
+				// turn's first text, the one readReply judges for --hook.
 				hasText = true
+				first = aReply{text: t, uuid: e.UUID}
+				if at, err := time.Parse(time.RFC3339, e.Timestamp); err == nil {
+					first.at, first.haveAt = at.Local(), true
+				}
 			}
 		}
 	}
@@ -1010,6 +1025,51 @@ const pretoolReason = "This turn has written no text yet, and CLAUDE.md's first 
 	"Before your first tool call, write one line opening the reply with the stamp " + wanted + " -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … » -- then repeat the tool call.\n" +
 	"A stamp is not a preface: a compaction's \"resume directly\" does not forbid it."
 
+// unstampedReason is the deny for a turn whose first text carries no valid
+// stamp. That text is already shown and cannot be edited, so the only thing
+// to ask for is a NEW line written now.
+func unstampedReason(v verdict) string {
+	what := map[kind]string{
+		missing:        "does not START with the local date and time",
+		twelveHour:     "uses a 12-hour clock",
+		impossibleHour: "has an hour of 24 or more",
+		stale:          "carries a stale stamp (" + roundly(v.off) + " from when it was written)",
+	}[v.kind]
+	return fmt.Sprintf("This turn's first text %s: %q\n"+
+		"That text is already shown and cannot be edited. Write a NEW line now that opens with the stamp %s -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … » -- then repeat the tool call.",
+		what, v.got, wanted)
+}
+
+// The transcript is written asynchronously and may lag the hook: the text the
+// model wrote a moment ago can be missing when PreToolUse runs. Before denying
+// for "no text", the tail is re-read every settleStep for up to settleWindow;
+// a deny is therefore delayed by at most settleWindow, never more.
+var (
+	settleWindow = 300 * time.Millisecond
+	settleStep   = 50 * time.Millisecond
+	settleSleep  = time.Sleep
+)
+
+// settledTurn is lastTurn, re-read while the newest turn shows no text.
+func settledTurn(path string) (turnState, error) {
+	s, err := lastTurn(path)
+	if err != nil || !s.found || s.hasText {
+		return s, err
+	}
+	for waited := time.Duration(0); waited < settleWindow; waited += settleStep {
+		settleSleep(settleStep)
+		n, err := lastTurn(path)
+		if err != nil {
+			return s, nil
+		}
+		s = n
+		if !s.found || s.hasText {
+			break
+		}
+	}
+	return s, nil
+}
+
 // runPretool answers a PreToolUse payload. It returns nil whatever it decides:
 // the verdict is the JSON, never the status.
 func runPretool(cmd *cobra.Command, o *options) error {
@@ -1031,16 +1091,21 @@ func runPretool(cmd *cobra.Command, o *options) error {
 	if p.TranscriptPath == "" {
 		return allow(out, errOut, "the hook payload names no transcript")
 	}
-	s, err := lastTurn(p.TranscriptPath)
+	s, err := settledTurn(p.TranscriptPath)
 	if err != nil {
 		return allow(out, errOut, "%v", err)
 	}
 	if !s.found {
 		return allow(out, errOut, "no user turn located in the transcript")
 	}
+	reason := pretoolReason
 	if s.hasText {
-		// Whether that text carries the stamp is the Stop hook's question.
-		return allow(out, errOut, "")
+		// The turn's FIRST text, judged exactly as --hook judges a reply.
+		v := judge(s.first.text, judgedAgainst(s.first), o.tolerance)
+		if v.kind == stamped {
+			return allow(out, errOut, "")
+		}
+		reason = unstampedReason(v)
 	}
 	// ⛔ IF IT CANNOT COUNT, IT MUST NOT REFUSE (same invariant as --hook), and
 	// here the count is keyed on session AND turn, so a turn with no uuid cannot
@@ -1059,9 +1124,9 @@ func runPretool(cmd *cobra.Command, o *options) error {
 		return allow(out, errOut, "cannot record the refusal, so cannot bound it")
 	}
 	if n > o.maxBlocks {
-		return allow(out, errOut, "the turn still has no text after %d refusals; standing down for it", o.maxBlocks)
+		return allow(out, errOut, "the turn was still refused after %d refusals; standing down for it", o.maxBlocks)
 	}
-	b, err := json.Marshal(preToolDeny{preToolDecision{"PreToolUse", "deny", pretoolReason}})
+	b, err := json.Marshal(preToolDeny{preToolDecision{"PreToolUse", "deny", reason}})
 	if err != nil {
 		return allow(out, errOut, "cannot encode the refusal: %v", err)
 	}
