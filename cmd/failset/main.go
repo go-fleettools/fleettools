@@ -70,6 +70,12 @@ what was aimed at, which is most of the time and is invisible in a count.
   go test -json ./pkg > after.json
   failset --before before.json --after after.json --expect TestTheClaimIMake
 
+⛔ REDIRECT STDOUT ONLY — no 2>&1. go test writes its JSON to stdout and
+everything else to stderr, so folding the two in puts lines like
+"go: downloading ..." into the log, and a log that is part JSON and part
+something else is refused (exit 2). That is a refusal rather than a wrong
+answer, but it is an avoidable one.
+
 ⛔ It reads -json and REFUSES -v text. A test's own output can forge another
 test's verdict line, and 'go test -v' gives a parser no way to tell the two
 apart; this was measured, not feared. In -json a verdict is an event and

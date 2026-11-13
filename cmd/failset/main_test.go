@@ -201,6 +201,29 @@ func TestATestThatFailedOnceInARunIsFailedForThatRun(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE SAME STICKINESS ON skip, WHICH HAD THE GUARD AND NO TEST: review
+// measured `if true {` in its place leaving the whole package green.
+//
+// ⛔ AND THE OBVIOUS FIXTURE DOES NOT DISCRIMINATE, which is worth saying
+// because it is how the gap survived a reading. Putting [fail, skip] in the
+// BEFORE run proves nothing: `failed` and `skipped` are both "not passed", so
+// newlyRed refuses either way and the test passes under the mutation too.
+// The verdict only moves when the pair is in the AFTER run — `failed` is a
+// green->red answer and `skipped` is not — so the before run must be GREEN.
+func TestATestThatFailedThenSkippedIsStillRedForThatRun(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestFlaky")...),
+		"after": jsonl(t, pkgRun(t, p, "fail",
+			p+" fail TestFlaky", p+" skip TestFlaky")...),
+	})
+	code, out, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestFlaky")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0: TestFlaky failed in the after run, and a later skip of the "+
+			"same name does not undo that\n%s%s", code, out, errb)
+	}
+}
+
 // ⛔⛔ A LOG THAT IS PART JSON AND PART TEXT ANSWERS FOR NEITHER. The lines
 // that did not parse used to be dropped in silence, so a -json run with a
 // plain `panic:` tail appended read as complete — the comment said they were
