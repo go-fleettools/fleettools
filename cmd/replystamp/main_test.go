@@ -1104,11 +1104,157 @@ func TestPretoolDeniesUnstampedTextThenTool(t *testing.T) {
 	}
 }
 
-// Only the FIRST text counts: a stamped closing line does not redeem it.
-func TestPretoolJudgesTheFirstTextNotALaterOne(t *testing.T) {
-	wantDeny(t, "first-not-last", turnUUID("t1", "go"),
+// ⛔ The unstamped first text cannot be edited, so the turn must be RECOVERABLE:
+// deny, then a stamped line written now makes the repeated call pass. Restore
+// earliest-only judging and the second half goes red.
+func TestPretoolAStampedLineWrittenNowRecoversTheTurn(t *testing.T) {
+	wantDeny(t, "recover-1", turnUUID("t1", "go"),
+		assistantText("a1", "no stamp"), assistantToolUse("a2"))
+	wantAllow(t, "recover-2", turnUUID("t1", "go"),
 		assistantText("a1", "no stamp"), assistantToolUse("a2"), toolResult("ok"),
-		assistantText("a3", stamp(clock)+"\n\nlater"), assistantToolUse("a4"))
+		assistantText("a3", stamp(clock)+"\n\nwritten now"), assistantToolUse("a4"))
+}
+
+func assistantToolUseID(uuid, id string, text string) line {
+	c := []line{{"type": "tool_use", "name": "Bash", "id": id}}
+	if text != "" {
+		c = append([]line{{"type": "text", "text": text}}, c...)
+	}
+	return line{"type": "assistant", "uuid": uuid, "message": line{"role": "assistant", "content": c}}
+}
+
+// appendLater appends l to the transcript after d, from a goroutine.
+func appendLater(t *testing.T, p string, d time.Duration, l line) chan error {
+	t.Helper()
+	raw, err := json.Marshal(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(d)
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, err = f.Write(append(raw, '\n'))
+			f.Close()
+		}
+		done <- err
+	}()
+	return done
+}
+
+func pretoolWithID(t *testing.T, p, session, id string) (string, time.Duration) {
+	t.Helper()
+	raw, err := json.Marshal(stopPayload{SessionID: session, TranscriptPath: p, HookEventName: "PreToolUse", ToolUseID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	code, stdout, _ := drive(t, string(raw), "--pretool")
+	took := time.Since(start)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	return stdout, took
+}
+
+// ⛔ The tool_use (and the text of its message) lands 1 s late. Remove the
+// tool_use_id wait and the first read sees no text: a false deny.
+func TestPretoolWaitsForTheToolUseThenJudgesIt(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"))
+	done := appendLater(t, p, time.Second, assistantToolUseID("a1", "toolu_1", stamp(clock)+"\n\nlanded"))
+	stdout, took := pretoolWithID(t, p, "late-ok", "toolu_1")
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a compliant turn was refused while its tool_use was in flight: %q", stdout)
+	}
+	if took < time.Second {
+		t.Errorf("returned after %v, before the entry landed", took)
+	}
+
+	// Judged correctly once it lands: unstamped text is still a deny.
+	p = transcript(t, turnUUID("t1", "go"))
+	done = appendLater(t, p, time.Second, assistantToolUseID("a1", "toolu_2", "no stamp"))
+	stdout, _ = pretoolWithID(t, p, "late-bad", "toolu_2")
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := denied(t, stdout); !ok {
+		t.Fatalf("unstamped text was allowed after the wait: %q", stdout)
+	}
+}
+
+func TestPretoolAllowsWhenTheToolUseNeverLands(t *testing.T) {
+	if toolWait != 3*time.Second {
+		t.Fatalf("the cap is %v, want 3s", toolWait)
+	}
+	saved := toolWait
+	toolWait = 500 * time.Millisecond
+	t.Cleanup(func() { toolWait = saved })
+	p := transcript(t, turnUUID("t1", "go"), assistantToolUseID("a1", "toolu_other", ""))
+	stdout, took := pretoolWithID(t, p, "never-lands", "toolu_missing")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a tool_use that never lands must allow: %q", stdout)
+	}
+	if took < toolWait || took > toolWait+300*time.Millisecond {
+		t.Errorf("waited %v, cap %v", took, toolWait)
+	}
+}
+
+// With the tool_use already on disk there is nothing to wait for.
+func TestPretoolDoesNotWaitWhenTheToolUseIsPresent(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"), assistantToolUseID("a1", "toolu_1", stamp(clock)+"\n\nok"))
+	stdout, took := pretoolWithID(t, p, "present", "toolu_1")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("denied: %q", stdout)
+	}
+	if took > 50*time.Millisecond {
+		t.Errorf("allow with the tool_use present took %v", took)
+	}
+	t.Logf("allow latency with tool_use present: %v", took)
+	// And a real no-text deny with the id present is immediate too.
+	p = transcript(t, turnUUID("t1", "go"), assistantToolUseID("a1", "toolu_1", ""))
+	stdout, took = pretoolWithID(t, p, "present-deny", "toolu_1")
+	if ok, _ := denied(t, stdout); !ok || took > 50*time.Millisecond {
+		t.Errorf("no-text deny with tool_use present: denied=%v after %v", ok, took)
+	}
+}
+
+// A payload without tool_use_id falls back to the fixed window (the delayed
+// text test above covers the allow); a never-arriving text still denies.
+func TestPretoolWithoutAToolUseIDFallsBackToTheWindow(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
+	stdout, took := pretoolWithID(t, p, "fallback", "")
+	if ok, _ := denied(t, stdout); !ok {
+		t.Fatalf("no text, no id: want deny after the window, got %q", stdout)
+	}
+	if took < settleWindow {
+		t.Errorf("fallback returned after %v, before the %v window", took, settleWindow)
+	}
+}
+
+// A read error while waiting allows rather than denying on the earlier state.
+func TestPretoolAllowsWhenTheTranscriptVanishesDuringTheWait(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"))
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		os.Remove(p)
+	}()
+	stdout, _ := pretoolWithID(t, p, "vanish", "toolu_1")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a read error during the wait must allow: %q", stdout)
+	}
+	p = transcript(t, turnUUID("t1", "go"))
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		os.Remove(p)
+	}()
+	stdout, _, _ = func() (string, int, error) { c, o, _ := pretool(t, p, "vanish2"); _ = c; return o, 0, nil }()
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a read error during the fallback window must allow: %q", stdout)
+	}
 }
 
 func TestPretoolDeniesAStaleStamp(t *testing.T) {
