@@ -893,3 +893,197 @@ func TestNoArgumentsIsNotACleanResult(t *testing.T) {
 		t.Fatalf("code = %d, want 2", code)
 	}
 }
+
+// ------------------------------------------------------------ --pretool
+
+func pretoolPayload(t *testing.T, transcriptPath, session, event string) string {
+	t.Helper()
+	raw, err := json.Marshal(stopPayload{SessionID: session, TranscriptPath: transcriptPath, HookEventName: event})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func turnUUID(uuid, text string) line {
+	l := userTurn(text)
+	l["uuid"] = uuid
+	return l
+}
+
+// compactionTurn is what a resume after /compact looks like: a user entry whose
+// content is a plain string.
+func compactionTurn(uuid string) line {
+	return line{"type": "user", "uuid": uuid, "isCompactSummary": true, "message": line{"role": "user",
+		"content": "This session is being continued from a previous conversation... Resume directly."}}
+}
+
+func denied(t *testing.T, stdout string) (bool, preToolDeny) {
+	t.Helper()
+	var d preToolDeny
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &d); err != nil {
+		t.Fatalf("the hook must answer with JSON on stdout; got %q: %v", stdout, err)
+	}
+	return d.HookSpecificOutput.PermissionDecision == "deny", d
+}
+
+func pretool(t *testing.T, p, session string, extra ...string) (int, string, string) {
+	t.Helper()
+	return drive(t, pretoolPayload(t, p, session, "PreToolUse"), append([]string{"--pretool"}, extra...)...)
+}
+
+func wantDeny(t *testing.T, name string, lines ...line) {
+	t.Helper()
+	code, stdout, _ := pretool(t, transcript(t, lines...), "s-"+name)
+	if code != 0 {
+		t.Fatalf("%s: exit %d, want 0", name, code)
+	}
+	ok, d := denied(t, stdout)
+	if !ok {
+		t.Fatalf("%s: allowed, want deny; got %q", name, stdout)
+	}
+	if d.HookSpecificOutput.HookEventName != "PreToolUse" ||
+		!strings.Contains(d.HookSpecificOutput.PermissionDecisionReason, "**[") {
+		t.Errorf("%s: malformed deny: %+v", name, d)
+	}
+}
+
+func wantAllow(t *testing.T, name string, lines ...line) {
+	t.Helper()
+	code, stdout, _ := pretool(t, transcript(t, lines...), "s-"+name)
+	if code != 0 {
+		t.Fatalf("%s: exit %d, want 0", name, code)
+	}
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("%s: denied, want allow; got %q", name, stdout)
+	}
+}
+
+func TestPretoolDeniesATurnOpeningOnAToolCall(t *testing.T) {
+	wantDeny(t, "opens-on-tool", turnUUID("t1", "proceed"), assistantThinking("a1"), assistantToolUse("a2"))
+}
+
+func TestPretoolAllowsTextThenTool(t *testing.T) {
+	wantAllow(t, "text-first", turnUUID("t1", "proceed"), assistantText("a1", "Looking."), assistantToolUse("a2"))
+}
+
+// ⛔ INTERSTITIAL TEXT IS THE TURN'S FIRST TEXT: the test is "any text since the
+// user turn", not "no tool calls this turn".
+func TestPretoolAllowsTextBetweenTools(t *testing.T) {
+	wantAllow(t, "between",
+		turnUUID("t1", "proceed"), assistantToolUse("a1"), toolResult("ok"),
+		assistantText("a2", "Now the second step."), assistantToolUse("a3"))
+}
+
+func TestPretoolDeniesAfterACompactionWhenNoText(t *testing.T) {
+	wantDeny(t, "compaction",
+		turnUUID("t0", "old"), assistantText("a0", "old reply"),
+		compactionTurn("c1"), assistantToolUse("a1"))
+}
+
+func TestPretoolTextBeforeACompactionDoesNotExcuseTheNewTurn(t *testing.T) {
+	// The only text is from the previous turn; the continuation is the anchor.
+	wantDeny(t, "compaction-old-text",
+		turnUUID("t0", "old"), assistantText("a0", "old reply"), compactionTurn("c1"))
+}
+
+func TestPretoolAToolResultIsNotAUserTurn(t *testing.T) {
+	// Text, tool, tool_result, tool: the tool_result must not move the anchor
+	// to after the text, or this would deny.
+	wantAllow(t, "toolresult",
+		turnUUID("t1", "go"), assistantText("a1", "first"), assistantToolUse("a2"),
+		toolResult("out"), assistantToolUse("a3"))
+}
+
+func TestPretoolAllowsWhatItCannotRead(t *testing.T) {
+	good := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
+	cases := []struct{ name, stdin string }{
+		{"unreadable path", pretoolPayload(t, "/nowhere/at/all.jsonl", "s", "PreToolUse")},
+		{"wrong event", pretoolPayload(t, good, "s", "Stop")},
+		{"no event", pretoolPayload(t, good, "s", "")},
+		{"malformed JSON", "{not json"},
+		{"empty stdin", ""},
+		{"no transcript named", `{"session_id":"s","hook_event_name":"PreToolUse"}`},
+		{"no turn located", pretoolPayload(t, transcript(t, assistantToolUse("a1")), "s", "PreToolUse")},
+		{"no session to count under", pretoolPayload(t, good, "", "PreToolUse")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			code, stdout, errOut := drive(t, c.stdin, "--pretool")
+			if code != 0 {
+				t.Fatalf("exit %d, want 0", code)
+			}
+			if ok, _ := denied(t, stdout); ok {
+				t.Fatalf("it refused on its own blindness: %q", stdout)
+			}
+			if !strings.Contains(errOut, "allowing") {
+				t.Errorf("it must say why it stood aside; stderr was %q", errOut)
+			}
+		})
+	}
+}
+
+// ⛔ A BAD FLAG MUST NEVER BE A BLOCK. cobra exits 2 before RunE; under the
+// PreToolUse protocol 2 blocks the tool call, in front of EVERY tool.
+func TestPretoolBadFlagStillExitsZeroAndAllows(t *testing.T) {
+	for _, args := range [][]string{
+		{"--pretool", "--tolerance=zzz"},
+		{"--pretool", "--nonsense"},
+		{"--pretool=yes", "--max-blocks=abc"},
+		{"-pretool", "--bogus"},
+	} {
+		if !hookMode(args) {
+			t.Fatalf("hookMode(%q) = false; a bad flag would then reach cobra", args)
+		}
+		var out, errOut bytes.Buffer
+		driveHook(args, &out, &errOut)
+		if got := strings.TrimSpace(out.String()); got != "{}" {
+			t.Errorf("%q: stdout = %q, want {} (an allow)", args, got)
+		}
+		if !strings.Contains(errOut.String(), "allowing") {
+			t.Errorf("%q: stderr must say why: %q", args, errOut.String())
+		}
+	}
+}
+
+func TestPretoolRefusalIsBoundedPerTurn(t *testing.T) {
+	dir := t.TempDir()
+	saved := stateDir
+	stateDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { stateDir = saved })
+	run := func(p string) bool {
+		c := RootCmd()
+		c.SetIn(strings.NewReader(pretoolPayload(t, p, "sess", "PreToolUse")))
+		var out, errOut bytes.Buffer
+		if code := cli.Drive(c, []string{"--pretool"}, &out, &errOut); code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		ok, _ := denied(t, out.String())
+		return ok
+	}
+	turn1 := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
+	got := []bool{run(turn1), run(turn1), run(turn1), run(turn1)}
+	want := []bool{true, true, false, false}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("denials over one turn = %v, want %v", got, want)
+		}
+	}
+	// A new turn re-arms the gate: the bound is per turn, not per session.
+	turn2 := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"), turnUUID("t2", "next"), assistantToolUse("a2"))
+	if !run(turn2) {
+		t.Fatalf("a new turn must be refused again")
+	}
+}
+
+func TestPretoolMaxBlocksIsHonoured(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
+	_, stdout, _ := pretool(t, p, "mb", "--max-blocks=0")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("--max-blocks=0 must never refuse")
+	}
+}
+
+func TestPretoolUnstampedTextIsTheStopHooksBusiness(t *testing.T) {
+	wantAllow(t, "unstamped-text", turnUUID("t1", "go"), assistantText("a1", "no stamp here"), assistantToolUse("a2"))
+}
