@@ -3,13 +3,55 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// logs replaces the file seam with a map of canned logs.
+// jsonl builds a `go test -json` log from compact specs: "PKG ACTION TEST
+// [OUTPUT...]", with TEST "-" for a package-level event.
+//
+// ⛔ The tests build REAL events rather than hand-written JSON, because what
+// this command must get right is which EVENT carries a verdict — and a fixture
+// that blurred that would be a fixture shaped unlike every real input.
+func jsonl(t *testing.T, specs ...string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, s := range specs {
+		parts := strings.SplitN(s, " ", 4)
+		if len(parts) < 3 {
+			t.Fatalf("bad spec %q", s)
+		}
+		pkg, action, test := parts[0], parts[1], parts[2]
+		if test == "-" {
+			test = ""
+		}
+		out := ""
+		if len(parts) == 4 {
+			out = parts[3]
+		}
+		fmt.Fprintf(&b, `{"Action":%q,"Package":%q`, action, pkg)
+		if test != "" {
+			fmt.Fprintf(&b, `,"Test":%q`, test)
+		}
+		if out != "" {
+			fmt.Fprintf(&b, `,"Output":%q`, out+"\n")
+		}
+		b.WriteString("}\n")
+	}
+	return b.String()
+}
+
+// pkgRun wraps one package's events with the start and result Go emits.
+func pkgRun(t *testing.T, pkg string, result string, specs ...string) []string {
+	t.Helper()
+	out := []string{pkg + " start -"}
+	out = append(out, specs...)
+	return append(out, pkg+" "+result+" -")
+}
+
 func logs(t *testing.T, files map[string]string) {
 	t.Helper()
 	old := readFile
@@ -30,37 +72,31 @@ func drive(t *testing.T, argv ...string) (int, string, string) {
 	return code, out.String(), errb.String()
 }
 
-// ⛔⛔ THE CASE THIS COMMAND WAS WRITTEN FOR, with the real logs of
-// go-fleettools/fleettools#252 on 2026-11-12. The mutation removed a staleness
-// condition from cmd/aptneed. The suite went red, and I published that this
-// proved TestANameAptCouldNotCheckIsNotCalledATypo discriminating.
-//
-// It did not. That test PASSED under the mutation; two others failed. Red, as
-// claimed, on the opposite tests — and no count could have shown it.
+// ⛔⛔ THE CASE THIS COMMAND WAS WRITTEN FOR, with the real result of
+// go-fleettools/fleettools#252 on 2026-11-12. A mutation removed a staleness
+// condition from cmd/aptneed. I published that this proved
+// TestANameAptCouldNotCheckIsNotCalledATypo discriminating. It did not: that
+// test PASSED and two others failed.
 func TestTheClaimThatWasPublishedBackwardsIsRefused(t *testing.T) {
+	const p = "example.com/aptneed"
 	logs(t, map[string]string{
-		"before.log": `=== RUN   TestAPackageAptCannotLocateIsNotRetried
---- PASS: TestAPackageAptCannotLocateIsNotRetried (0.00s)
---- PASS: TestANameAptCouldNotCheckIsNotCalledATypo (0.00s)
---- PASS: TestANameAptCouldCheckIsStillRefusedOutright (0.00s)
-ok  	github.com/go-fleettools/fleettools/cmd/aptneed	0.054s
-`,
-		"after.log": `--- FAIL: TestAPackageAptCannotLocateIsNotRetried (0.00s)
---- PASS: TestANameAptCouldNotCheckIsNotCalledATypo (0.00s)
---- FAIL: TestANameAptCouldCheckIsStillRefusedOutright (0.00s)
-FAIL	github.com/go-fleettools/fleettools/cmd/aptneed	0.060s
-`,
+		"before": jsonl(t, pkgRun(t, p, "pass",
+			p+" pass TestAPackageAptCannotLocateIsNotRetried",
+			p+" pass TestANameAptCouldNotCheckIsNotCalledATypo",
+			p+" pass TestANameAptCouldCheckIsStillRefusedOutright")...),
+		"after": jsonl(t, pkgRun(t, p, "fail",
+			p+" fail TestAPackageAptCannotLocateIsNotRetried",
+			p+" pass TestANameAptCouldNotCheckIsNotCalledATypo",
+			p+" fail TestANameAptCouldCheckIsStillRefusedOutright")...),
 	})
-	code, out, errb := drive(t, "--before", "before.log", "--after", "after.log",
+	code, _, errb := drive(t, "--before", "before", "--after", "after",
 		"--expect", "TestANameAptCouldNotCheckIsNotCalledATypo")
 	if code != 1 {
-		t.Fatalf("exit %d, want the claim refused\nstdout %q\nstderr %q", code, out, errb)
+		t.Fatalf("exit %d, want the claim refused: %q", code, errb)
 	}
 	if !strings.Contains(errb, "it PASSED under the mutation") {
-		t.Errorf("it did not say the expected test passed: %q", errb)
+		t.Errorf("stderr = %q", errb)
 	}
-	// ⛔ AND IT NAMES WHAT DID GO RED, because "your claim is wrong" without
-	// that sends the reader back to the same count they misread.
 	for _, want := range []string{
 		"TestAPackageAptCannotLocateIsNotRetried",
 		"TestANameAptCouldCheckIsStillRefusedOutright",
@@ -71,13 +107,90 @@ FAIL	github.com/go-fleettools/fleettools/cmd/aptneed	0.060s
 	}
 }
 
-// And the same two logs with the claim made correctly are accepted.
-func TestTheClaimTheRunActuallySupportsIsAccepted(t *testing.T) {
+// ⛔⛔ FALSE PASS 1, FOUND IN REVIEW, AND THE REASON THIS READS -json AT ALL.
+// With `go test -v` text, a PASSING test's own output can forge another
+// test's verdict: TestY printing "--- FAIL: TestX (0.00s)" made the old
+// version report TestX as newly red and exit 0.
+//
+// In -json that line is an "output" event and can never be a verdict, so the
+// forgery is not merely caught — it is unrepresentable.
+func TestATestCannotForgeAnotherTestsVerdict(t *testing.T) {
+	const p = "example.com/pkg"
 	logs(t, map[string]string{
-		"before.log": "--- PASS: TestA (0.00s)\n--- PASS: TestB (0.00s)\nok\n",
-		"after.log":  "--- FAIL: TestA (0.00s)\n--- PASS: TestB (0.00s)\nFAIL\n",
+		"before": jsonl(t, pkgRun(t, p, "pass",
+			p+" pass TestX", p+" pass TestY")...),
+		"after": jsonl(t, pkgRun(t, p, "pass",
+			p+" pass TestX",
+			p+" output TestY --- FAIL: TestX (0.00s)",
+			p+" pass TestY")...),
 	})
-	code, out, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestA")
+	code, out, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestX")
+	if code != 1 {
+		t.Fatalf("exit %d, want the forged claim refused\nstdout %q\nstderr %q", code, out, errb)
+	}
+	if !strings.Contains(out, "nothing went green->red") {
+		t.Errorf("a printed line was taken for a verdict: %q", out)
+	}
+}
+
+// ⛔⛔ FALSE PASS 2: text output carries no package, so two packages with a
+// test of the same name collided. Here TestX is red in pkgA in BOTH runs and
+// green in pkgB in both; keyed by name alone that reads as green->red.
+func TestTheSameNameInTwoPackagesIsTwoTests(t *testing.T) {
+	const a, b = "example.com/a", "example.com/b"
+	logs(t, map[string]string{
+		"before": jsonl(t, append(
+			pkgRun(t, a, "fail", a+" fail TestX"),
+			pkgRun(t, b, "pass", b+" pass TestX")...)...),
+		"after": jsonl(t, append(
+			pkgRun(t, b, "pass", b+" pass TestX"),
+			pkgRun(t, a, "fail", a+" fail TestX")...)...),
+	})
+	code, out, _ := drive(t, "--before", "before", "--after", "after", "--expect", "TestX")
+	if code != 1 {
+		t.Fatalf("exit %d, want refused: TestX was red in a and green in b in BOTH runs\n%s", code, out)
+	}
+}
+
+// ⛔⛔ FALSE PASS 3: "not failing before" is not "passing before". A test
+// ABSENT from the before run was counted as green, so it could then "go
+// green->red" although it had never been shown to pass.
+func TestATestMissingFromTheBeforeRunNeverWentGreenToRed(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestY")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestX", p+" pass TestY")...),
+	})
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestX")
+	if code != 1 {
+		t.Fatalf("exit %d, want refused: TestX was never green", code)
+	}
+	if !strings.Contains(errb, "did not record it PASSING") {
+		t.Errorf("stderr = %q", errb)
+	}
+}
+
+// And a SKIPPED test was not green either.
+func TestATestSkippedInTheBeforeRunNeverWentGreenToRed(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" skip TestX")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestX")...),
+	})
+	code, _, _ := drive(t, "--before", "before", "--after", "after", "--expect", "TestX")
+	if code != 1 {
+		t.Fatalf("exit %d, want refused: TestX was skipped, not green", code)
+	}
+}
+
+// The claim the runs actually support is accepted.
+func TestTheClaimTheRunsSupportIsAccepted(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA", p+" pass TestB")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestA", p+" pass TestB")...),
+	})
+	code, out, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
 	if code != 0 {
 		t.Fatalf("exit %d: %q %q", code, out, errb)
 	}
@@ -86,184 +199,209 @@ func TestTheClaimTheRunActuallySupportsIsAccepted(t *testing.T) {
 	}
 }
 
-// ⛔⛔ A BUILD FAILURE IS NO ANSWER, NOT ZERO FAILURES. This is the log the
-// first run of that same mutation actually produced: the variable it stopped
-// using went unused, so nothing compiled and nothing ran. A judge counting
-// `--- FAIL` lines reads it as a clean run and reports the mutation survived.
-func TestALogThatDidNotBuildIsRefusedRatherThanCalledClean(t *testing.T) {
+// ⛔⛔ AN ABORTED RUN ANSWERS FOR NO TEST, and the signal is structural: a
+// panic, a timeout and a kill all leave the RUNNING test with an "run" event
+// and no verdict, while every test that finished keeps its own. A count of
+// failures reads that as a complete run.
+func TestATestThatStartedAndNeverReportedIsNoAnswer(t *testing.T) {
+	const p = "example.com/pkg"
 	logs(t, map[string]string{
-		"before.log": "--- PASS: TestA (0.00s)\nok\n",
-		"after.log": `# github.com/go-fleettools/fleettools/cmd/aptneed [build failed]
-./main.go:204:13: declared and not used: updateStatus
-FAIL	github.com/go-fleettools/fleettools/cmd/aptneed [build failed]
-FAIL
-`,
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA", p+" pass TestB")...),
+		"after": jsonl(t, pkgRun(t, p, "fail",
+			p+" fail TestA",
+			p+" run TestB",
+			p+" output TestB panic: test timed out after 30s")...),
 	})
-	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestA")
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
 	if code != 2 {
-		t.Fatalf("exit %d, want 2: a log that did not build is no answer\nstderr %q", code, errb)
+		t.Fatalf("exit %d, want 2: the run was killed\n%q", code, errb)
 	}
-	if !strings.Contains(errb, "build failed") {
-		t.Errorf("it did not say why there was no answer: %q", errb)
-	}
-}
-
-// ⛔⛔ FALSE PASS 1, FOUND IN REVIEW AND REPRODUCED BEFORE BEING FIXED. The
-// first version refused a log only when the verdict count was ZERO. Here
-// `go test ./...` ran two packages: one compiled and failed a test, the other
-// did not compile at all. The count is not zero, so the claim about TestAlpha
-// was ACCEPTED (exit 0) while a whole package never ran.
-//
-// A gate that says yes on a half-built run is worse than no gate, because it
-// is trusted.
-func TestOnePackageFailingToBuildIsNotAPartialAnswer(t *testing.T) {
-	logs(t, map[string]string{
-		"before.log": `--- PASS: TestAlpha (0.00s)
-ok  	example.com/pkgone	0.012s
---- PASS: TestBeta (0.00s)
-ok  	example.com/pkgtwo	0.008s
-`,
-		"after.log": `--- FAIL: TestAlpha (0.00s)
-FAIL	example.com/pkgone	0.012s
-# example.com/pkgtwo [build failed]
-./beta_test.go:9:2: declared and not used: x
-FAIL	example.com/pkgtwo [build failed]
-FAIL
-`,
-	})
-	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestAlpha")
-	if code != 2 {
-		t.Fatalf("exit %d, want 2: a package that did not build makes this no answer\nstderr %q",
-			code, errb)
-	}
-	if !strings.Contains(errb, "did not run to completion") {
+	if !strings.Contains(errb, "never reported a result") {
 		t.Errorf("stderr = %q", errb)
 	}
 }
 
-// ⛔⛔ FALSE PASS 2, the same hole in its other shape. A run killed by
-// `panic: test timed out` keeps every verdict already printed and loses the
-// one that was running. The count is not zero, nothing says `[build failed]`,
-// and the first version accepted a claim about a test that had finished
-// earlier — on the strength of a run that was killed.
-func TestARunKilledByATimeoutAnswersForNoTest(t *testing.T) {
+// A package that did not build is the same refusal, and it is reported even
+// though other packages produced verdicts.
+func TestAPackageThatDidNotBuildIsNoAnswer(t *testing.T) {
+	const a, b = "example.com/a", "example.com/b"
 	logs(t, map[string]string{
-		"before.log": "--- PASS: TestAlpha (0.00s)\n--- PASS: TestBeta (0.00s)\nok\n",
-		"after.log": `--- FAIL: TestAlpha (0.00s)
-=== RUN   TestBeta
-panic: test timed out after 30s
-	running tests:
-		TestBeta (30s)
-FAIL	example.com/pkgone	30.012s
-`,
+		"before": jsonl(t, append(
+			pkgRun(t, a, "pass", a+" pass TestA"),
+			pkgRun(t, b, "pass", b+" pass TestB")...)...),
+		"after": `{"Action":"build-fail","ImportPath":"example.com/b [test]"}` + "\n" +
+			jsonl(t, pkgRun(t, a, "fail", a+" fail TestA")...),
 	})
-	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestAlpha")
-	if code != 2 {
-		t.Fatalf("exit %d, want 2: the run was killed\nstderr %q", code, errb)
-	}
-	if !strings.Contains(errb, "did not run to completion") {
-		t.Errorf("stderr = %q", errb)
-	}
-}
-
-// ⛔ AND THE REFUSAL IS ANCHORED, so it does not cry wolf. A test that prints
-// a recovered panic — which is a NORMAL, PASSING test — writes
-// `    foo_test.go:12: panic: boom` through t.Log, indented and prefixed. A
-// marker matched anywhere in the line would refuse that run, and a gate that
-// fires on ordinary output is a gate somebody switches off.
-func TestAPanicQuotedInATestsOutputIsNotAnAbort(t *testing.T) {
-	logs(t, map[string]string{
-		"before.log": "    foo_test.go:12: panic: boom\n--- PASS: TestAlpha (0.00s)\nok\n",
-		"after.log":  "    foo_test.go:12: panic: boom\n--- FAIL: TestAlpha (0.00s)\nFAIL\n",
-	})
-	code, out, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestAlpha")
-	if code != 0 {
-		t.Fatalf("exit %d: a test quoting a panic was called an aborted run\nstderr %q", code, errb)
-	}
-	if !strings.Contains(out, "green->red: TestAlpha") {
-		t.Errorf("stdout = %q", out)
-	}
-}
-
-// ⛔ A package with no tests is a complete run, not a broken one. `[no test
-// files]` is deliberately not a marker: refusing it would refuse most
-// `go test ./...` logs in this fleet.
-func TestAPackageWithNoTestFilesIsACompleteRun(t *testing.T) {
-	logs(t, map[string]string{
-		"before.log": "?   	example.com/empty	[no test files]\n--- PASS: TestAlpha (0.00s)\nok\n",
-		"after.log":  "?   	example.com/empty	[no test files]\n--- FAIL: TestAlpha (0.00s)\nFAIL\n",
-	})
-	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestAlpha")
-	if code != 0 {
-		t.Fatalf("exit %d: a package without tests is not a broken run\nstderr %q", code, errb)
-	}
-}
-
-// An empty log, or one whose -run filter matched nothing, is the same refusal
-// without a marker to quote.
-func TestALogWithNoVerdictsAtAllIsRefused(t *testing.T) {
-	logs(t, map[string]string{
-		"before.log": "--- PASS: TestA (0.00s)\nok\n",
-		"after.log":  "testing: warning: no tests to run\nPASS\nok  \tpkg\t0.001s\n",
-	})
-	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log")
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
 	if code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}
-	if !strings.Contains(errb, "no test verdicts at all") {
+	if !strings.Contains(errb, "the build failed") {
 		t.Errorf("stderr = %q", errb)
 	}
 }
 
-// ⛔ The --before log is checked the same way. A baseline that did not build
-// makes every test in the --after log look newly red.
-func TestAnUnbuildableBaselineIsRefusedToo(t *testing.T) {
+// A package-level fail carrying FailedBuild says the same thing a different
+// way, which is how Go reports it when the build error is attributed.
+func TestAPackageResultThatNamesAFailedBuildIsNoAnswer(t *testing.T) {
+	const p = "example.com/pkg"
 	logs(t, map[string]string{
-		"before.log": "FAIL\tpkg [build failed]\n",
-		"after.log":  "--- FAIL: TestA (0.00s)\nFAIL\n",
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
+		"after": `{"Action":"start","Package":"example.com/pkg"}` + "\n" +
+			`{"Action":"fail","Package":"example.com/pkg","FailedBuild":"example.com/pkg [test]"}` + "\n",
 	})
-	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestA")
+	code, _, errb := drive(t, "--before", "before", "--after", "after")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errb, "the build failed") {
+		t.Errorf("stderr = %q", errb)
+	}
+}
+
+// A package that started and never reported is an aborted run too.
+func TestAPackageThatNeverReportedIsNoAnswer(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
+		"after":  jsonl(t, p+" start -", p+" pass TestA"),
+	})
+	code, _, errb := drive(t, "--before", "before", "--after", "after")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2: %q", code, errb)
+	}
+}
+
+// ⛔ The BEFORE run is checked the same way: an aborted baseline makes every
+// test in the after run look newly red.
+func TestAnAbortedBaselineIsRefusedToo(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "fail", p+" run TestA")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestA")...),
+	})
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
 	if code != 2 {
 		t.Fatalf("exit %d, want 2", code)
 	}
 	if !strings.Contains(errb, "--before") {
-		t.Errorf("it did not say which log: %q", errb)
+		t.Errorf("it did not say which run: %q", errb)
 	}
 }
 
-// A subtest answers for its parent, because that is how Go reports one.
-func TestASubtestGoingRedSatisfiesAClaimAboutItsParent(t *testing.T) {
+// ⛔⛔ A `go test -v` TEXT LOG IS REFUSED, WITH THE REASON. It is the format
+// this command used to accept, and the one in which a test can forge another
+// test's verdict — so it must be told what to do rather than read as an empty
+// run.
+func TestAPlainTextLogIsRefusedAndSaysWhy(t *testing.T) {
 	logs(t, map[string]string{
-		"before.log": "    --- PASS: TestA/case (0.00s)\n--- PASS: TestA (0.00s)\nok\n",
-		"after.log":  "    --- FAIL: TestA/case (0.00s)\n--- FAIL: TestA (0.00s)\nFAIL\n",
+		"before": "=== RUN   TestA\n--- PASS: TestA (0.00s)\nok  \tpkg\t0.01s\n",
+		"after":  "=== RUN   TestA\n--- FAIL: TestA (0.00s)\nFAIL\n",
 	})
-	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestA")
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	for _, want := range []string{"re-run with -json", "forge"} {
+		if !strings.Contains(errb, want) {
+			t.Errorf("stderr does not say %q: %q", want, errb)
+		}
+	}
+}
+
+// A subtest answers for its parent.
+func TestASubtestGoingRedSatisfiesAClaimAboutItsParent(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA", p+" pass TestA/case")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestA", p+" fail TestA/case")...),
+	})
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
 	if code != 0 {
 		t.Fatalf("exit %d: %q", code, errb)
 	}
 }
 
-// ⛔ AND A PARENT GOING RED DOES NOT ANSWER FOR AN ARBITRARY SIBLING. covers()
-// is deliberately one-directional: TestA failing says nothing about TestAB.
-func TestAPrefixThatIsNotASubtestDoesNotCount(t *testing.T) {
+// ⛔⛔ AND THE SEPARATOR IS REQUIRED, which is the direction that was NOT
+// pinned: a review measured `HasPrefix(got, want)` without the "/" surviving,
+// because the only case asked whether TestA answers for TestAB. Here TestAB
+// goes red and the claim is about TestA, which it must NOT satisfy.
+func TestARedTestWhoseNameMerelyStartsWithTheClaimDoesNotCount(t *testing.T) {
+	const p = "example.com/pkg"
 	logs(t, map[string]string{
-		"before.log": "--- PASS: TestA (0.00s)\n--- PASS: TestAB (0.00s)\nok\n",
-		"after.log":  "--- FAIL: TestA (0.00s)\n--- PASS: TestAB (0.00s)\nFAIL\n",
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA", p+" pass TestAB")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" pass TestA", p+" fail TestAB")...),
 	})
-	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestAB")
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
 	if code != 1 {
-		t.Fatalf("exit %d, want the claim about TestAB refused: %q", code, errb)
+		t.Fatalf("exit %d, want refused: TestAB is not TestA\n%q", code, errb)
 	}
 }
 
-// A test that was ALREADY red says nothing about the mutation, and saying so
-// is the difference between evidence and coincidence.
-func TestATestThatWasAlreadyRedIsNotEvidence(t *testing.T) {
+// The reverse, which was the only direction pinned before.
+func TestAPrefixThatIsNotASubtestDoesNotCount(t *testing.T) {
+	const p = "example.com/pkg"
 	logs(t, map[string]string{
-		"before.log": "--- FAIL: TestA (0.00s)\nFAIL\n",
-		"after.log":  "--- FAIL: TestA (0.00s)\nFAIL\n",
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA", p+" pass TestAB")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestA", p+" pass TestAB")...),
 	})
-	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestA")
+	code, _, _ := drive(t, "--before", "before", "--after", "after", "--expect", "TestAB")
+	if code != 1 {
+		t.Fatalf("exit %d, want refused", code)
+	}
+}
+
+// ⛔ A test SKIPPED under the mutation is not evidence either, and the reason
+// a reader needs is which of the three things happened — not merely "no".
+func TestATestSkippedUnderTheMutationIsNotEvidence(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
+		"after":  jsonl(t, pkgRun(t, p, "pass", p+" skip TestA")...),
+	})
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if !strings.Contains(errb, "SKIPPED under the mutation") {
+		t.Errorf("stderr = %q", errb)
+	}
+}
+
+// ⛔ Two packages whose test of the same name BOTH go red are two findings,
+// and are reported in a stable order — the name first, then the package, so
+// a reader comparing two runs of this command sees the same list twice.
+//
+// A blank line is left in one log on purpose: `go test -json` output that has
+// been concatenated or edited carries them, and skipping them must not be
+// mistaken for skipping an event.
+func TestTheSameNameRedInTwoPackagesIsTwoFindings(t *testing.T) {
+	const a, b = "example.com/zzz", "example.com/aaa"
+	logs(t, map[string]string{
+		"before": jsonl(t, append(
+			pkgRun(t, a, "pass", a+" pass TestX"),
+			pkgRun(t, b, "pass", b+" pass TestX")...)...) + "\n\n",
+		"after": jsonl(t, append(
+			pkgRun(t, a, "fail", a+" fail TestX"),
+			pkgRun(t, b, "fail", b+" fail TestX")...)...),
+	})
+	code, out, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestX")
+	if code != 0 {
+		t.Fatalf("exit %d: %q", code, errb)
+	}
+	if !strings.Contains(out, "2 went green->red") {
+		t.Errorf("both packages' failures were not counted: %q", out)
+	}
+}
+
+// A test already red in both runs is evidence of nothing, and says so.
+func TestATestThatWasAlreadyRedIsNotEvidence(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "fail", p+" fail TestA")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestA")...),
+	})
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
 	if code != 1 {
 		t.Fatalf("exit %d, want 1", code)
 	}
@@ -272,14 +410,14 @@ func TestATestThatWasAlreadyRedIsNotEvidence(t *testing.T) {
 	}
 }
 
-// A name with no verdict in the --after log is a typo in the claim, and is
-// told apart from a test that ran and passed.
+// A name with no verdict at all in the after run is a typo in the claim.
 func TestANameThatNeverRanIsCalledOutAsSuch(t *testing.T) {
+	const p = "example.com/pkg"
 	logs(t, map[string]string{
-		"before.log": "--- PASS: TestA (0.00s)\nok\n",
-		"after.log":  "--- FAIL: TestA (0.00s)\nFAIL\n",
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestA")...),
 	})
-	code, _, errb := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestTypo")
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestTypo")
 	if code != 1 {
 		t.Fatalf("exit %d", code)
 	}
@@ -288,14 +426,15 @@ func TestANameThatNeverRanIsCalledOutAsSuch(t *testing.T) {
 	}
 }
 
-// ⛔ A mutation that makes a test PASS is a fact about the suite, and is
-// invisible in any count. It is reported without being an error.
+// ⛔ A mutation that makes a test PASS is a fact about the suite and is
+// invisible in every count, so it is reported without being an error.
 func TestATestThatWentRedToGreenIsReported(t *testing.T) {
+	const p = "example.com/pkg"
 	logs(t, map[string]string{
-		"before.log": "--- FAIL: TestA (0.00s)\n--- PASS: TestB (0.00s)\nFAIL\n",
-		"after.log":  "--- PASS: TestA (0.00s)\n--- FAIL: TestB (0.00s)\nFAIL\n",
+		"before": jsonl(t, pkgRun(t, p, "fail", p+" fail TestA", p+" pass TestB")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" pass TestA", p+" fail TestB")...),
 	})
-	code, out, _ := drive(t, "--before", "before.log", "--after", "after.log", "--expect", "TestB")
+	code, out, _ := drive(t, "--before", "before", "--after", "after", "--expect", "TestB")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -304,14 +443,14 @@ func TestATestThatWentRedToGreenIsReported(t *testing.T) {
 	}
 }
 
-// With no --expect at all it is a report rather than a gate, and says so by
-// succeeding.
+// With nothing claimed it is a report rather than a gate.
 func TestWithNothingClaimedItOnlyReports(t *testing.T) {
+	const p = "example.com/pkg"
 	logs(t, map[string]string{
-		"before.log": "--- PASS: TestA (0.00s)\nok\n",
-		"after.log":  "--- FAIL: TestA (0.00s)\nFAIL\n",
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestA")...),
 	})
-	code, out, _ := drive(t, "--before", "before.log", "--after", "after.log")
+	code, out, _ := drive(t, "--before", "before", "--after", "after")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -320,14 +459,14 @@ func TestWithNothingClaimedItOnlyReports(t *testing.T) {
 	}
 }
 
-// Nothing newly red at all is the sentence a reader needs most: the mutation
-// changed nothing, so whatever it was meant to prove, it did not.
+// Nothing newly red at all is the sentence a reader needs most.
 func TestAMutationThatChangedNothingSaysSo(t *testing.T) {
+	const p = "example.com/pkg"
 	logs(t, map[string]string{
-		"before.log": "--- PASS: TestA (0.00s)\nok\n",
-		"after.log":  "--- PASS: TestA (0.00s)\nok\n",
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
+		"after":  jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
 	})
-	code, out, _ := drive(t, "--before", "before.log", "--after", "after.log")
+	code, out, _ := drive(t, "--before", "before", "--after", "after")
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -336,32 +475,19 @@ func TestAMutationThatChangedNothingSaysSo(t *testing.T) {
 	}
 }
 
-// A test reported twice in one log — a retry, or two runs of the package —
-// keeps its LAST verdict.
-func TestTheLastVerdictForANameIsTheOneThatStood(t *testing.T) {
-	logs(t, map[string]string{
-		"before.log": "--- PASS: TestA (0.00s)\nok\n",
-		"after.log":  "--- FAIL: TestA (0.00s)\n--- PASS: TestA (0.00s)\nok\n",
-	})
-	code, out, _ := drive(t, "--before", "before.log", "--after", "after.log")
-	if code != 0 {
-		t.Fatalf("exit %d", code)
-	}
-	if !strings.Contains(out, "nothing went green->red") {
-		t.Errorf("a retried test that ended green was reported red: %q", out)
-	}
-}
-
 func TestWhatItRefusesToBeAskedFor(t *testing.T) {
-	logs(t, map[string]string{"a.log": "--- PASS: TestA (0.00s)\nok\n"})
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"a": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
+	})
 	for _, c := range []struct {
 		name string
 		argv []string
 		says string
 	}{
 		{"no logs", []string{"--expect", "TestA"}, "each name a"},
-		{"only one log", []string{"--before", "a.log"}, "each name a"},
-		{"a log that is not there", []string{"--before", "a.log", "--after", "gone.log"}, "no such file"},
+		{"only one log", []string{"--before", "a"}, "each name a"},
+		{"a log that is not there", []string{"--before", "a", "--after", "gone"}, "no such file"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			code, _, errb := drive(t, c.argv...)
@@ -375,20 +501,24 @@ func TestWhatItRefusesToBeAskedFor(t *testing.T) {
 	}
 }
 
-// ⛔ The real seam, exercised once: the tests above replace it, so without this
-// nothing would ever read an actual file.
+// ⛔ The real seam, exercised once: the tests above replace it, so without
+// this nothing would ever read an actual file.
 func TestTheRealReaderReadsAFile(t *testing.T) {
 	dir := t.TempDir()
-	p := filepath.Join(dir, "x.log")
-	if err := os.WriteFile(p, []byte("--- FAIL: TestA (0.00s)\nFAIL\n"), 0o644); err != nil {
+	p := filepath.Join(dir, "x.json")
+	body := jsonl(t, pkgRun(t, "example.com/pkg", "fail", "example.com/pkg fail TestA")...)
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r, err := readLog(p)
+	r, err := readRun(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.verdicts != 1 || r.tests["TestA"] != failed {
-		t.Errorf("read %+v", r)
+	if r.tests[testID{"example.com/pkg", "TestA"}] != failed {
+		t.Errorf("read %+v", r.tests)
+	}
+	if r.incomplete != "" {
+		t.Errorf("a complete run was called incomplete: %q", r.incomplete)
 	}
 }
 
@@ -398,7 +528,7 @@ func TestHelpIsAskedForRatherThanRun(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(errb, "SET of failing test names") {
+	if !strings.Contains(errb, "SET of failing tests") {
 		t.Errorf("stderr = %q", errb)
 	}
 }
