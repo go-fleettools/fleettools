@@ -579,3 +579,94 @@ func TestNoVectorISAExemptionPairs(t *testing.T) {
 		}
 	})
 }
+
+// A pull request that removes a parking sentence must be able to quote it
+// (fleettools#269); a quoted deferral that is the author's own claim is still
+// refused (the bypass the second review of #251 found).
+func TestCitedTextIsNotAssertedText(t *testing.T) {
+	for _, s := range []string{
+		`The comment says "no bit-identical generated SIMD kernel", which parks a change on bit identity.`,
+		`The comment says “a bit-identical vector complex multiply cannot be built”.`,
+		`The old text said "we skip the SIMD kernel because it would break bit parity", and is gone.`,
+		`Removed the sentence "no bit-identical reduction exists; no code change".`,
+		`This replaces the comment "the AVX2 kernel is skipped because it would break bit parity" with a measured bound.`,
+		`The README line was: "we do not use FMA because it would break bit-parity".`,
+		`The docstring reads "so no bit-identical vector kernel is expressible", which this PR deletes.`,
+	} {
+		if got := Scan(s); len(got) != 0 {
+			t.Errorf("a cited sentence was refused: %q %v", s, got)
+		}
+	}
+	for _, s := range []string{
+		`We do not use the SIMD kernel "because it would break bit parity", per the maintainers.`,
+		`The maintainers said "we skip the SIMD kernel because it would break bit parity".`,
+		`We have "no bit-identical generated SIMD kernel" here, which is fine.`,
+		`We were told the plan was "we skip the SIMD kernel because it would break bit parity" and agree.`,
+	} {
+		if len(Scan(s)) == 0 {
+			t.Errorf("a claim in quotation marks passed: %q", s)
+		}
+	}
+}
+
+// The frame must name a text or an act on text; the same quotation after a
+// person's "said" is a claim.
+func TestCitingFramePairs(t *testing.T) {
+	q := `"we skip the SIMD kernel because it would break bit parity"`
+	if got := Scan("The comment says " + q + "."); len(got) != 0 {
+		t.Errorf("framed: %v", got)
+	}
+	if len(Scan("The maintainers say "+q+".")) == 0 {
+		t.Error("a person's quote passed")
+	}
+	if len(Scan("We use "+q+".")) == 0 {
+		t.Error("an unframed quote passed")
+	}
+}
+
+// The bypasses the review of #270 found: a frame that names no TEXT, an author's
+// own "my/our" text, and a removal verb with no text object are claims.
+func TestCitingBypassesAreRefused(t *testing.T) {
+	deferral := `because it would break bit parity`
+	for _, s := range []string{
+		`We skip the SIMD kernel and our reason was: "` + deferral + `".`,
+		`Our reason was: "we skip the SIMD kernel ` + deferral + `".`,
+		`We skip the SIMD kernel; my note says "` + deferral + `".`,
+		`We skip the AVX2 kernel; our comment reads "` + deferral + `".`,
+		`We did the work and dropped "the SIMD kernel ` + deferral + `".`,
+		`We removed "the SIMD kernel ` + deferral + `".`,
+		`We replaced "the SIMD kernel ` + deferral + `" last week.`,
+		`We deleted "the SIMD kernel ` + deferral + `".`,
+	} {
+		if len(Scan(s)) == 0 {
+			t.Errorf("a bypass passed: %q", s)
+		}
+	}
+	// The same words with a text frame and a text object are a citation.
+	for _, s := range []string{
+		`We removed the sentence "the SIMD kernel is skipped ` + deferral + `".`,
+		`This PR replaces the old comment "the SIMD kernel is skipped ` + deferral + `" with a bound.`,
+		`The README text was: "the SIMD kernel is skipped ` + deferral + `".`,
+	} {
+		if got := Scan(s); len(got) != 0 {
+			t.Errorf("a citation was refused: %q %v", s, got)
+		}
+	}
+}
+
+// "The new text says ..." is the PR adding its own deferral, not citing one.
+func TestNewTextIsNotACitation(t *testing.T) {
+	for _, s := range []string{
+		`The new text says "we skip the SIMD kernel because it would break bit parity".`,
+		`The added comment reads "we skip the SIMD kernel because it would break bit parity".`,
+		`The proposed sentence says "we skip the SIMD kernel because it would break bit parity".`,
+		`The updated README line was: "we skip the SIMD kernel because it would break bit parity".`,
+	} {
+		if len(Scan(s)) == 0 {
+			t.Errorf("an added deferral passed as a citation: %q", s)
+		}
+	}
+	if got := Scan(`The old text says "we skip the SIMD kernel because it would break bit parity".`); len(got) != 0 {
+		t.Errorf("the control (old text) was refused: %v", got)
+	}
+}
