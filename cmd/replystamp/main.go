@@ -67,6 +67,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -107,7 +108,15 @@ Bash-only matcher lets a turn that opens on Read or Edit walk past it:
 
   command: ~/.local/bin/replystamp --pretool
 
-After --max-blocks consecutive refusals in the same turn it allows.
+After --max-blocks consecutive refusals in the same turn it allows. It reads
+only the tail of the transcript (at most 32 MiB) and allows when no user turn
+is in it, allows a subagent's call (payload agent_id), and never calls the
+network. A task notification counts as a user turn on purpose: a reply to one
+must be stamped too.
+
+Honest limit: the docs say the transcript is written asynchronously and may
+lag. A lag yields a FALSE DENY (text already written but not yet on disk), not
+a safe miss; the --max-blocks bound caps the cost at that many refusals.
 
 Every hook mode ALLOWS whenever it cannot read -- an unreadable transcript, a
 turn it cannot locate, a payload of another event, malformed JSON, a malformed
@@ -118,7 +127,22 @@ Exit status: 0 stamped, 1 not stamped, 2 the question could not be put. Under
 verdict is the JSON on stdout.`
 
 func main() {
-	fleet.WarnIfStale(os.Stderr)
+	if dispatch(os.Args[1:], os.Stdout, os.Stderr, func(w io.Writer) { fleet.WarnIfStale(w) }) {
+		return
+	}
+	cli.Run(RootCmd())
+}
+
+// dispatch handles hook mode and reports whether it did. warn is the staleness
+// warning, which is a `gh api` call (553 ms measured): ⛔ HOOK MODE NEVER CALLS
+// IT. A PreToolUse hook runs before every tool call, and a network round trip
+// there is paid hundreds of times a session. It is a parameter so a test can
+// assert it.
+func dispatch(args []string, stdout, stderr io.Writer, warn func(io.Writer)) bool {
+	if !hookMode(args) {
+		warn(stderr)
+		return false
+	}
 	// ⛔⛔ UNDER --hook THE STATUS BELONGS TO THE PROTOCOL, AND cobra NEVER
 	// REACHES RunE WHEN A FLAG IS MALFORMED. Review measured it:
 	// `replystamp --hook --tolerance=zzz` exits 2, and a Stop hook reads 2 as a
@@ -129,11 +153,8 @@ func main() {
 	// typo in the settings file. A hook must fail OPEN, so the whole program
 	// does, before cobra parses anything: its own breakage can never be a
 	// refusal.
-	if hookMode(os.Args[1:]) {
-		driveHook(os.Args[1:], os.Stdout, os.Stderr)
-		return
-	}
-	cli.Run(RootCmd())
+	driveHook(args, stdout, stderr)
+	return true
 }
 
 // driveHook runs the command in hook mode and ALWAYS leaves the process with
@@ -349,28 +370,35 @@ func scanEntries(r io.Reader, fn func(e entry, m message)) error {
 	// the anchor would move.
 	sc.Buffer(make([]byte, 0, 1<<20), 64<<20)
 	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
+		if e, m, ok := decodeEntry(sc.Bytes()); ok {
+			fn(e, m)
 		}
-		var e entry
-		if err := json.Unmarshal(line, &e); err != nil {
-			// A transcript is append-only and a half-written last line is
-			// ordinary; it is not a reason to refuse to judge the rest.
-			continue
-		}
-		var m message
-		if len(e.Message) > 0 {
-			_ = json.Unmarshal(e.Message, &m)
-		}
-		// A subagent writes into this same file. Nothing it says is this
-		// session's reply, and its turns must not move the anchor either.
-		if e.IsSidechain {
-			continue
-		}
-		fn(e, m)
 	}
 	return sc.Err()
+}
+
+// decodeEntry decodes one transcript line; ok is false for a line that is
+// empty, undecodable or a sidechain entry.
+func decodeEntry(line []byte) (entry, message, bool) {
+	if len(line) == 0 {
+		return entry{}, message{}, false
+	}
+	var e entry
+	if err := json.Unmarshal(line, &e); err != nil {
+		// A transcript is append-only and a half-written last line is
+		// ordinary; it is not a reason to refuse to judge the rest.
+		return entry{}, message{}, false
+	}
+	var m message
+	if len(e.Message) > 0 {
+		_ = json.Unmarshal(e.Message, &m)
+	}
+	// A subagent writes into this same file. Nothing it says is this
+	// session's reply, and its turns must not move the anchor either.
+	if e.IsSidechain {
+		return entry{}, message{}, false
+	}
+	return e, m, true
 }
 
 func readReply(r io.Reader) (aReply, error) {
@@ -755,6 +783,10 @@ type stopPayload struct {
 	TranscriptPath string `json:"transcript_path"`
 	StopHookActive bool   `json:"stop_hook_active"`
 	HookEventName  string `json:"hook_event_name"`
+	// AgentID is set when the hook fires for a SUBAGENT's tool call. Its
+	// session_id and transcript_path are the parent's, so the parent's turn
+	// would be judged for a call the parent did not make.
+	AgentID string `json:"agent_id"`
 }
 
 type hookAnswer struct {
@@ -876,24 +908,90 @@ type turnState struct {
 // of a user turn, as the Stop hook. Any assistant text since the turn counts,
 // interstitial text between tool calls included: the question is "has this turn
 // written anything", not "has this turn called a tool".
+//
+// ⛔ IT READS FROM THE END. This runs before EVERY tool call, and a transcript
+// grows to hundreds of MB: scanning it whole cost 2.1 s of CPU per call on a
+// 948 MB file. The newest user turn is near the end, so it reads windows of
+// 1 MiB, doubling, up to maxTail, and stops at the first window holding one.
+// A turn not found within the cap is "cannot locate": the caller allows.
 func lastTurn(path string) (turnState, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return turnState{}, err
 	}
 	defer f.Close()
-	var s turnState
-	err = scanEntries(f, func(e entry, m message) {
-		switch {
-		case e.Type == "user" && isUserTurn(e, m):
-			s = turnState{found: true, uuid: e.UUID}
-		case e.Type == "assistant" && s.found && !s.hasText && !e.IsAPIErrorMessage:
-			if _, ok := firstText(m.Content); ok {
-				s.hasText = true
+	st, err := f.Stat()
+	if err != nil {
+		return turnState{}, err
+	}
+	s, _, err := lastTurnAt(f, st.Size())
+	return s, err
+}
+
+const (
+	tailStart = 1 << 20
+	maxTail   = 32 << 20
+)
+
+// lastTurnAt is lastTurn over any io.ReaderAt; it also returns how many bytes
+// it read, which a test asserts stays far under the size.
+func lastTurnAt(r io.ReaderAt, size int64) (turnState, int64, error) {
+	var total int64
+	for win := int64(tailStart); ; win *= 2 {
+		if win > maxTail {
+			win = maxTail
+		}
+		if win > size {
+			win = size
+		}
+		buf := make([]byte, win)
+		n, err := r.ReadAt(buf, size-win)
+		total += int64(n)
+		if err != nil && err != io.EOF {
+			return turnState{}, total, err
+		}
+		buf = buf[:n]
+		whole := win == size
+		if !whole {
+			// The window starts mid-line, probably: drop the partial first line.
+			i := bytes.IndexByte(buf, '\n')
+			if i < 0 {
+				buf = nil
+			} else {
+				buf = buf[i+1:]
 			}
 		}
-	})
-	return s, err
+		if s, ok := newestTurn(buf); ok {
+			return s, total, nil
+		}
+		if whole || win >= maxTail {
+			return turnState{}, total, nil
+		}
+	}
+}
+
+// newestTurn walks the lines of buf from the end to the newest genuine user
+// turn, noting whether an assistant text came after it.
+func newestTurn(buf []byte) (turnState, bool) {
+	hasText := false
+	for end := len(buf); end > 0; {
+		start := bytes.LastIndexByte(buf[:end], '\n') + 1
+		line := buf[start:end]
+		end = start - 1
+		e, m, ok := decodeEntry(line)
+		if !ok {
+			continue
+		}
+		switch {
+		case e.Type == "user" && isUserTurn(e, m):
+			return turnState{found: true, uuid: e.UUID, hasText: hasText}, true
+		case e.Type == "assistant" && !e.IsAPIErrorMessage:
+			if _, ok := firstText(m.Content); ok {
+				hasText = true
+			}
+		}
+	}
+	return turnState{}, false
 }
 
 // Schema: https://code.claude.com/docs/en/hooks (PreToolUse decision control:
@@ -926,6 +1024,9 @@ func runPretool(cmd *cobra.Command, o *options) error {
 	}
 	if p.HookEventName != "PreToolUse" {
 		return allow(out, errOut, "the payload is not a PreToolUse payload (event %q)", p.HookEventName)
+	}
+	if p.AgentID != "" {
+		return allow(out, errOut, "the call is a subagent's (agent_id %q), not the turn's own", p.AgentID)
 	}
 	if p.TranscriptPath == "" {
 		return allow(out, errOut, "the hook payload names no transcript")

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1086,4 +1087,168 @@ func TestPretoolMaxBlocksIsHonoured(t *testing.T) {
 
 func TestPretoolUnstampedTextIsTheStopHooksBusiness(t *testing.T) {
 	wantAllow(t, "unstamped-text", turnUUID("t1", "go"), assistantText("a1", "no stamp here"), assistantToolUse("a2"))
+}
+
+// ------------------------------------------------- review fixes on --pretool
+
+type countingReaderAt struct {
+	r io.ReaderAt
+	n int64
+}
+
+func (c *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n, err := c.r.ReadAt(p, off)
+	c.n += int64(n)
+	return n, err
+}
+
+// bigTranscript writes `before` filler assistant entries, the given tail lines,
+// and returns the path and size.
+func bigTranscript(t *testing.T, before int, tail ...line) (string, int64) {
+	t.Helper()
+	filler, err := json.Marshal(assistantText("f", strings.Repeat("x", 900)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b bytes.Buffer
+	for i := 0; i < before; i++ {
+		b.Write(filler)
+		b.WriteByte('\n')
+	}
+	for _, l := range tail {
+		raw, err := json.Marshal(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(raw)
+		b.WriteByte('\n')
+	}
+	p := filepath.Join(t.TempDir(), "big.jsonl")
+	if err := os.WriteFile(p, b.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p, int64(b.Len())
+}
+
+// ⛔ IT READS THE TAIL, NOT THE FILE: a 948 MB transcript cost 2.1 s per call.
+func TestPretoolReadsOnlyTheTail(t *testing.T) {
+	p, size := bigTranscript(t, 40000, // ~36 MB of filler, no user turn in it
+		turnUUID("t1", "go"), assistantThinking("a1"), assistantToolUse("a2"))
+	if size < 30<<20 {
+		t.Fatalf("fixture too small: %d", size)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	c := &countingReaderAt{r: f}
+	s, n, err := lastTurnAt(c, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.found || s.hasText || s.uuid != "t1" {
+		t.Fatalf("turn = %+v, want found, no text, t1", s)
+	}
+	if n != c.n {
+		t.Errorf("reported %d bytes, reader saw %d", n, c.n)
+	}
+	if n > size/10 {
+		t.Errorf("read %d of %d bytes: it must stay far under the file size", n, size)
+	}
+}
+
+func TestPretoolFindsATurnBeyondTheFirstWindow(t *testing.T) {
+	// ~3.6 MB of filler AFTER the turn: needs two doublings, and the turn's own
+	// text-less state must survive the window boundary.
+	p, size := bigTranscript(t, 0, turnUUID("t1", "go"))
+	_ = size
+	filler, _ := json.Marshal(assistantToolUse("f"))
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pad := bytes.Repeat(append(filler, '\n'), 40000)
+	if _, err := f.Write(pad); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	s, err := lastTurn(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.found || s.hasText || s.uuid != "t1" {
+		t.Fatalf("turn = %+v", s)
+	}
+}
+
+func TestPretoolAllowsWhenNoTurnIsWithinTheCap(t *testing.T) {
+	// The only user turn is further back than maxTail: cannot locate, allow.
+	p, size := bigTranscript(t, 0, turnUUID("t1", "go"))
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filler, _ := json.Marshal(assistantToolUse("f"))
+	filler = append(filler, '\n')
+	chunk := bytes.Repeat(filler, 10000)
+	for written := int64(0); written < maxTail+(2<<20); written += int64(len(chunk)) {
+		if _, err := f.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.Close()
+	_ = size
+	_, stdout, _ := pretool(t, p, "cap")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a turn beyond the read cap must allow, got %q", stdout)
+	}
+}
+
+func TestPretoolReadsAWholeSmallFileAndAHalfLineAtTheCut(t *testing.T) {
+	// Tail window starts mid-line in a big file: the partial line is dropped,
+	// not mis-parsed as a turn.
+	p, size := bigTranscript(t, 1500, assistantToolUse("a1"))
+	f, _ := os.Open(p)
+	defer f.Close()
+	s, _, err := lastTurnAt(f, size)
+	if err != nil || s.found {
+		t.Fatalf("no user turn exists; got %+v, %v", s, err)
+	}
+}
+
+func TestPretoolAllowsASubagentsCall(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
+	raw, err := json.Marshal(stopPayload{SessionID: "sub", TranscriptPath: p, HookEventName: "PreToolUse", AgentID: "agent-7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, errOut := drive(t, string(raw), "--pretool")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a subagent's call was judged on the parent's turn: %q", stdout)
+	}
+	if !strings.Contains(errOut, "subagent") {
+		t.Errorf("it must say why: %q", errOut)
+	}
+}
+
+// ⛔ HOOK MODE NEVER MAKES A NETWORK CALL; a normal run still warns.
+func TestHookModeNeverCallsTheStalenessWarning(t *testing.T) {
+	for _, args := range [][]string{{"--hook"}, {"--pretool"}, {"--pretool", "--bogus"}, {"--hook=yes"}} {
+		calls := 0
+		var out, errOut bytes.Buffer
+		if !dispatch(args, &out, &errOut, func(io.Writer) { calls++ }) {
+			t.Fatalf("%q: not recognised as hook mode", args)
+		}
+		if calls != 0 {
+			t.Errorf("%q: the staleness warning ran (%d)", args, calls)
+		}
+	}
+	calls := 0
+	if dispatch([]string{"--transcript", "x"}, io.Discard, io.Discard, func(io.Writer) { calls++ }) || calls != 1 {
+		t.Errorf("outside hook mode the warning must run once (calls=%d)", calls)
+	}
 }
