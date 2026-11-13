@@ -183,6 +183,132 @@ func TestATestSkippedInTheBeforeRunNeverWentGreenToRed(t *testing.T) {
 	}
 }
 
+// ⛔⛔ FAILING IS STICKY WITHIN ONE RUN. `go test -count=2` reports a name
+// once per iteration. Review measured a test that FAILED on the first and
+// PASSED on the second being recorded as passed — so a genuinely red test
+// could be reported as going green->red against the next run, which is a
+// false pass built out of a flake.
+func TestATestThatFailedOnceInARunIsFailedForThatRun(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "fail",
+			p+" fail TestFlaky", p+" pass TestFlaky")...),
+		"after": jsonl(t, pkgRun(t, p, "fail", p+" fail TestFlaky")...),
+	})
+	code, out, _ := drive(t, "--before", "before", "--after", "after", "--expect", "TestFlaky")
+	if code != 1 {
+		t.Fatalf("exit %d, want refused: TestFlaky was red in the before run too\n%s", code, out)
+	}
+}
+
+// ⛔⛔ A LOG THAT IS PART JSON AND PART TEXT ANSWERS FOR NEITHER. The lines
+// that did not parse used to be dropped in silence, so a -json run with a
+// plain `panic:` tail appended read as complete — the comment said they were
+// counted and the code did not.
+func TestALogThatIsPartJsonAndPartTextIsRefused(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
+		"after": jsonl(t, pkgRun(t, p, "fail", p+" fail TestA")...) +
+			"panic: test timed out after 1s\nFAIL\texample.com/pkg\t1.0s\n",
+	})
+	code, _, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errb, "part JSON and part something else") {
+		t.Errorf("stderr = %q", errb)
+	}
+}
+
+// ⛔⛔ A PACKAGE THAT FAILED WITH NO FAILING TEST FAILED OUTSIDE THE TESTS —
+// a TestMain calling os.Exit(1), a panic after the last test, a cleanup that
+// exploded. Every test that ran passed, so a reading based on verdicts alone
+// calls it a clean, complete run. Review measured that.
+func TestAPackageThatFailedWithNoFailingTestIsNoAnswer(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" pass TestA")...),
+	})
+	code, _, errb := drive(t, "--before", "before", "--after", "after")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if !strings.Contains(errb, "failed outside the tests") {
+		t.Errorf("stderr = %q", errb)
+	}
+}
+
+// ⛔ AND A PACKAGE THAT FAILED BECAUSE A TEST FAILED IS AN ORDINARY ANSWER,
+// which is the control: without it the rule above could refuse every red run
+// and no test would notice.
+func TestAPackageThatFailedBecauseATestFailedIsAnAnswer(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestA")...),
+	})
+	code, out, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
+	if code != 0 {
+		t.Fatalf("exit %d: %q %q", code, out, errb)
+	}
+}
+
+// ⛔ A SUBTEST ANSWERING FOR A PARENT THAT HAS NO VERDICT OF ITS OWN, which
+// is the only shape that actually exercises covers()'s subtest clause: review
+// measured `got == want` surviving, because the existing case's fixture also
+// carries a failing parent and that satisfies the claim by equality.
+//
+// A log holding only the subtest's verdict is what a filtered or concatenated
+// run gives.
+func TestASubtestAnswersForAParentWithNoVerdictOfItsOwn(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "pass", p+" pass TestA/case")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestA/case")...),
+	})
+	code, out, errb := drive(t, "--before", "before", "--after", "after", "--expect", "TestA")
+	if code != 0 {
+		t.Fatalf("exit %d: the subtest did not answer for its parent\n%q %q", code, out, errb)
+	}
+}
+
+// ⛔ RED->GREEN MEANS PASSING NOW, not merely "no longer failing". Review
+// measured `!= failed` surviving: a test that went red->ABSENT or red->SKIPPED
+// would have been reported as fixed by the mutation, which is a claim about
+// the suite that nothing supports.
+func TestATestThatWentRedToAbsentIsNotReportedAsFixed(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "fail", p+" fail TestGone", p+" pass TestB")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" fail TestB")...),
+	})
+	code, out, _ := drive(t, "--before", "before", "--after", "after", "--expect", "TestB")
+	if code != 0 {
+		t.Fatalf("exit %d: %q", code, out)
+	}
+	if strings.Contains(out, "red->green") {
+		t.Errorf("a test that simply stopped running was called fixed: %q", out)
+	}
+}
+
+// And a skipped one is not "fixed" either.
+func TestATestThatWentRedToSkippedIsNotReportedAsFixed(t *testing.T) {
+	const p = "example.com/pkg"
+	logs(t, map[string]string{
+		"before": jsonl(t, pkgRun(t, p, "fail", p+" fail TestS", p+" pass TestB")...),
+		"after":  jsonl(t, pkgRun(t, p, "fail", p+" skip TestS", p+" fail TestB")...),
+	})
+	code, out, _ := drive(t, "--before", "before", "--after", "after", "--expect", "TestB")
+	if code != 0 {
+		t.Fatalf("exit %d: %q", code, out)
+	}
+	if strings.Contains(out, "red->green") {
+		t.Errorf("a skipped test was called fixed: %q", out)
+	}
+}
+
 // The claim the runs actually support is accepted.
 func TestTheClaimTheRunsSupportIsAccepted(t *testing.T) {
 	const p = "example.com/pkg"

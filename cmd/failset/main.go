@@ -155,6 +155,7 @@ type testID struct{ pkg, name string }
 type result struct {
 	tests      map[testID]outcome
 	events     int
+	unparsed   int
 	incomplete string
 }
 
@@ -176,6 +177,11 @@ func readRun(path string) (*result, error) {
 	started := map[testID]bool{}
 	// pkgOpen holds packages that started and have not reported a result.
 	pkgOpen := map[string]bool{}
+	// pkgFailed is the packages whose own result was `fail`; pkgSawFail is
+	// those in which some TEST failed. A package in the first and not the
+	// second failed for a reason no test reported.
+	pkgFailed := map[string]bool{}
+	pkgSawFail := map[string]bool{}
 
 	// ⛔ NOT A bufio.Scanner. The whole file is already in memory, so a
 	// scanner bought nothing and brought a token-size limit and an error path
@@ -188,6 +194,13 @@ func readRun(path string) (*result, error) {
 		}
 		var e event
 		if err := json.Unmarshal([]byte(line), &e); err != nil || e.Action == "" {
+			// ⛔⛔ COUNTED, NOT SKIPPED — and the comment above said so while
+			// the code did the opposite, which review measured: a log that was
+			// -json followed by plain `panic: test timed out` text was
+			// accepted as a complete run, because the text simply vanished.
+			// A parser that silently drops what it does not understand reads
+			// a half-text log as a clean one.
+			r.unparsed++
 			continue
 		}
 		r.events++
@@ -209,17 +222,34 @@ func readRun(path string) (*result, error) {
 				if e.FailedBuild != "" && r.incomplete == "" {
 					r.incomplete = "the build failed for " + e.FailedBuild
 				}
+				if e.Action == "fail" {
+					pkgFailed[e.Package] = true
+				}
 				continue
 			}
 			id := testID{e.Package, e.Test}
 			delete(started, id)
 			switch e.Action {
 			case "pass":
-				r.tests[id] = passed
+				// ⛔⛔ FAILING IS STICKY WITHIN ONE RUN. `go test -count=2`
+				// reports a name twice, and review measured a test that
+				// failed on the first iteration and passed on the second
+				// being read as PASSED — so a genuinely red test could then
+				// be reported as going green->red in the next run. "Did it
+				// fail at all here" is the only reading that cannot turn a
+				// failure into a pass.
+				if r.tests[id] != failed {
+					r.tests[id] = passed
+				}
 			case "fail":
 				r.tests[id] = failed
 			case "skip":
-				r.tests[id] = skipped
+				if r.tests[id] != failed {
+					r.tests[id] = skipped
+				}
+			}
+			if e.Action == "fail" {
+				pkgSawFail[e.Package] = true
 			}
 		}
 	}
@@ -239,6 +269,22 @@ func readRun(path string) (*result, error) {
 		for pkg := range pkgOpen {
 			r.incomplete = pkg + " started and never reported a result"
 			break
+		}
+	}
+	// ⛔⛔ A PACKAGE THAT FAILED WITH NO FAILING TEST FAILED OUTSIDE THE
+	// TESTS. A TestMain calling os.Exit(1), a panic after the last test, a
+	// cleanup that exploded: the tests that ran all passed, so a reading
+	// based on test verdicts alone calls the run clean and complete. Review
+	// measured exactly that. The verdicts it does hold may be true, but the
+	// run answered for less than it was asked, which is the same refusal as
+	// every other incomplete log.
+	if r.incomplete == "" {
+		for pkg := range pkgFailed {
+			if !pkgSawFail[pkg] {
+				r.incomplete = pkg + " reported failure with no failing test, so it " +
+					"failed outside the tests"
+				break
+			}
 		}
 	}
 	return r, nil
@@ -332,6 +378,15 @@ func failset(cmd *cobra.Command, before, after string, expect []string) error {
 			return cli.Unanswerable("%s (%s) holds no `go test -json` events — if it is "+
 				"`go test -v` text, re-run with -json: a test's own output can forge "+
 				"another test's verdict line in that format", f.what, f.path)
+		}
+		// ⛔ AND A LOG THAT IS PART JSON AND PART SOMETHING ELSE IS NOT AN
+		// ANSWER EITHER. Review measured a -json log with plain `panic: test
+		// timed out` text appended being accepted, because the lines that did
+		// not parse were dropped in silence.
+		if r.unparsed > 0 {
+			return cli.Unanswerable("%s (%s) holds %d line(s) that are not `go test -json` "+
+				"events beside %d that are — a log that is part JSON and part something "+
+				"else answers for neither", f.what, f.path, r.unparsed, r.events)
 		}
 		// ⛔⛔ COMPLETENESS BEFORE THE COUNT. A run that aborted, or in which
 		// one package of several did not build, HAS verdicts — just not all of
