@@ -397,6 +397,123 @@ func TestAnUnprovenNameThatRepeatsDoesBuyTheFallback(t *testing.T) {
 	}
 }
 
+// ⛔⛔ AN EARLIER FAILURE OF ANOTHER KIND IS NOT "THE SAME ANSWER TWICE".
+// Written `attempt > 0`, a first attempt that died of something else — dpkg
+// interrupted — let the NEXT unproven name rewrite the mirrorlist on its
+// first sighting, spending the permanent change this is meant to withhold
+// from a possible typo. Review measured it; --help promised otherwise.
+func TestAnEarlierFailureOfAnotherKindIsNotTheSameAnswerTwice(t *testing.T) {
+	f := &fake{
+		update: &answer{output: "E: Some index files failed to download.\n", status: 100},
+		answers: []answer{
+			{output: "E: dpkg was interrupted\n", status: 100},
+			{output: "E: Unable to locate package poppler-utils\n", status: 100},
+			{output: "E: Unable to locate package poppler-utils\n", status: 100},
+		},
+	}
+	f.install(t)
+	code, _, _ := drive(t, "--need", "pdftoppm", "--retries", "2", "poppler-utils")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	// Attempt 1 is the FIRST unprovable answer, so nothing may be rewritten
+	// yet; attempt 2 is the second, but it is also the last, so there is no
+	// attempt left to use a rewrite.
+	if len(f.written) != 0 {
+		t.Errorf("an unrelated earlier failure was counted as a repeat: %v", f.written)
+	}
+}
+
+// ⛔ THE ARGUMENTS APT IS ACTUALLY GIVEN, which nothing asserted: review
+// removed `-y`, `--no-install-recommends` and both `Acquire::Retries` and the
+// suite stayed green. A missing `-y` does not fail a test — it HANGS a CI job
+// waiting for an answer nobody is there to give.
+func TestWhatAptIsActuallyAskedFor(t *testing.T) {
+	f := &fake{answers: []answer{{grants: []string{"pdftoppm"}}}}
+	f.install(t)
+	code, _, _ := drive(t, "--need", "pdftoppm", "poppler-utils")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	var update, install string
+	for _, c := range f.calls {
+		if strings.HasSuffix(c, " update") {
+			update = c
+		}
+		if strings.Contains(c, " install ") {
+			install = c
+		}
+	}
+	for _, want := range []string{"-o Acquire::Retries=3", "update"} {
+		if !strings.Contains(update, want) {
+			t.Errorf("the update call does not carry %q: %q", want, update)
+		}
+	}
+	for _, want := range []string{
+		"-o Acquire::Retries=3", "install", "-y", "--no-install-recommends", "poppler-utils",
+	} {
+		if !strings.Contains(install, want) {
+			t.Errorf("the install call does not carry %q: %q", want, install)
+		}
+	}
+}
+
+// ⛔ AND A RETRY WAITS. Deleting the sleep left the suite green, so nothing
+// said that "attempt 2 of 3 after 20s" was anything but a sentence.
+func TestARetryWaitsBeforeAskingAgain(t *testing.T) {
+	f := &fake{answers: []answer{
+		{output: "Temporary failure resolving 'azure.archive.ubuntu.com'\n", status: 100},
+		{output: "Temporary failure resolving 'azure.archive.ubuntu.com'\n", status: 100},
+	}}
+	f.install(t)
+	code, _, _ := drive(t, "--need", "pdftoppm", "--retries", "1", "--delay", "5s", "poppler-utils")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if f.slept != 1 {
+		t.Errorf("a retry slept %d time(s), want 1: %v", f.slept, f.calls)
+	}
+}
+
+// ⛔ EVERY WORD apt USES, each its own case. Review deleted four of the five
+// mirror phrases and the second missing-package phrase one at a time, and the
+// suite stayed green for all of them: only two phrases were ever exercised,
+// so why()'s table was five-sixths decoration.
+func TestEveryPhraseAptUsesIsRecognised(t *testing.T) {
+	for _, c := range []struct {
+		phrase   string
+		outage   bool
+		attempts int
+	}{
+		{"Temporary failure resolving 'azure.archive.ubuntu.com'", true, 2},
+		{"Could not resolve 'azure.archive.ubuntu.com'", true, 2},
+		{"Failed to fetch http://azure.archive.ubuntu.com/x.deb", true, 2},
+		{"Connection failed", true, 2},
+		{"Unable to connect to azure.archive.ubuntu.com", true, 2},
+		{"E: Unable to locate package poppler-utils", false, 1},
+		{"E: Package 'poppler-utils' has no installation candidate", false, 1},
+	} {
+		t.Run(c.phrase, func(t *testing.T) {
+			f := &fake{
+				update:  &answer{output: "Reading package lists... Done\n", status: 0},
+				answers: []answer{{output: c.phrase + "\n", status: 100}},
+			}
+			f.install(t)
+			code, _, errb := drive(t, "--need", "pdftoppm", "--retries", "1", "poppler-utils")
+			if code != 1 {
+				t.Fatalf("exit %d", code)
+			}
+			if f.installs() != c.attempts {
+				t.Errorf("%d attempt(s), want %d: %v", f.installs(), c.attempts, f.calls)
+			}
+			saysOutage := strings.Contains(errb, "the runner's mirror could not be reached")
+			if saysOutage != c.outage {
+				t.Errorf("read as an outage = %v, want %v: %q", saysOutage, c.outage, errb)
+			}
+		})
+	}
+}
+
 // ⛔ THE VERDICT COMES FROM THE LAST ATTEMPT, and nothing said so: pinning it
 // to the first left the suite green. Here the mirror fails, then apt fails for
 // a reason this does not recognise — so the closing sentence must be the
@@ -493,16 +610,34 @@ func TestAnOutageThatAlsoSaysTheNameIsUnknownIsAnOutage(t *testing.T) {
 	}
 }
 
+// ⛔⛔ AND IT USED TO PASS FOR THE WRONG REASON. With `--retries 0` the
+// rewrite is blocked anyway by `attempt < retries`, so the flag under test
+// decided nothing: review removed `fallback &&` from the condition and this
+// test stayed green. The retries are 2 now, which is a run where the
+// mirrorlist WOULD be rewritten if the flag were on — and the companion
+// assertion below says so, because a test that only checks a negative cannot
+// tell "the flag worked" from "the case never arose".
 func TestTheFallbackCanBeTurnedOff(t *testing.T) {
-	f := &fake{answers: []answer{{output: "Could not resolve 'azure.archive.ubuntu.com'\n", status: 100}}}
-	f.install(t)
-	code, _, _ := drive(t, "--need", "pdftoppm", "--retries", "0",
+	outage := answer{output: "Could not resolve 'azure.archive.ubuntu.com'\n", status: 100}
+	off := &fake{answers: []answer{outage, outage, outage}}
+	off.install(t)
+	code, _, _ := drive(t, "--need", "pdftoppm", "--retries", "2",
 		"--fallback-mirror=false", "poppler-utils")
 	if code != 1 {
 		t.Fatalf("exit %d", code)
 	}
-	if len(f.written) != 0 {
-		t.Errorf("it rewrote %v although the fallback was off", f.written)
+	if len(off.written) != 0 {
+		t.Errorf("it rewrote %v although the fallback was off", off.written)
+	}
+
+	on := &fake{answers: []answer{outage, outage, outage}}
+	on.install(t)
+	if code, _, _ := drive(t, "--need", "pdftoppm", "--retries", "2", "poppler-utils"); code != 1 {
+		t.Fatalf("control: exit %d", code)
+	}
+	if on.written[mirrorList] != canonicalMirror {
+		t.Fatalf("the control did not rewrite the mirrorlist, so the case above "+
+			"proves nothing about --fallback-mirror: %v", on.written)
 	}
 }
 

@@ -75,7 +75,21 @@ A package apt cannot locate is NOT retried: that is a wrong name, and asking
 again later dresses a typo up as an outage. The exception is a run whose
 package lists could not be refreshed at all — there "cannot locate" is about a
 name apt never checked, so it is retried, the verdict names both possibilities,
-and the mirrorlist is left alone until the same answer comes back twice.
+and the mirrorlist is left alone until that same unprovable answer comes back
+a second time.
+
+⛔ THE LIMITS OF THAT, said plainly because they are trade-offs and not bugs:
+
+  - apt exits non-zero when ANY index is unreachable, even one belonging to a
+    broken optional PPA while the main archive refreshed perfectly. A genuine
+    typo in that job is therefore retried, and on a second unprovable answer
+    it does rewrite the mirrorlist. apt offers no status that separates that
+    from a cold cache, so the choice is which way to be wrong; this errs
+    towards retrying, because calling a name wrong on a lookup that did not
+    happen ends the job on evidence that does not exist.
+  - with --retries 1 there is no attempt left to USE a rewrite after the
+    second sighting, so a cold-cache outage is reported rather than cured.
+    The default of 2 is what makes the fallback reachable.
 
 --need names a binary that must be on PATH when this exits, and is required:
 apt reporting success is not the binary being there, and a package renamed
@@ -343,7 +357,16 @@ func aptneed(cmd *cobra.Command, pkgs, need []string, retries int, delay time.Du
 			// once, while an unproven name must REPEAT first. One cheap retry
 			// costs a typo the delay and nothing else; a cold cache that is
 			// still cold on the second look has earned the stronger remedy.
-			strong := k == mirrorFailure || attempt > 0
+			// ⛔⛔ "THE SAME ANSWER TWICE", AND IT USED TO MEAN "ANY EARLIER
+			// FAILURE". Written `attempt > 0`, a first attempt that died of
+			// something else entirely — `dpkg was interrupted` — made the
+			// NEXT unproven name rewrite the mirrorlist on its first
+			// sighting, which is the single cheap retry this is supposed to
+			// cost a typo. Review measured it, and --help said otherwise.
+			//
+			// `last` is the previous attempt's kind here, because it is
+			// assigned at the END of the loop body.
+			strong := k == mirrorFailure || (k == unprovenName && last == unprovenName)
 			// ⛔ AND NOT WHEN THERE IS NO ATTEMPT LEFT TO USE IT. Rewriting the
 			// mirrorlist on the last turn changes the runner permanently for
 			// every later step of the job and tries nothing with it.
