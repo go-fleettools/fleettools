@@ -653,3 +653,20 @@ func TestCitingBypassesAreRefused(t *testing.T) {
 		}
 	}
 }
+
+// "The new text says ..." is the PR adding its own deferral, not citing one.
+func TestNewTextIsNotACitation(t *testing.T) {
+	for _, s := range []string{
+		`The new text says "we skip the SIMD kernel because it would break bit parity".`,
+		`The added comment reads "we skip the SIMD kernel because it would break bit parity".`,
+		`The proposed sentence says "we skip the SIMD kernel because it would break bit parity".`,
+		`The updated README line was: "we skip the SIMD kernel because it would break bit parity".`,
+	} {
+		if len(Scan(s)) == 0 {
+			t.Errorf("an added deferral passed as a citation: %q", s)
+		}
+	}
+	if got := Scan(`The old text says "we skip the SIMD kernel because it would break bit parity".`); len(got) != 0 {
+		t.Errorf("the control (old text) was refused: %v", got)
+	}
+}

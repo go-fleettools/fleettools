@@ -217,7 +217,10 @@ const citedNoun = `(?:comments?|text|docs?|docstring|godoc|readme|line|sentence|
 
 // ownText: "my note says", "our comment reads" — the author's own words are a
 // claim, never a citation.
-var ownText = regexp.MustCompile(`(?i)\b(?:my|our)\s+(?:\w+\s+)?$`)
+//
+// "new" (and "added", "proposed", "updated", "revised") is the same: "the new
+// text says ..." is the PR adding its own deferral, not citing one it removes.
+var ownText = regexp.MustCompile(`(?i)\b(?:my|our|new|newly|added|adding|proposed|updated|revised)\s+(?:\w+\s+)?$`)
 
 // unquoteLine applies unquote to every quotation of a line, blanking the ones
 // that cite text (their words are not the author's statement).
