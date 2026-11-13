@@ -811,6 +811,23 @@ func allUpper(src string) bool {
 
 // trimAround returns the match with a little of its sentence, which is what
 // makes an UNSURE finding cheap to decide.
+//
+// ⛔⛔ IT CUTS ON A RUNE BOUNDARY, AND A BYTE CUT HERE MADE THE WHOLE REPORT
+// UNREADABLE. Measured 2026-11-12, sweeping go-zpkg:
+//
+//	$ staleref … <three trees> > report     # 12 STALE findings in it
+//	$ grep -c STALE report ; echo "rc=$?"
+//	rc=1
+//
+// grep printed NOTHING — not even 0 — and exited 1, because ONE partial rune
+// anywhere makes it treat the file as binary and skip it. That is
+// indistinguishable from a clean tree, which is the single failure mode a
+// sweep must not have. The partial rune came from here: this command's own
+// output puts `…` and `⚠` in its lines, and a context cut at a byte width
+// lands inside one of them about as often as not.
+//
+// The widening is outward, so the character that straddles the cut is kept
+// whole rather than dropped: at most three bytes either way.
 func trimAround(line string, lo, hi int) string {
 	const ctx = 40
 	start, end := lo-ctx, hi+ctx
@@ -819,6 +836,12 @@ func trimAround(line string, lo, hi int) string {
 	}
 	if end > len(line) {
 		end = len(line)
+	}
+	for start > 0 && !utf8.RuneStart(line[start]) {
+		start--
+	}
+	for end < len(line) && !utf8.RuneStart(line[end]) {
+		end++
 	}
 	return line[start:end]
 }
