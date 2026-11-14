@@ -71,7 +71,7 @@ func RootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(inventoryCmd(), migrateCmd(), verifyCmd(), repeatsCmd(), markCmd(), stripCmd())
+	root.AddCommand(inventoryCmd(), migrateCmd(), upgradeCmd(), verifyCmd(), repeatsCmd(), markCmd(), stripCmd())
 	return root
 }
 

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ .Site.Title }} — a pure-Go reimplementation of Ruby&#x27;s aasm, MRI-faithful, no cgo</title>
+<meta name="description" content="go-ruby-aasm — Pure-Go AASM: state machines (states/events/transitions/guards/callbacks), CGO=0 — bound into rbgo">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+{{ partial "styles.html" . }}
+{{/* The template's own rules for what <main> holds, kept for it alone (class legacy),
+     its colours read from the kit's tokens. Written by landingmigrate. */}}
+<style>
+.legacy{--fg:var(--ink);--muted:var(--slate);--card:var(--bg-soft);--border:var(--line);--ready:#1a7f37;--active:#0969da;--planned:#9a6700}
+@media(prefers-color-scheme:dark){:root:not([data-theme]) .legacy{--ready:#3fb950;--active:#4493f8;--planned:#d29922}}
+:root[data-theme="dark"] .legacy{--ready:#3fb950;--active:#4493f8;--planned:#d29922}
+.legacy .badges{margin: 18px 0 0;}
+.legacy .badges a{margin: 0 3px; text-decoration: none;}
+.legacy .badges img{vertical-align: middle;}
+.legacy .lead{color: var(--fg); max-width: 760px; margin: 8px auto 0; text-align: center;}
+.legacy .grid{display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; padding: 24px 0 8px;}
+.legacy .card{background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px;}
+.legacy .card h3{margin: 0 0 .35em; font-size: 1.2rem; display: flex; align-items: center; justify-content: space-between; gap: 10px;}
+.legacy .card p{margin: 0; color: var(--fg);}
+.legacy .card p code{background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px;}
+.legacy .status{font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); white-space: nowrap;}
+.legacy .status.ready{color: var(--ready);}
+.legacy .legend{display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 18px; margin: 4px 0 8px; padding: 0; list-style: none; font-size: .9rem; color: var(--muted);}
+.legacy .principles{color: var(--muted); text-align: center; padding: 10px 0 0;}
+</style>
+</head>
+<body class="lm">
+  <header class="nav"><div class="wrap">
+    <a class="brand" href="/"><img class="glyph" src="/img/logo.svg" width="32" height="32" alt="go-ruby-aasm logo"> {{ .Site.Title }}</a>
+    {{ partial "theme-toggle.html" . }}
+  </div></header>
+  {{ partial "fork-ribbon.html" "https://github.com/go-ruby-aasm" }}
+
+  <div class="hero"><div class="wrap">
+    <div>
+      <h1 class="head">go-ruby-aasm</h1>
+      <p class="sub">Pure-Go AASM: state machines (states/events/transitions/guards/callbacks), CGO=0 — bound into rbgo</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="/docs/">{{ partial "icons/book.html" . }}Documentation</a>
+        <a class="btn btn-ghost" href="https://github.com/go-ruby-aasm/aasm">{{ partial "icons/github.html" . }}GitHub</a>
+      </div>
+      <div class="trust">{{ if not (partial "mantra-on.html" $) }}<span class="pill">pure Go · zero cgo</span>{{ end }}<span class="pill">Ruby aasm</span><span class="pill">MRI-faithful</span><span class="pill">rbgo-bindable</span><span class="pill">differential oracle</span><span class="pill">100% coverage</span><span class="pill">6 arches</span><span class="pill">browser · WASM</span></div>
+      <div class="legacy"><div class="badges">
+      <a href="/docs/"><img alt="Documentation (MkDocs Material + mike)" src="https://img.shields.io/badge/docs-mkdocs--material-DC2626"></a>
+      {{ if not (partial "mantra-on.html" $) }}<a href="https://github.com/go-ruby-aasm/aasm/blob/main/LICENSE"><img alt="License: BSD-3-Clause" src="https://img.shields.io/badge/license-BSD--3--Clause-blue"></a>{{ end }}
+      <a href="https://go.dev/dl/"><img alt="Go 1.26.4+" src="https://img.shields.io/badge/go-1.26.4%2B-00ADD8"></a>
+      <a href="https://github.com/go-ruby-aasm/aasm"><img alt="Coverage 100%" src="https://img.shields.io/badge/coverage-100%25-1a7f37"></a>
+    </div></div>
+    </div>
+    {{ partial "hero-carousel.html" . }}
+  </div></div>
+
+  {{ with .Site.Params.repos }}<div class="strip"><div class="wrap">
+    <span class="lead-line">One organisation, <b>{{ len . }}</b> repositories</span>
+    <div class="mods">{{ range . }}<a href="#repos">{{ .name }}</a>{{ end }}</div>
+  </div></div>{{ end }}
+
+  <main id="repos" class="legacy"><div class="wrap">
+    <p class="lead">Pure-Go AASM: state machines (states/events/transitions/guards/callbacks), CGO=0 — bound into rbgo. It is a pure-Go (no cgo) reimplementation of Ruby's <code>aasm</code>, mirroring its observable behaviour <strong>without any Ruby runtime</strong>. It is a <strong>standalone, reusable</strong> module — the backend bound into <a href="https://github.com/go-embedded-ruby/ruby">go-embedded-ruby</a> by <code>rbgo</code>, the same pattern as go-ruby-yaml — differential-tested against reference Ruby, 100% coverage, CI green across 6 arches and 3 OSes.</p>
+
+    <section class="grid">
+      {{ range .Site.Params.phases }}
+      <article class="card">
+        <h3>{{ .name }} <span class="status {{ .status }}">{{ .status }}</span></h3>
+        <p>{{ .blurb | markdownify }}</p>
+      </article>
+      {{ end }}
+    </section>
+    <ul class="legend" aria-label="What the phase status labels mean">
+      <li><span class="status ready">ready</span> capability complete (exit criteria met, nothing material left)</li>
+    </ul>
+    <p class="principles">A faithful pure-Go port of Ruby's <code>aasm</code>, cgo disabled, so it cross-compiles and embeds anywhere. Validated differentially against reference Ruby. It is a standalone, reusable module and the backend bound by <code>rbgo</code> into the sibling org <a href="https://github.com/go-embedded-ruby">github.com/go-embedded-ruby</a>.</p>
+    <p class="principles"><strong>Runs in the browser · WebAssembly.</strong> Because it is pure Go with cgo disabled, <code>aasm</code> compiles to WebAssembly — both <code>GOOS=js GOARCH=wasm</code> for the browser and <code>GOOS=wasip1 GOARCH=wasm</code> for WASI runtimes — with no C toolchain and no changes to the code.</p>
+    </div></main>
+
+  <footer><div class="wrap"><span>{{ if not (partial "mantra-on.html" $) }}BSD-3-Clause · {{ end }}<a href="https://github.com/go-ruby-aasm">github.com/go-ruby-aasm</a></span></div></footer>
+</body>
+</html>

@@ -1,0 +1,73 @@
+name: deploy-pages
+
+on:
+  push:
+    branches: [main]
+  # Build on every pull request too, so a change to the layout, the content or
+  # the Hugo version has to prove the site still builds before it lands.
+  # Without this the workflow ran only on main, which meant a dependency bump
+  # arrived with no signal at all -- its checks read "no checks", which is not
+  # the same thing as green and must not be merged as if it were.
+  pull_request:
+  workflow_dispatch:
+
+# The build needs nothing beyond the source and the Pages configuration it
+# reads to compute the base URL. Publishing rights are granted to the deploy
+# job alone, below, so a pull request build cannot replace what is served.
+permissions:
+  contents: read
+  pages: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Hugo resolves the landingkit module (hugo.toml [module]) with the go
+      # command, at the version go.mod pins.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Set up Hugo
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: "0.169.0"
+          extended: true
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v6
+
+      - name: Build landing page
+        run: hugo --minify --baseURL "${{ steps.pages.outputs.base_url }}/"
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: public
+
+  deploy:
+    # Only main publishes. A pull request stops after build above: it has built
+    # the site and uploaded the artifact, which is the whole point of the gate,
+    # and it has no business replacing what is served.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
