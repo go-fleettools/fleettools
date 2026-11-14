@@ -89,13 +89,26 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 	_, statErr := os.Stat(filepath.Join(dir, "layouts/partials/styles.html"))
 	kitCopy := statErr == nil
 	var l landing
+	brandCSS := "" // brand.css of an external-stylesheet landing, to check the logo against
 	if kitCopy {
 		r.Shape = "kit-copy"
 	} else {
-		if l, err = parseTemplate(src); err != nil {
-			return r, fmt.Errorf("not migrated, a person should look: %v", err)
+		if isExternal(src) {
+			css, cerr := read("static/css/brand.css")
+			if cerr != nil {
+				return r, fmt.Errorf("not migrated, a person should look: %v", cerr)
+			}
+			brandCSS = css
+			if l, err = parseExternal(src, css); err != nil {
+				return r, fmt.Errorf("not migrated, a person should look: %v", err)
+			}
+			r.Shape = "external-stylesheet"
+		} else {
+			if l, err = parseTemplate(src); err != nil {
+				return r, fmt.Errorf("not migrated, a person should look: %v", err)
+			}
+			r.Shape = "template"
 		}
-		r.Shape = "template"
 	}
 	// every refusal before the first write: a checkout is changed whole or
 	// not at all
@@ -129,6 +142,11 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 		brand, err := goCmd(dir, "run", "github.com/go-fleettools/landingkit/cmd/landingkit@"+kit, "brand", logo)
 		if err != nil {
 			return r, fmt.Errorf("the brand could not be read from %s: %v", logo, err)
+		}
+		if brandCSS != "" {
+			if err := checkBrand(string(brand), brandCSS); err != nil {
+				return r, fmt.Errorf("not migrated: %v", err)
+			}
 		}
 		conf = strings.TrimRight(conf, "\n") + "\n\n" + strings.TrimRight(string(brand), "\n") + "\n"
 	}
@@ -165,6 +183,14 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 				return r, err
 			}
 			r.Removed = append(r.Removed, "layouts/partials/"+p)
+		}
+	}
+	// the external-stylesheet shape's rules and theme script are the kit's now
+	if brandCSS != "" {
+		for _, p := range []string{"static/css/brand.css", "static/js/theme.js"} {
+			if err := os.Remove(filepath.Join(dir, p)); err == nil {
+				r.Removed = append(r.Removed, p)
+			}
 		}
 	}
 	// the Octicons licence goes with the last Octicon
@@ -206,6 +232,9 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 			items = append(items, fmt.Sprintf("%q", d))
 		}
 		conf = strings.TrimRight(conf, "\n") + "\n\n# The strip under the top bar: the code's licence and cgo, and the data\n# shipped under its own licence (read from its licence files).\n[params.mantra]\n  items = [" + strings.Join(items, ", ") + "]\n"
+	}
+	if len(l.CTAs) > 0 && !kitCopy {
+		conf = strings.TrimRight(conf, "\n") + "\n\n" + ctaToml(l.CTAs)
 	}
 	if err := write("hugo.toml", conf); err != nil {
 		return r, err

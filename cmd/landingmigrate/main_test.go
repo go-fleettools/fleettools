@@ -141,8 +141,8 @@ func TestRenderAndRepeats(t *testing.T) {
 	out, frags := repeats(index)
 	for _, want := range []string{
 		`{{ partial "styles.html" . }}`, `{{ partial "fork-ribbon.html" "https://github.com/acme" }}`,
-		`<h1 class="head">acme</h1>`, `class="btn btn-primary" href="https://github.com/acme/thing"`,
-		`{{ partial "icons/github.html" . }}`, `{{ partial "hero-carousel.html" . }}`, `<main id="repos" class="legacy">`,
+		`<h1 class="head">acme</h1>`, `{{ partial "cta.html" . }}`,
+		`{{ partial "hero-carousel.html" . }}`, `<main id="repos" class="legacy">`,
 		ifOff + `<span class="pill">pure Go · CGO=0</span>` + end,
 		ifOff + `<span class="pill">BSD-3-Clause</span>` + end,
 		`<span class="pill">BSD-3 code · MIT artwork</span>`, // kept

@@ -1,0 +1,46 @@
+name: pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The build needs nothing beyond the source and the Pages configuration it
+# reads to compute the base URL. Publishing rights are granted to the deploy
+# job alone, below, so a pull request build cannot replace what is served.
+permissions:
+  contents: read
+  pages: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: "0.169.0"
+          extended: true
+      - run: hugo --gc --minify
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./public
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

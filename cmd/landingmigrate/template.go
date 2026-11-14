@@ -288,6 +288,12 @@ func render(l landing, org string) (index, terminal string) {
 		w(`<link rel="icon" type="image/svg+xml" href="/favicon.svg">`, "\n")
 	}
 	w(`{{ partial "styles.html" . }}`, "\n")
+	for _, c := range l.CTAs {
+		if ctaKind(c) == "try" {
+			w(`{{ partial "btn-try-style.html" . }}`, "\n")
+			break
+		}
+	}
 	if css := legacyCSS(l.Style); css != "" {
 		w("{{/* The template's own rules for what <main> holds, kept for it alone (class legacy),\n     its colours read from the kit's tokens. Written by landingmigrate. */}}\n<style>\n", css, "</style>\n")
 	}
@@ -312,15 +318,8 @@ func render(l landing, org string) (index, terminal string) {
 		w(`      <p class="sub">`, renameIcons(l.Tagline), "</p>\n")
 	}
 	if len(l.CTAs) > 0 {
-		w(`      <div class="cta">`, "\n")
-		for i, c := range l.CTAs {
-			cls := "btn btn-ghost"
-			if i == 0 {
-				cls = "btn btn-primary"
-			}
-			w(`        <a class="`, cls, `" href="`, c.Href, `">`, renameIcons(c.Inner), "</a>\n")
-		}
-		w("      </div>\n")
+		// the kit renders the row, from [[params.cta]] in hugo.toml (ctaToml)
+		w("      {{/* [[params.cta]] in hugo.toml: the kit renders the row */}}\n      {{ partial \"cta.html\" . }}\n")
 	}
 	switch {
 	case l.PillsRaw != "":
@@ -353,6 +352,40 @@ func render(l landing, org string) (index, terminal string) {
 	}
 	w("</body>\n</html>\n")
 	return b.String(), terminal
+}
+
+var (
+	ctaExprRe = regexp.MustCompile(`(?s)\{\{.*?\}\}`)
+	ctaTagRe  = regexp.MustCompile(`(?s)<[^>]*>`)
+)
+
+// ctaKind is the kit's kind of a button: the first is the documentation (the
+// primary), a link to a playground is the red try button, a link to GitHub is
+// the GitHub one, any other is a plain link.
+func ctaKind(c cta) string {
+	switch {
+	case strings.Contains(c.Href, "playground"):
+		return "try"
+	case strings.HasPrefix(c.Href, "https://github.com/"):
+		return "github"
+	}
+	return "link"
+}
+
+// ctaToml writes the buttons as [[params.cta]]: the first button, whatever it
+// says, is the primary ("docs"), and the kit puts the order right.
+func ctaToml(ctas []cta) string {
+	var b strings.Builder
+	b.WriteString("# The hero's buttons, rendered by landingkit's cta.html in the kit's order.\n")
+	for i, c := range ctas {
+		kind := ctaKind(c)
+		if i == 0 && kind != "try" {
+			kind = "docs"
+		}
+		label := strings.TrimSpace(ctaTagRe.ReplaceAllString(ctaExprRe.ReplaceAllString(c.Inner, ""), ""))
+		fmt.Fprintf(&b, "[[params.cta]]\n  kind  = %q\n  href  = %q\n  label = %q\n", kind, c.Href, label)
+	}
+	return b.String()
 }
 
 // legacyCSS keeps the template's rules for what its <main> holds, scoped to
