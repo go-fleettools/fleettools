@@ -1,0 +1,7 @@
+ok  	example/a	1.2s
+==================
+WARNING: DATA RACE
+==================
+    testing.go:1867: race detected during execution of test
+FAIL
+FAIL	example/b	4.5s

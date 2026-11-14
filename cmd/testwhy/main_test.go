@@ -214,3 +214,43 @@ func TestTheLogMayComeFromStandardInput(t *testing.T) {
 		t.Errorf("standard input was not read:\n%s", out.String())
 	}
 }
+
+// ⛔ The log `gh run view --log-failed` prints prefixes every line with
+// `<job>\t<step>\t<timestamp> `. Read raw, neither `--- FAIL` nor `FAIL\t<pkg>`
+// starts a line and the scan reported zero for a red run (#280). The fixture is
+// an excerpt of the real log of go-fleettools/fleettools#278.
+func TestActionsPrefixedLogIsRead(t *testing.T) {
+	code, out := drive(t, "-log", "testdata/actions-race.log")
+	if code != 1 {
+		t.Errorf("status = %d, want 1; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "unexplained: TestPretoolAllowsWhenTheTranscriptVanishesDuringTheWait") {
+		t.Errorf("the failing test was not read through the prefix:\n%s", out)
+	}
+	if !strings.Contains(out, "pkg FAIL github.com/go-fleettools/fleettools/cmd/replystamp 84.803s") {
+		t.Errorf("the failing package was not read through the prefix:\n%s", out)
+	}
+}
+
+// A package FAIL with no `--- FAIL` test (race-only) is an unexplained failure.
+func TestPackageFailWithoutATestIsUnexplained(t *testing.T) {
+	code, out := drive(t, "-log", "testdata/race-only.log")
+	if code != 1 {
+		t.Errorf("status = %d, want 1; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "failures=1 attributed=0 unexplained=1") ||
+		!strings.Contains(out, "package example/b") {
+		t.Errorf("a race-only package failure was not counted:\n%s", out)
+	}
+}
+
+// ⛔ A scan that could not read reported zero: refuse, exit 2.
+func TestUnrecognisableLogIsRefused(t *testing.T) {
+	code, out := drive(t, "-log", "testdata/unreadable.log")
+	if code != 2 {
+		t.Errorf("status = %d, want 2; output:\n%s", code, out)
+	}
+	if strings.Contains(out, "failures=0") {
+		t.Errorf("reported a count for an unread log:\n%s", out)
+	}
+}

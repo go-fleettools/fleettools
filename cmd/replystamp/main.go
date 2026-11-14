@@ -854,8 +854,12 @@ func (v verdict) reason() string {
 	if r == "" {
 		return r
 	}
-	return r + clockLine()
+	return r + "\n" + visibleNote + clockLine()
 }
+
+// visibleNote is said in every deny: a stamp written only in thinking was
+// judged as no stamp at all, and the model could not tell why.
+const visibleNote = "The stamp must be in a VISIBLE text block of the reply: a stamp written only in thinking does not count."
 
 // baseReason names the defect, not the rule in general, because a reason that
 // only repeats the rule produces a second reply with the same defect.
@@ -1168,7 +1172,7 @@ type preToolDecision struct {
 func pretoolReason() string {
 	return "This turn has written no text yet, and CLAUDE.md's first rule is to START every reply with the local date and time.\n" +
 		"Before your first tool call, write one line opening the reply with the stamp " + wanted + " -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … » -- then repeat the tool call.\n" +
-		"A stamp is not a preface: a compaction's \"resume directly\" does not forbid it." + clockLine()
+		"A stamp is not a preface: a compaction's \"resume directly\" does not forbid it.\n" + visibleNote + clockLine()
 }
 
 // unstampedReason is the deny for a turn whose first text carries no valid
@@ -1182,7 +1186,7 @@ func unstampedReason(v verdict) string {
 		stale:          "carries a stale stamp (" + roundly(v.off) + " from when it was written)",
 	}[v.kind]
 	return fmt.Sprintf("This turn's first text %s: %q\n"+
-		"That text is already shown and cannot be edited. Write a NEW line now that opens with the stamp %s -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … » -- then repeat the tool call. A stamped line anywhere in the turn so far satisfies this gate."+clockLine(),
+		"That text is already shown and cannot be edited. Write a NEW line now that opens with the stamp %s -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … » -- then repeat the tool call. A stamped line anywhere in the turn so far satisfies this gate.\n"+visibleNote+clockLine(),
 		what, v.got, wanted)
 }
 

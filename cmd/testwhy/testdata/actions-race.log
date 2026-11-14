@@ -1,0 +1,20 @@
+build + vet + test	test	﻿2026-11-13T20:09:30.4131128Z ##[group]Run go test -race -timeout 15m ./...
+build + vet + test	test	2026-11-13T20:09:30.4131542Z [36;1mgo test -race -timeout 15m ./...[0m
+build + vet + test	test	2026-11-13T20:09:30.4180962Z shell: /usr/bin/bash -e {0}
+build + vet + test	test	2026-11-13T20:09:30.4181224Z env:
+build + vet + test	test	2026-11-13T20:09:30.4181421Z   GOTOOLCHAIN: local
+build + vet + test	test	2026-11-13T20:09:30.4181650Z ##[endgroup]
+build + vet + test	test	2026-11-13T20:10:41.3374683Z ok  	github.com/go-fleettools/fleettools/cmd/abbench	53.244s
+build + vet + test	test	2026-11-13T20:10:41.3383880Z ok  	github.com/go-fleettools/fleettools/cmd/aptneed	1.029s
+build + vet + test	test	2026-11-13T20:10:41.3391323Z ok  	github.com/go-fleettools/fleettools/cmd/blobpurge	1.860s
+build + vet + test	test	2026-11-13T20:12:47.4286557Z       /opt/hostedtoolcache/go/1.27.4/x64/src/testing/testing.go:2260 +0x38
+build + vet + test	test	2026-11-13T20:12:47.4286921Z ==================
+build + vet + test	test	2026-11-13T20:12:47.4287294Z --- FAIL: TestPretoolAllowsWhenTheTranscriptVanishesDuringTheWait (0.31s)
+build + vet + test	test	2026-11-13T20:12:47.4287896Z     testing.go:1867: race detected during execution of test
+build + vet + test	test	2026-11-13T20:12:47.4288216Z FAIL
+build + vet + test	test	2026-11-13T20:12:47.4288521Z FAIL	github.com/go-fleettools/fleettools/cmd/replystamp	84.803s
+build + vet + test	test	2026-11-13T20:12:47.4288973Z ok  	github.com/go-fleettools/fleettools/cmd/runson	1.028s
+build + vet + test	test	2026-11-13T20:14:20.6924206Z ok  	github.com/go-fleettools/fleettools/loadavg	1.038s
+build + vet + test	test	2026-11-13T20:14:20.6924577Z ok  	github.com/go-fleettools/fleettools/quiet	1.027s
+build + vet + test	test	2026-11-13T20:14:20.6924870Z FAIL
+build + vet + test	test	2026-11-13T20:14:21.0246774Z ##[error]Process completed with exit code 1.
