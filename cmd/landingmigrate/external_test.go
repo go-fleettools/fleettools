@@ -197,3 +197,29 @@ func TestTaglineRepeatsTheStrip(t *testing.T) {
 		}
 	}
 }
+
+// nano-container-linux's second button is `{{ with .Site.Params.secondary_url }}
+// <a class="btn ghost" href="{{ . }}">…{{ $.Site.Params.secondary_label }}</a>{{ end }}`:
+// [[params.cta]] cannot hold it, so the migration is refused before any write
+// (it once wrote href = "{{ . }}" and label = "", which fails the Hugo build).
+func TestMigrateRefusesAButtonBuiltFromAnExpression(t *testing.T) {
+	goCmd = fakeGo("")
+	d := landingDir(t)
+	idx := filepath.Join(d, "layouts/index.html")
+	src := strings.Replace(readFile(t, idx), `</div>
+    <div class="badges">`, `{{ with .Site.Params.secondary_url }}<a class="btn ghost" href="{{ . }}">{{ $.Site.Params.secondary_label }}</a>{{ end }}</div>
+    <div class="badges">`, 1)
+	if !strings.Contains(src, "secondary_url") {
+		t.Fatal("the fixture did not take the expression button")
+	}
+	if err := os.WriteFile(idx, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := migrate(d, "acme", "v0.6.0", nil)
+	if err == nil || !strings.Contains(err.Error(), "Hugo expression") {
+		t.Fatalf("migrated a button built from an expression: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(d, "go.mod")); serr == nil {
+		t.Error("a refusal wrote go.mod")
+	}
+}

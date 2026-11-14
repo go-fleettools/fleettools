@@ -401,6 +401,12 @@ func ctaKind(c cta) string {
 	return "link"
 }
 
+// ctaLabel is a button's words without its icon partials and tags; empty when
+// the words are a Hugo expression.
+func ctaLabel(c cta) string {
+	return strings.TrimSpace(ctaTagRe.ReplaceAllString(ctaExprRe.ReplaceAllString(c.Inner, ""), ""))
+}
+
 // ctaToml writes the buttons as [[params.cta]]: the first button, whatever it
 // says, is the primary ("docs"), and the kit puts the order right.
 func ctaToml(ctas []cta) string {
@@ -411,7 +417,7 @@ func ctaToml(ctas []cta) string {
 		if i == 0 && kind != "try" {
 			kind = "docs"
 		}
-		label := strings.TrimSpace(ctaTagRe.ReplaceAllString(ctaExprRe.ReplaceAllString(c.Inner, ""), ""))
+		label := ctaLabel(c)
 		fmt.Fprintf(&b, "[[params.cta]]\n  kind  = %q\n  href  = %q\n  label = %q\n", kind, c.Href, label)
 	}
 	return b.String()

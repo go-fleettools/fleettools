@@ -110,6 +110,14 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 			r.Shape = "template"
 		}
 	}
+	// a button whose address or words are a Hugo expression cannot become a
+	// [[params.cta]] entry (nano-container-linux: href="{{ . }}" inside a
+	// `with`, its label a param): a person decides how it is rendered
+	for _, c := range l.CTAs {
+		if strings.Contains(c.Href, "{{") || ctaLabel(c) == "" {
+			return r, fmt.Errorf("not migrated, a person should look: the button %q is built from a Hugo expression, which [[params.cta]] cannot hold", clip(c.Href+" "+c.Inner))
+		}
+	}
 	// every refusal before the first write: a checkout is changed whole or
 	// not at all
 	wfPatches, err := workflowPatches(dir)
