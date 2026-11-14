@@ -45,6 +45,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -145,6 +146,30 @@ type report struct {
 	failures []failure
 	pkgs     []pkgResult
 	builds   []string // packages that failed to build
+
+	recognised int // lines read as ok/FAIL/?/--- ; zero means the log was not read
+}
+
+// actionsPrefix is what GitHub Actions puts before every line of a log fetched
+// with `gh run view --log-failed`: `<job>\t<step>\t<RFC3339 timestamp> `, the
+// first line of a step carrying a byte-order mark before the timestamp.
+var actionsPrefix = regexp.MustCompile(`^[^\t]*\t[^\t]*\t\x{feff}?\d{4}-\d\d-\d\dT[\d:.]+Z `)
+
+// stripActionsPrefix removes that prefix when present.
+func stripActionsPrefix(line string) string {
+	if loc := actionsPrefix.FindStringIndex(line); loc != nil {
+		return line[loc[1]:]
+	}
+	return line
+}
+
+// recognised reports whether a trimmed line is one this scan can read.
+func recognised(t string) bool {
+	if strings.HasPrefix(t, "--- ") {
+		return true
+	}
+	_, ok := parsePkgLine(t)
+	return ok
 }
 
 // scan reads a `go test` log.
@@ -160,9 +185,23 @@ func scan(r io.Reader, causes []cause) (*report, error) {
 
 	idx := map[string]int{} // failure name -> position in rep.failures
 	cur := -1               // the failure whose body we are inside, or -1
+	sincePkg := 0           // failures seen since the previous package line
+	// The prefix is stripped from EVERY line or from NONE, decided once from the
+	// first non-empty line: a t.Logf line that merely looks prefixed, inside a
+	// plain `go test` log, must not have its "prefix" cut and a failure invented.
+	decided, actions := false, false
 	for sc.Scan() {
 		line := sc.Text()
+		if !decided && strings.TrimSpace(line) != "" {
+			decided, actions = true, actionsPrefix.MatchString(line)
+		}
+		if actions {
+			line = stripActionsPrefix(line)
+		}
 		t := strings.TrimSpace(line)
+		if recognised(t) {
+			rep.recognised++
+		}
 
 		switch {
 		case strings.HasPrefix(t, "--- FAIL: "):
@@ -171,6 +210,7 @@ func scan(r io.Reader, causes []cause) (*report, error) {
 				idx[n] = len(rep.failures)
 				rep.failures = append(rep.failures, failure{name: n})
 			}
+			sincePkg++
 			cur = idx[n]
 			continue
 		case strings.HasPrefix(t, "=== RUN"), strings.HasPrefix(t, "--- PASS: "),
@@ -183,7 +223,12 @@ func scan(r io.Reader, causes []cause) (*report, error) {
 			rep.pkgs = append(rep.pkgs, p)
 			if strings.Contains(p.note, "build failed") {
 				rep.builds = append(rep.builds, p.name)
+			} else if p.status == "FAIL" && sincePkg == 0 {
+				// A package FAIL with no `--- FAIL` test above it (a race-only
+				// failure, a TestMain exit): nothing names it, so it is unexplained.
+				rep.failures = append(rep.failures, failure{name: "package " + p.name + " (FAIL, no --- FAIL test)"})
 			}
+			sincePkg = 0
 			cur = -1
 			continue
 		}
@@ -326,6 +371,13 @@ func testwhy(cmd *cobra.Command, logPath string, causeArgs []string, minSecs flo
 	rep, err := scan(r, causes)
 	if err != nil {
 		return cli.Wrap(err)
+	}
+
+	// ⛔ A SCAN THAT COULD NOT READ REPORTED ZERO. A log in which not one
+	// ok/FAIL/?/--- line is recognised is not a clean log, it is an unread one.
+	if rep.recognised == 0 {
+		return cli.Unanswerable("%s: no ok/FAIL/--- /? line recognised: not a `go test` log, or in a "+
+			"shape this program cannot read; refusing to report zero failures", logPath)
 	}
 
 	out := cmd.OutOrStdout()

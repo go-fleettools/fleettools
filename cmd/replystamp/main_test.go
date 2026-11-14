@@ -1584,3 +1584,19 @@ func TestRefusalsCarryTheCurrentTimeAsAStamp(t *testing.T) {
 		}
 	}
 }
+
+// Every deny says the stamp must be in a VISIBLE text block: a stamp written
+// only in thinking does not count, and the model could not tell why it was refused.
+func TestEveryDenySaysTheStampMustBeVisible(t *testing.T) {
+	const want = "VISIBLE text block"
+	const thinking = "only in thinking does not count"
+	for name, r := range map[string]string{
+		"pretool":   pretoolReason(),
+		"unstamped": unstampedReason(verdict{kind: missing, got: "x"}),
+		"hook":      verdict{kind: missing, got: "x"}.reason(),
+	} {
+		if !strings.Contains(r, want) || !strings.Contains(r, thinking) {
+			t.Errorf("%s reason lacks the visible-block sentence:\n%s", name, r)
+		}
+	}
+}

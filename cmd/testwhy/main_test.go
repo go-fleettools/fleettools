@@ -214,3 +214,64 @@ func TestTheLogMayComeFromStandardInput(t *testing.T) {
 		t.Errorf("standard input was not read:\n%s", out.String())
 	}
 }
+
+// ⛔ The log `gh run view --log-failed` prints prefixes every line with
+// `<job>\t<step>\t<timestamp> `. Read raw, neither `--- FAIL` nor `FAIL\t<pkg>`
+// starts a line and the scan reported zero for a red run (#280). The fixture is
+// an excerpt of the real log of go-fleettools/fleettools#278.
+func TestActionsPrefixedLogIsRead(t *testing.T) {
+	code, out := drive(t, "-log", "testdata/actions-race.log")
+	if code != 1 {
+		t.Errorf("status = %d, want 1; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "unexplained: TestPretoolAllowsWhenTheTranscriptVanishesDuringTheWait") {
+		t.Errorf("the failing test was not read through the prefix:\n%s", out)
+	}
+	if !strings.Contains(out, "pkg FAIL github.com/go-fleettools/fleettools/cmd/replystamp 84.803s") {
+		t.Errorf("the failing package was not read through the prefix:\n%s", out)
+	}
+}
+
+// A package FAIL with no `--- FAIL` test (race-only) is an unexplained failure.
+func TestPackageFailWithoutATestIsUnexplained(t *testing.T) {
+	code, out := drive(t, "-log", "testdata/race-only.log")
+	if code != 1 {
+		t.Errorf("status = %d, want 1; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "failures=1 attributed=0 unexplained=1") ||
+		!strings.Contains(out, "package example/b") {
+		t.Errorf("a race-only package failure was not counted:\n%s", out)
+	}
+}
+
+// ⛔ A scan that could not read reported zero: refuse, exit 2.
+func TestUnrecognisableLogIsRefused(t *testing.T) {
+	code, out := drive(t, "-log", "testdata/unreadable.log")
+	if code != 2 {
+		t.Errorf("status = %d, want 2; output:\n%s", code, out)
+	}
+	if strings.Contains(out, "failures=0") {
+		t.Errorf("reported a count for an unread log:\n%s", out)
+	}
+}
+
+// Two packages failing the SAME test name, both attributed: the second is not a
+// package FAIL without a test (a matrix log does exactly this).
+func TestSameTestNameFailingInTwoPackagesIsNotUnexplained(t *testing.T) {
+	log := "--- FAIL: TestRun (0.1s)\n    x_test.go:1: net down\nFAIL\nFAIL\texample/a\t1.0s\n" +
+		"--- FAIL: TestRun (0.1s)\n    x_test.go:1: net down\nFAIL\nFAIL\texample/b\t1.0s\n"
+	code, out := drive(t, "--log", write(t, log), "--cause", "net=net down")
+	if code != 0 || strings.Contains(out, "no --- FAIL test") ||
+		!strings.Contains(out, "failures=1 attributed=1 unexplained=0") {
+		t.Errorf("status %d; a repeated test name read as a bare package FAIL:\n%s", code, out)
+	}
+}
+
+// ⛔ A t.Logf line that LOOKS prefixed, in a plain log, must not be stripped
+// into a failure that never happened (the #276 class).
+func TestLookalikePrefixInAPlainLogInventsNoFailure(t *testing.T) {
+	code, out := drive(t, "--log", "testdata/logf-lookalike.log")
+	if code != 0 || !strings.Contains(out, "failures=0") || strings.Contains(out, "TestGhost") {
+		t.Errorf("status %d; a failure was invented:\n%s", code, out)
+	}
+}
