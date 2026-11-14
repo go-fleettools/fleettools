@@ -12,11 +12,19 @@ import (
 )
 
 // fakeRepo answers the two reads gofloor makes: the tree, and a file.
+//
+// remote serves a file belonging to ANOTHER repository, keyed
+// "owner/repo/path", which is how a called reusable workflow is read. It is a
+// separate map on purpose: a called workflow must not also appear in this
+// repository's own tree listing, or the test could not tell "audited because
+// the call was followed" from "audited because it sat here all along".
 type fakeRepo struct {
 	files     map[string]string
+	remote    map[string]string
 	treeErr   error
 	truncated bool
 	badPath   string // a file whose read fails
+	badRemote string // a remote key whose read fails
 }
 
 func (f fakeRepo) gh(args ...string) ([]byte, error) {
@@ -34,6 +42,12 @@ func (f fakeRepo) gh(args ...string) ([]byte, error) {
 	}
 	i := strings.Index(url, "/contents/")
 	p := url[i+len("/contents/") : strings.Index(url, "?ref=")]
+	slug := strings.TrimPrefix(url[:i], "repos/")
+	if key := slug + "/" + p; key == f.badRemote {
+		return nil, errors.New("HTTP 404")
+	} else if c, ok := f.remote[key]; ok {
+		return []byte(c), nil
+	}
 	if p == f.badPath {
 		return nil, errors.New("HTTP 502")
 	}
@@ -137,7 +151,7 @@ func TestWhatDoesNotGate(t *testing.T) {
 			if name == "job level" {
 				src = "jobs:\n  v:\n    continue-on-error: true\n    steps:\n      - run: govulncheck ./...\n"
 			}
-			_, vulns, err := Audit("ci.yml", []byte(src))
+			_, vulns, _, err := Audit("ci.yml", []byte(src))
 			if err != nil || len(vulns) != 1 || vulns[0].Gates || !strings.Contains(vulns[0].Why, tc.why) {
 				t.Fatalf("%v %+v", err, vulns)
 			}
@@ -149,13 +163,132 @@ func TestWhatDoesNotGate(t *testing.T) {
 		"action":   "- uses: golang/govulncheck-action@v1",
 		"text":     "- uses: golang/govulncheck-action@v1\n        with: { output-format: text }",
 	} {
-		_, vulns, _ := Audit("ci.yml", []byte("jobs:\n  v:\n    steps:\n      "+step+"\n"))
+		_, vulns, _, _ := Audit("ci.yml", []byte("jobs:\n  v:\n    steps:\n      "+step+"\n"))
 		if len(vulns) != 1 || !vulns[0].Gates {
 			t.Errorf("%s: %+v", name, vulns)
 		}
 	}
-	if _, vulns, _ := Audit("ci.yml", []byte("jobs:\n  v:\n    steps:\n      - run: go test ./...\n")); len(vulns) != 0 {
+	if _, vulns, _, _ := Audit("ci.yml", []byte("jobs:\n  v:\n    steps:\n      - run: go test ./...\n")); len(vulns) != 0 {
 		t.Errorf("a test step is not govulncheck: %+v", vulns)
+	}
+}
+
+// ⛔ A LANE REACHED THROUGH A `uses:` JOB. Before this, a job calling a
+// reusable workflow had no steps, so every rule walking Steps saw nothing and
+// the repository read "no govulncheck step" while its lane ran green — which
+// also argues for the wrong fix, because the obvious way to satisfy the tool
+// is to paste an inline copy back into each caller.
+//
+// Both directions, because fixing an under-report is how an over-report gets
+// built: a caller whose target really gates must read as gates, and a caller
+// whose target has no govulncheck must still be a finding.
+func TestACalledWorkflowIsFollowed(t *testing.T) {
+	const caller = `on: push
+jobs:
+  test:
+    steps:
+      - uses: actions/setup-go@v7
+        with: { go-version-file: go.mod }
+  vulns:
+    uses: org/.github/.github/workflows/vulns.yml@main
+`
+	// ⛔ ONE step, both commands, which is the shape the fleet's shared lane
+	// actually has: vulngate is recognised as the judge only when it sits in
+	// the SAME run: block as govulncheck, because the rule reads one step at a
+	// time. Splitting them across two steps reads as "gates nothing" — true to
+	// the current rule, and a separate question from this test's.
+	gates := `jobs:
+  vulns:
+    steps:
+      - run: |
+          govulncheck -format json ./... > v.json || true
+          vulngate --go go1.27.3 v.json
+`
+	for name, tc := range map[string]struct {
+		remote, bad string
+		wantOut     []string
+		wantCode    int
+	}{
+		"gates": {
+			remote:   gates,
+			wantOut:  []string{"govulncheck: gates"},
+			wantCode: 0,
+		},
+		"the called workflow has no govulncheck": {
+			remote:   "jobs:\n  build:\n    steps:\n      - run: go build ./...\n",
+			wantOut:  []string{"no govulncheck step"},
+			wantCode: 1,
+		},
+		// Exit 2, not 1: this tool's own rule is that a sweep which could not
+		// read something says so rather than passing, and 2 is how it says it.
+		// The finding list must NOT claim the lane is absent.
+		"unreadable is never clean": {
+			bad:      "org/.github/.github/workflows/vulns.yml",
+			wantOut:  []string{"could not be read"},
+			wantCode: 2,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := fakeRepo{
+				files: map[string]string{
+					"go.mod": "module x\n\ngo 1.27.3\n", ".github/workflows/ci.yml": caller,
+				},
+				badRemote: tc.bad,
+			}
+			if tc.remote != "" {
+				f.remote = map[string]string{"org/.github/.github/workflows/vulns.yml": tc.remote}
+			}
+			gh, repos := one("caller", f)
+			code, out, _ := drive(gh, repos, "o")
+			for _, want := range tc.wantOut {
+				if !strings.Contains(out, want) {
+					t.Errorf("want %q in:\n%s", want, out)
+				}
+			}
+			if code != tc.wantCode {
+				t.Errorf("exit %d, want %d\n%s", code, tc.wantCode, out)
+			}
+			// The caller is what a reader needs to see named, not only the
+			// called file: the row is about THIS repository.
+			if name == "gates" && !strings.Contains(out, "caller") {
+				t.Errorf("the report does not name the calling repository:\n%s", out)
+			}
+			if tc.bad != "" && strings.Contains(out, "no govulncheck step") {
+				t.Errorf("a call that could not be read was reported as having no lane:\n%s", out)
+			}
+		})
+	}
+}
+
+// A malformed or unsupported `uses:` is not silently clean either.
+func TestACallThatCannotBeParsedIsUnreadable(t *testing.T) {
+	for _, ref := range []string{"nonsense", "org/repo@main", "org/repo/.github/workflows/x.yml@"} {
+		gh, repos := one("c", fakeRepo{files: map[string]string{
+			"go.mod":                   "module x\n\ngo 1.27.3\n",
+			".github/workflows/ci.yml": "on: push\njobs:\n  vulns:\n    uses: " + ref + "\n",
+		}})
+		code, out, _ := drive(gh, repos, "o")
+		if code == 0 || !strings.Contains(out, "cannot read the called workflow") {
+			t.Errorf("%q: exit %d\n%s", ref, code, out)
+		}
+	}
+}
+
+func TestCalledWorkflowRefs(t *testing.T) {
+	for ref, want := range map[string][4]string{
+		"o/r/.github/workflows/v.yml@main":   {"o/r", ".github/workflows/v.yml", "main", "ok"},
+		"o/r/.github/workflows/v.yml@v1.2.3": {"o/r", ".github/workflows/v.yml", "v1.2.3", "ok"},
+		"./.github/workflows/local.yml":      {"", ".github/workflows/local.yml", "", "ok"},
+		".github/workflows/local.yml":        {"", ".github/workflows/local.yml", "", "ok"},
+		"o/r/not-a-workflow.yml@main":        {"", "", "", ""},
+		"o/.github/workflows/v.yml@main":     {"", "", "", ""},
+		"o/r/.github/workflows/v.yml":        {"", "", "", ""},
+	} {
+		slug, p, rev, ok := calledWorkflow(ref)
+		if gotOK := "ok"; (ok && gotOK != want[3]) || (!ok && want[3] != "") ||
+			slug != want[0] || p != want[1] || rev != want[2] {
+			t.Errorf("%q -> %q %q %q %v, want %v", ref, slug, p, rev, ok, want)
+		}
 	}
 }
 
@@ -173,7 +306,7 @@ func TestToolchainSources(t *testing.T) {
       - uses: actions/setup-go@v7
         with: { go-version-file: go.mod }
 `
-	setups, _, err := Audit("ci.yml", []byte(src))
+	setups, _, _, err := Audit("ci.yml", []byte(src))
 	if err != nil || len(setups) != 5 {
 		t.Fatalf("%v %+v", err, setups)
 	}
