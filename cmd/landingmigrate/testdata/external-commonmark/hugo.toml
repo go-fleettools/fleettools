@@ -1,0 +1,4 @@
+baseURL = "https://go-commonmark.github.io/"
+languageCode = "en-us"
+title = "go-commonmark"
+disableKinds = ["taxonomy", "term", "RSS", "sitemap"]

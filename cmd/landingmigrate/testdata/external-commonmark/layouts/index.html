@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+{{/* Dark Reader repaints pages that already draw their own dark theme, as this one does: ask it to stand aside. */}}
+<meta name="darkreader-lock">
+<title>{{ .Site.Title }} — Pure-Go CommonMark.</title>
+<meta name="description" content="Pure-Go CommonMark.">
+<link rel="icon" type="image/svg+xml" href="{{ "favicon.svg" | relURL }}">
+<link rel="stylesheet" href="{{ "css/brand.css" | relURL }}">
+<script src="{{ "js/theme.js" | relURL }}"></script>
+</head><body>
+<section class="hero">
+  <button id="themebtn" class="theme" type="button">Theme: System</button>
+  <img src="{{ "img/go-commonmark-white.png" | relURL }}" alt="go-commonmark">
+  <h1>go-commonmark</h1>
+  <p>Pure-Go CommonMark.</p>
+  <div class="btns">
+    <a class="btn btn-solid" href="https://go-commonmark.github.io/docs/">{{ partial "icons/book.html" . }}Documentation</a>
+    <a class="btn btn-ghost" href="https://github.com/go-commonmark">{{ partial "icons/mark-github.html" . }}GitHub</a>
+  </div>
+</section>
+<div class="wrap">
+  <div class="panel">
+    <h2>What is go-commonmark?</h2>
+    <p>go-commonmark is a pure-Go (CGO_ENABLED=0) CommonMark renderer: it parses CommonMark v0.31.2 into a node tree and renders an HTML fragment, with optional GFM extensions behind Options — no cgo binding to libcmark and no third-party dependencies. It passes all 652/652 spec examples byte-exact and compiles to js/wasm for offline Markdown preview.</p>
+  </div>
+  <h2 class="section">Packages</h2>
+  <p class="sub">{{ len site.Data.pkgs.packages }} module(s) — generated from the org's repos.</p>
+  <div class="grid">
+    <div class="card"><div class="chip">CM</div><div class="nm">commonmark</div><div class="ds">Strict CommonMark v0.31.2 Markdown-to-HTML renderer — 652/652 spec, byte-exact, GFM behind Options.</div><div class="lk"><a href="https://github.com/go-commonmark/commonmark">GitHub</a> · <a href="https://pkg.go.dev/github.com/go-commonmark/commonmark">pkg.go.dev</a></div></div>
+  </div>
+</div>
+<footer>Built with Hugo · Pure Go, CGO=0 · Branding from <a href="https://github.com/go-commonmark/brand">go-commonmark/brand</a></footer>
+</body></html>

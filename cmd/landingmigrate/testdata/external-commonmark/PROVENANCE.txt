@@ -1,0 +1,6 @@
+A real landing of the external-stylesheet shape, not a synthetic fixture:
+github.com/go-commonmark/go-commonmark.github.io at 4e44cd781d2e3cf567376cc8bc86d5ab094b14a8
+(layouts/index.html, static/css/brand.css, static/js/theme.js, hugo.toml and
+.github/workflows/pages.yml, verbatim; images and the favicon omitted).
+Copied 2026-11-14. Its logo (favicon.svg) is slate while brand.css is cyan, so
+the brand check must refuse it; the test supplies a matching brand to migrate it.
