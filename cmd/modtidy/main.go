@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
+	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
 )
 
@@ -77,6 +78,9 @@ func main() {
 		driveHook(os.Args[1:], os.Stdout, os.Stderr)
 		return
 	}
+	// Not in hook mode: the staleness note is a network call, and a PreToolUse
+	// hook runs before tool calls.
+	fleet.WarnIfStale(os.Stderr)
 	cli.Run(RootCmd())
 }
 
