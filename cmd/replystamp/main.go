@@ -126,6 +126,18 @@ payload's tool_use_id is in the transcript tail, then judges; after 3 s without
 it, it ALLOWS. With the tool_use already there the wait is ~0. A payload with
 no tool_use_id is ALLOWED: the transcript cannot be known complete.
 
+  replystamp --clock                print the current time as hook context
+
+--clock is the cure for the stale stamp, where the others only refuse it: wired
+as a UserPromptSubmit (and SessionStart) hook it puts
+"Current date/time: 2006-01-02 15:04:05 MST (Monday)" in the model's context
+before its first word, in the same format as the PostToolUse hook. A
+UserPromptSubmit clock means the first text never needs a guessed time. It
+reads hook_event_name from the payload (default UserPromptSubmit; an empty or
+invalid payload is tolerated), is decided from the raw argv before cobra like
+the other hook modes, and ALWAYS exits 0 and prints valid JSON, a bad flag
+included. Command: ~/.local/bin/replystamp --clock
+
 Every refusal (--hook and --pretool) carries the CURRENT local time as a ready
 stamp, because after an idle gap the PostToolUse line is the only clock the
 model has and it may be yesterday's, which --hook rejects as stale while
@@ -152,6 +164,13 @@ func main() {
 // there is paid hundreds of times a session. It is a parameter so a test can
 // assert it.
 func dispatch(args []string, stdout, stderr io.Writer, warn func(io.Writer)) bool {
+	// --clock is decided from the raw argv too, and never reaches cobra: its
+	// answer is context, not a decision, so even a malformed flag must still
+	// print the time (a `{}` there would be a clock that silently vanished).
+	if clockMode(args) {
+		runClock(stdin, stdout, stderr)
+		return true
+	}
 	if !hookMode(args) {
 		warn(stderr)
 		return false
@@ -221,6 +240,58 @@ func hookMode(args []string) bool {
 	return false
 }
 
+// clockMode reports whether --clock was given, with the same spelling rule as
+// hookMode: an unparseable value still means "clock", only an explicit false
+// does not.
+func clockMode(args []string) bool {
+	for _, a := range args {
+		name, value, hasValue := strings.Cut(a, "=")
+		if name != "--clock" && name != "-clock" {
+			continue
+		}
+		if !hasValue {
+			return true
+		}
+		if on, err := strconv.ParseBool(value); err != nil || on {
+			return true
+		}
+	}
+	return false
+}
+
+// stdin is the seam the tests feed the hook payload through.
+var stdin io.Reader = os.Stdin
+
+// clockEvent is what the clock answers for when the payload names no event.
+const clockEvent = "UserPromptSubmit"
+
+// runClock prints the current local time as hook context, so the model has the
+// real time before it writes its first word. ⛔ IT NEVER BLOCKS AND ALWAYS
+// SUCCEEDS: an empty, oversized or invalid payload falls back to
+// UserPromptSubmit. The event name is echoed only when it is a plain
+// identifier, because it is written back into JSON a hook protocol parses.
+func runClock(in io.Reader, stdout, stderr io.Writer) {
+	event := clockEvent
+	raw, err := io.ReadAll(io.LimitReader(in, 1<<20))
+	if err != nil {
+		fmt.Fprintf(stderr, "replystamp: --clock: unreadable payload (%v); assuming %s\n", err, clockEvent)
+	}
+	var p struct {
+		Event string `json:"hook_event_name"`
+	}
+	if json.Unmarshal(raw, &p) == nil && eventRe.MatchString(p.Event) {
+		event = p.Event
+	}
+	out := map[string]map[string]string{"hookSpecificOutput": {
+		"hookEventName":     event,
+		"additionalContext": now().Format("Current date/time: 2006-01-02 15:04:05 MST (Monday)"),
+	}}
+	b, _ := json.Marshal(out)
+	fmt.Fprintln(stdout, string(b))
+}
+
+var eventRe = regexp.MustCompile(`^[A-Za-z]{1,40}$`)
+
 // now is the seam the tests move, because every verdict about staleness is a
 // comparison against it.
 var now = time.Now
@@ -251,6 +322,7 @@ func RootCmd() *cobra.Command {
 	c := cli.New("replystamp [--transcript <file> | --hook | --pretool]",
 		"refuse a reply that does not open with the local date and time", longHelp)
 	c.Flags().StringVar(&o.transcript, "transcript", "", "transcript .jsonl to read the last reply from")
+	c.Flags().Bool("clock", false, "read a UserPromptSubmit/SessionStart payload on stdin and print the current local time as additionalContext (always exit 0)")
 	c.Flags().BoolVar(&o.hook, "hook", false, "read a Stop hook payload on stdin and answer the hook protocol")
 	c.Flags().BoolVar(&o.pretool, "pretool", false, "read a PreToolUse hook payload on stdin and refuse a tool call made before the turn has written any text")
 	// ⛔ THREE HOURS, NOT FIFTEEN MINUTES, and the width is the point.
