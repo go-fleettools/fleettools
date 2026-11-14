@@ -186,8 +186,18 @@ func scan(r io.Reader, causes []cause) (*report, error) {
 	idx := map[string]int{} // failure name -> position in rep.failures
 	cur := -1               // the failure whose body we are inside, or -1
 	sincePkg := 0           // failures seen since the previous package line
+	// The prefix is stripped from EVERY line or from NONE, decided once from the
+	// first non-empty line: a t.Logf line that merely looks prefixed, inside a
+	// plain `go test` log, must not have its "prefix" cut and a failure invented.
+	decided, actions := false, false
 	for sc.Scan() {
-		line := stripActionsPrefix(sc.Text())
+		line := sc.Text()
+		if !decided && strings.TrimSpace(line) != "" {
+			decided, actions = true, actionsPrefix.MatchString(line)
+		}
+		if actions {
+			line = stripActionsPrefix(line)
+		}
 		t := strings.TrimSpace(line)
 		if recognised(t) {
 			rep.recognised++
@@ -199,8 +209,8 @@ func scan(r io.Reader, causes []cause) (*report, error) {
 			if _, seen := idx[n]; !seen {
 				idx[n] = len(rep.failures)
 				rep.failures = append(rep.failures, failure{name: n})
-				sincePkg++
 			}
+			sincePkg++
 			cur = idx[n]
 			continue
 		case strings.HasPrefix(t, "=== RUN"), strings.HasPrefix(t, "--- PASS: "),

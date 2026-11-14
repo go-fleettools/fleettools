@@ -254,3 +254,24 @@ func TestUnrecognisableLogIsRefused(t *testing.T) {
 		t.Errorf("reported a count for an unread log:\n%s", out)
 	}
 }
+
+// Two packages failing the SAME test name, both attributed: the second is not a
+// package FAIL without a test (a matrix log does exactly this).
+func TestSameTestNameFailingInTwoPackagesIsNotUnexplained(t *testing.T) {
+	log := "--- FAIL: TestRun (0.1s)\n    x_test.go:1: net down\nFAIL\nFAIL\texample/a\t1.0s\n" +
+		"--- FAIL: TestRun (0.1s)\n    x_test.go:1: net down\nFAIL\nFAIL\texample/b\t1.0s\n"
+	code, out := drive(t, "--log", write(t, log), "--cause", "net=net down")
+	if code != 0 || strings.Contains(out, "no --- FAIL test") ||
+		!strings.Contains(out, "failures=1 attributed=1 unexplained=0") {
+		t.Errorf("status %d; a repeated test name read as a bare package FAIL:\n%s", code, out)
+	}
+}
+
+// ⛔ A t.Logf line that LOOKS prefixed, in a plain log, must not be stripped
+// into a failure that never happened (the #276 class).
+func TestLookalikePrefixInAPlainLogInventsNoFailure(t *testing.T) {
+	code, out := drive(t, "--log", "testdata/logf-lookalike.log")
+	if code != 0 || !strings.Contains(out, "failures=0") || strings.Contains(out, "TestGhost") {
+		t.Errorf("status %d; a failure was invented:\n%s", code, out)
+	}
+}

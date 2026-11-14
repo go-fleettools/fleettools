@@ -1,0 +1,5 @@
+=== RUN   TestQuiet
+    x_test.go:9: a	b	2026-11-13T20:12:47.4288216Z --- FAIL: TestGhost
+--- PASS: TestQuiet (0.00s)
+PASS
+ok  	example/q	0.5s
