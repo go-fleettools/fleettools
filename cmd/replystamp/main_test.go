@@ -1485,3 +1485,102 @@ func TestHookModeNeverCallsTheStalenessWarning(t *testing.T) {
 		t.Errorf("outside hook mode the warning must run once (calls=%d)", calls)
 	}
 }
+
+// ------------------------------------------- #278 follow-up: real hook entries
+
+// hookAttachment is the shape the PostToolUse hook leaves in a transcript,
+// copied from a real one (Claude Code 2.1.x): an entry of type "attachment",
+// NOT a user entry, whose attachment.type is hook_success or
+// hook_additional_context.
+func hookAttachment(uuid, attType, toolUseID string) line {
+	a := line{"type": attType, "hookName": "PostToolUse:Bash", "toolUseID": toolUseID, "hookEvent": "PostToolUse"}
+	if attType == "hook_additional_context" {
+		a["content"] = []string{"Current date/time: 2026-11-11 21:30:00 CET (Wednesday)"}
+	} else {
+		a["content"] = ""
+		a["stdout"] = `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"Current date/time: 2026-11-11 21:30:00 CET (Wednesday)"}}`
+		a["exitCode"] = 0
+	}
+	return line{"type": "attachment", "uuid": uuid, "attachment": a,
+		"rendered":     []line{{"content": "<system-reminder>\nPostToolUse:Bash hook additional context: Current date/time\n</system-reminder>"}},
+		"renderedRole": "system"}
+}
+
+func stopHookSummary(uuid string) line {
+	return line{"type": "system", "subtype": "stop_hook_summary", "uuid": uuid}
+}
+
+func toolResultFor(uuid, id string) line {
+	return line{"type": "user", "uuid": uuid, "message": line{"role": "user",
+		"content": []line{{"type": "tool_result", "tool_use_id": id, "content": "ok"}}}}
+}
+
+// ⛔ The persistent-refusal hypothesis: the PostToolUse hook's entry, landing
+// between the stamped text and the next tool call, is taken for a new user
+// turn, so the next call sees "no text since the turn began". The real entries
+// are type "attachment", so they must not move the anchor. Make isUserTurn's
+// caller treat an attachment as a turn and this goes red.
+func TestPretoolPostToolUseHookEntriesDoNotMoveTheAnchor(t *testing.T) {
+	stamped := stamp(clock) + "\n\nopening"
+	p := transcript(t,
+		turnUUID("t1", "go"),
+		assistantText("a1", stamped),
+		assistantToolUseID("a2", "toolu_1", ""),
+		hookAttachment("h1", "hook_success", "toolu_1"),
+		toolResultFor("r1", "toolu_1"),
+		hookAttachment("h2", "hook_additional_context", "toolu_1"),
+		stopHookSummary("s1"),
+		assistantToolUseID("a3", "toolu_2", ""),
+	)
+	stdout, _ := pretoolWithID(t, p, "hookentries", "toolu_2")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a PostToolUse hook entry between text and the next call refused a compliant turn: %q", stdout)
+	}
+}
+
+// A task notification is a user entry with turnOrigin task_notification, as the
+// harness writes it. It starts a turn that must be stamped.
+func taskNotification(uuid string) line {
+	return line{"type": "user", "uuid": uuid, "turnOrigin": "task_notification", "promptSource": "system",
+		"message": line{"role": "user", "content": "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}}
+}
+
+func TestPretoolATaskNotificationStartsATurnThatMustBeStamped(t *testing.T) {
+	wantDeny(t, "notif-unstamped", turnUUID("t1", "go"), assistantText("a1", stamp(clock)+"\n\nold"),
+		taskNotification("n1"), assistantToolUse("a2"))
+	wantAllow(t, "notif-stamped", turnUUID("t1", "go"), assistantText("a1", stamp(clock)+"\n\nold"),
+		taskNotification("n1"), assistantText("a2", stamp(clock)+"\n\nreply"), assistantToolUse("a3"))
+}
+
+// ⛔ #278 follow-up, the clock deadlock: after an idle gap the only clock the
+// model has is yesterday's PostToolUse line. Every refusal must carry the
+// CURRENT time as a ready stamp.
+func TestRefusalsCarryTheCurrentTimeAsAStamp(t *testing.T) {
+	want := stamp(clock)
+	for name, lines := range map[string][]line{
+		"no text":   {turnUUID("t1", "go"), assistantToolUse("a1")},
+		"unstamped": {turnUUID("t1", "go"), assistantText("a1", "no stamp"), assistantToolUse("a2")},
+		"yesterday": {turnUUID("t1", "go"), assistantText("a1", stamp(clock.Add(-20*time.Hour))+"\n\nok"), assistantToolUse("a2")},
+	} {
+		_, stdout, _ := pretool(t, transcript(t, lines...), "clk-"+name)
+		ok, d := denied(t, stdout)
+		if !ok {
+			t.Fatalf("%s: allowed", name)
+		}
+		r := d.HookSpecificOutput.PermissionDecisionReason
+		if !strings.Contains(r, "exactly "+want) {
+			t.Errorf("%s: the deny must offer the current stamp %s; got %q", name, want, r)
+		}
+		if !stampRe.MatchString(want) {
+			t.Fatalf("the offered stamp %s does not pass the stamp check", want)
+		}
+	}
+	// And the Stop hook's refusal.
+	for name, text := range map[string]string{"missing": "no stamp", "yesterday": stamp(clock.Add(-20*time.Hour)) + "\n\nok"} {
+		p := transcript(t, userTurn("proceed"), assistantText("a1", text))
+		_, stdout, _ := drive(t, `{"session_id":"stop-`+name+`","transcript_path":"`+p+`","hook_event_name":"Stop"}`, "--hook")
+		if !strings.Contains(stdout, "exactly "+want) {
+			t.Errorf("Stop refusal (%s) must carry the current stamp %s; got %q", name, want, stdout)
+		}
+	}
+}

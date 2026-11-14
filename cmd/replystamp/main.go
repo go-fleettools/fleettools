@@ -126,6 +126,11 @@ payload's tool_use_id is in the transcript tail, then judges; after 3 s without
 it, it ALLOWS. With the tool_use already there the wait is ~0. A payload with
 no tool_use_id is ALLOWED: the transcript cannot be known complete.
 
+Every refusal (--hook and --pretool) carries the CURRENT local time as a ready
+stamp, because after an idle gap the PostToolUse line is the only clock the
+model has and it may be yesterday's, which --hook rejects as stale while
+--pretool refuses the call that would read the clock.
+
 Every hook mode ALLOWS whenever it cannot read -- an unreadable transcript, a
 turn it cannot locate, a payload of another event, malformed JSON, a malformed
 flag. A refusal is not a verdict.
@@ -748,10 +753,41 @@ func opening(t string) string {
 
 const wanted = "**[2026-11-01 21:05 CET]**"
 
-// reason is what the model is told when the reply is sent back. It names the
-// defect, not the rule in general, because a reason that only repeats the rule
-// produces a second reply with the same defect.
+// currentStamp is the CURRENT local time, formatted exactly as a stamp. The
+// only clock the model has is the PostToolUse line after a Bash call, and after
+// an idle gap the first turn can only copy yesterday's time, which --hook
+// rejects as stale while --pretool refuses the `date` call that would fix it.
+// A refusal that carries the valid stamp breaks that deadlock. If the local
+// zone name would not match the stamp pattern, the stamp is not offered.
+func currentStamp() string {
+	s := now().Format("**[2006-01-02 15:04 MST]**")
+	if !stampRe.MatchString(s) {
+		return ""
+	}
+	return s
+}
+
+// clockLine tells the model what to write right now, or says nothing.
+func clockLine() string {
+	if s := currentStamp(); s != "" {
+		return "\nThe current local time is exactly " + s + " -- copy it as the stamp (the PostToolUse line may be hours old after an idle gap)."
+	}
+	return ""
+}
+
+// reason is what the model is told when the reply is sent back, plus the
+// current time to stamp with.
 func (v verdict) reason() string {
+	r := v.baseReason()
+	if r == "" {
+		return r
+	}
+	return r + clockLine()
+}
+
+// baseReason names the defect, not the rule in general, because a reason that
+// only repeats the rule produces a second reply with the same defect.
+func (v verdict) baseReason() string {
 	switch v.kind {
 	case missing:
 		return fmt.Sprintf("%s did not START with the local date and time. Its first text was: %q\n"+
@@ -1057,9 +1093,11 @@ type preToolDecision struct {
 	PermissionDecisionReason string `json:"permissionDecisionReason"`
 }
 
-const pretoolReason = "This turn has written no text yet, and CLAUDE.md's first rule is to START every reply with the local date and time.\n" +
-	"Before your first tool call, write one line opening the reply with the stamp " + wanted + " -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … » -- then repeat the tool call.\n" +
-	"A stamp is not a preface: a compaction's \"resume directly\" does not forbid it."
+func pretoolReason() string {
+	return "This turn has written no text yet, and CLAUDE.md's first rule is to START every reply with the local date and time.\n" +
+		"Before your first tool call, write one line opening the reply with the stamp " + wanted + " -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … » -- then repeat the tool call.\n" +
+		"A stamp is not a preface: a compaction's \"resume directly\" does not forbid it." + clockLine()
+}
 
 // unstampedReason is the deny for a turn whose first text carries no valid
 // stamp. That text is already shown and cannot be edited, so the only thing
@@ -1072,7 +1110,7 @@ func unstampedReason(v verdict) string {
 		stale:          "carries a stale stamp (" + roundly(v.off) + " from when it was written)",
 	}[v.kind]
 	return fmt.Sprintf("This turn's first text %s: %q\n"+
-		"That text is already shown and cannot be edited. Write a NEW line now that opens with the stamp %s -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … » -- then repeat the tool call. A stamped line anywhere in the turn so far satisfies this gate.",
+		"That text is already shown and cannot be edited. Write a NEW line now that opens with the stamp %s -- 24-hour clock, taken from the latest PostToolUse hook line « Current date/time: … » -- then repeat the tool call. A stamped line anywhere in the turn so far satisfies this gate."+clockLine(),
 		what, v.got, wanted)
 }
 
@@ -1149,7 +1187,7 @@ func runPretool(cmd *cobra.Command, o *options) error {
 	if !s.found {
 		return allow(out, errOut, "no user turn located in the transcript")
 	}
-	reason := pretoolReason
+	reason := pretoolReason()
 	if s.hasText {
 		// Every text of the turn is judged exactly as --hook judges a reply, and
 		// ONE valid stamp is enough: the deny asks for a NEW stamped line, and
