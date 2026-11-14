@@ -315,7 +315,7 @@ func render(l landing, org string) (index, terminal string) {
     <div>
       <h1 class="head">`, renameIcons(l.H1), "</h1>\n")
 	if l.Tagline != "" {
-		w(`      <p class="sub">`, renameIcons(l.Tagline), "</p>\n")
+		w(`      <p class="sub">`, wrapTagline(renameIcons(l.Tagline)), "</p>\n")
 	}
 	if len(l.CTAs) > 0 {
 		// the kit renders the row, from [[params.cta]] in hugo.toml (ctaToml)
@@ -354,6 +354,35 @@ func render(l landing, org string) (index, terminal string) {
 	return b.String(), terminal
 }
 
+var pureGo = regexp.MustCompile(`(?i)\bpure[- ]go\b`)
+
+// wrapTagline makes the hero's sub-text say the strip's values only without
+// the strip: `landingkit check` fails a hero sub-text that repeats "Pure Go",
+// CGO_ENABLED=0 or the licence. "pure Go" becomes plain "Go" while the strip
+// shows ("reStructuredText in pure Go" -> "reStructuredText in Go"); the other
+// mantra words are hidden outright. A tagline with a Hugo action is left as
+// written. Done by hand on two of the first eleven batch-B landings.
+func wrapTagline(t string) string {
+	if strings.Contains(t, "{{") {
+		return t
+	}
+	t = pureGo.ReplaceAllStringFunc(t, func(m string) string {
+		return `{{ if partial "mantra-on.html" . }}Go{{ else }}` + m + `{{ end }}`
+	})
+	// the rest of the mantra words, outside what is already wrapped
+	parts := strings.Split(t, "{{ end }}")
+	for i, p := range parts {
+		if k := strings.Index(p, "{{ else }}"); k >= 0 {
+			continue
+		}
+		parts[i] = mantraRest.ReplaceAllStringFunc(p, hide)
+	}
+	return strings.Join(parts, "{{ end }}")
+}
+
+// mantraRest is the strip's values other than "pure Go".
+var mantraRest = regexp.MustCompile(`(?i)CGO_ENABLED\s*=\s*0|\bCGO\s*=\s*0|\bcgo[- ]free\b|\bno[- ]cgo\b|\bzero[- ]cgo\b|\bwithout[- ]cgo\b|BSD[- ]?3(?:[- ]clause)?`)
+
 var (
 	ctaExprRe = regexp.MustCompile(`(?s)\{\{.*?\}\}`)
 	ctaTagRe  = regexp.MustCompile(`(?s)<[^>]*>`)
@@ -372,6 +401,12 @@ func ctaKind(c cta) string {
 	return "link"
 }
 
+// ctaLabel is a button's words without its icon partials and tags; empty when
+// the words are a Hugo expression.
+func ctaLabel(c cta) string {
+	return strings.TrimSpace(ctaTagRe.ReplaceAllString(ctaExprRe.ReplaceAllString(c.Inner, ""), ""))
+}
+
 // ctaToml writes the buttons as [[params.cta]]: the first button, whatever it
 // says, is the primary ("docs"), and the kit puts the order right.
 func ctaToml(ctas []cta) string {
@@ -382,7 +417,7 @@ func ctaToml(ctas []cta) string {
 		if i == 0 && kind != "try" {
 			kind = "docs"
 		}
-		label := strings.TrimSpace(ctaTagRe.ReplaceAllString(ctaExprRe.ReplaceAllString(c.Inner, ""), ""))
+		label := ctaLabel(c)
 		fmt.Fprintf(&b, "[[params.cta]]\n  kind  = %q\n  href  = %q\n  label = %q\n", kind, c.Href, label)
 	}
 	return b.String()

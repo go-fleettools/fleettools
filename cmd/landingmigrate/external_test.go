@@ -171,3 +171,55 @@ func TestCtaToml(t *testing.T) {
 		}
 	}
 }
+
+// The vendored real landing's tagline is "Pure-Go CommonMark.": the kit's check
+// refuses a hero sub-text that says it again, so the rendered layout must say it
+// only without the strip.
+func TestTaglineRepeatsTheStrip(t *testing.T) {
+	d := externalDir(t)
+	l, err := parseExternal(readFile(t, filepath.Join(d, "layouts/index.html")), readFile(t, filepath.Join(d, "static/css/brand.css")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, _ := render(l, "go-commonmark")
+	want := `<p class="sub">{{ if partial "mantra-on.html" . }}Go{{ else }}Pure-Go{{ end }} CommonMark.</p>`
+	if !strings.Contains(index, want) {
+		t.Errorf("the hero sub-text does not hide its repeat of the strip:\n%s", index)
+	}
+	for in, want := range map[string]string{
+		"reStructuredText in pure Go.": `reStructuredText in {{ if partial "mantra-on.html" . }}Go{{ else }}pure Go{{ end }}.`,
+		"A parser, cgo-free.":          `A parser, {{ if not (partial "mantra-on.html" $) }}cgo-free{{ end }}.`,
+		"Says {{ .x }} pure Go":        "Says {{ .x }} pure Go", // a Hugo action: left as written
+		"Plain words.":                 "Plain words.",
+	} {
+		if got := wrapTagline(in); got != want {
+			t.Errorf("wrapTagline(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// nano-container-linux's second button is `{{ with .Site.Params.secondary_url }}
+// <a class="btn ghost" href="{{ . }}">…{{ $.Site.Params.secondary_label }}</a>{{ end }}`:
+// [[params.cta]] cannot hold it, so the migration is refused before any write
+// (it once wrote href = "{{ . }}" and label = "", which fails the Hugo build).
+func TestMigrateRefusesAButtonBuiltFromAnExpression(t *testing.T) {
+	goCmd = fakeGo("")
+	d := landingDir(t)
+	idx := filepath.Join(d, "layouts/index.html")
+	src := strings.Replace(readFile(t, idx), `</div>
+    <div class="badges">`, `{{ with .Site.Params.secondary_url }}<a class="btn ghost" href="{{ . }}">{{ $.Site.Params.secondary_label }}</a>{{ end }}</div>
+    <div class="badges">`, 1)
+	if !strings.Contains(src, "secondary_url") {
+		t.Fatal("the fixture did not take the expression button")
+	}
+	if err := os.WriteFile(idx, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := migrate(d, "acme", "v0.6.0", nil)
+	if err == nil || !strings.Contains(err.Error(), "Hugo expression") {
+		t.Fatalf("migrated a button built from an expression: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(d, "go.mod")); serr == nil {
+		t.Error("a refusal wrote go.mod")
+	}
+}
