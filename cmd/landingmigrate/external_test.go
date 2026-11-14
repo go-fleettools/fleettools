@@ -223,3 +223,94 @@ func TestMigrateRefusesAButtonBuiltFromAnExpression(t *testing.T) {
 		t.Error("a refusal wrote go.mod")
 	}
 }
+
+func kitDir(t *testing.T) string {
+	t.Helper()
+	d := t.TempDir()
+	root := "testdata/kit-aasm"
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || filepath.Base(p) == "PROVENANCE.txt" {
+			return err
+		}
+		rel, _ := filepath.Rel(root, p)
+		if rel == "go.mod.txt" {
+			rel = "go.mod"
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(d, rel)), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(d, rel), b, 0o644)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestUpgradeARealKitLanding(t *testing.T) {
+	goCmd = fakeGo("")
+	d := kitDir(t)
+	did, err := upgrade(d, "v0.29.0", []string{"amd64", "arm64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := readFile(t, filepath.Join(d, "layouts/index.html"))
+	conf := readFile(t, filepath.Join(d, "hugo.toml"))
+	for _, want := range []string{`{{ partial "cta.html" . }}`, `{{ if partial "mantra-on.html" . }}Go{{ else }}Pure-Go{{ end }}`} {
+		if !strings.Contains(idx, want) {
+			t.Errorf("index lacks %q", want)
+		}
+	}
+	if strings.Contains(idx, `<div class="cta"`) {
+		t.Error("the hand-written row is still there")
+	}
+	for _, want := range []string{"[[params.cta]]", `kind  = "docs"`, `kind  = "github"`, `goarch = ["amd64", "arm64"]`, "[params.mantra]"} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("hugo.toml lacks %q", want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(d, ".github/workflows/landingkit-check.yml")); err != nil {
+		t.Errorf("no check workflow: %v (%v)", err, did)
+	}
+	// twice is the same as once: the row is the kit's now, goarch is there
+	if _, err := upgrade(d, "v0.29.0", []string{"amd64", "arm64"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(d, "hugo.toml")); got != conf {
+		t.Error("a second upgrade changed hugo.toml")
+	}
+}
+
+func TestUpgradeDropsAnExplicitCommonsCallAndRefuses(t *testing.T) {
+	goCmd = fakeGo("")
+	d := kitDir(t)
+	idx := filepath.Join(d, "layouts/index.html")
+	src := strings.Replace(readFile(t, idx), `{{ partial "fork-ribbon.html" "https://github.com/go-ruby-aasm" }}`, `{{ partial "fork-ribbon.html" "https://github.com/go-ruby-aasm" }}{{ partial "commons-ribbon.html" . }}`, 1)
+	if err := os.WriteFile(idx, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upgrade(d, "v0.29.0", nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(readFile(t, idx), "commons-ribbon.html") {
+		t.Error("the explicit call stays, and would double the band")
+	}
+	// a button built from an expression is refused before any write
+	d = kitDir(t)
+	idx = filepath.Join(d, "layouts/index.html")
+	src = strings.Replace(readFile(t, idx), `href="/docs/">{{ partial "icons/book.html" . }}Documentation`, `href="{{ .Site.Params.docs }}">{{ partial "icons/book.html" . }}Documentation`, 1)
+	if err := os.WriteFile(idx, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := readFile(t, filepath.Join(d, "hugo.toml"))
+	if _, err := upgrade(d, "v0.29.0", nil); err == nil {
+		t.Fatal("upgraded a button built from an expression")
+	}
+	if readFile(t, filepath.Join(d, "hugo.toml")) != before {
+		t.Error("a refusal changed hugo.toml")
+	}
+}

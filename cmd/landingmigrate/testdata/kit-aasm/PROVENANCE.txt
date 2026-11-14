@@ -1,0 +1,6 @@
+A real landing already on the kit (a landingmigrate output at an old pin), not a
+synthetic fixture: github.com/go-ruby-aasm/go-ruby-aasm.github.io at
+02ea4df3e90a64c2d247c1db948059ec3fa7e91a (layouts/index.html, hugo.toml,
+.github/workflows/deploy-pages.yml verbatim; go.mod saved as go.mod.txt so it is
+not a module of this repository). Copied 2026-11-15. It has a hand-written
+.cta row and a tagline that says "Pure-Go ... CGO=0".
