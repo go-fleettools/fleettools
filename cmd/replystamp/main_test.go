@@ -248,7 +248,7 @@ func stampedAt(uuid, text string, at time.Time) line {
 
 func assistantToolUse(uuid string) line {
 	return line{"type": "assistant", "uuid": uuid, "message": line{"role": "assistant",
-		"content": []line{{"type": "tool_use", "name": "Bash"}}}}
+		"content": []line{{"type": "tool_use", "name": "Bash", "id": "toolu_" + uuid}}}}
 }
 
 func assistantThinking(uuid string) line {
@@ -899,11 +899,32 @@ func TestNoArgumentsIsNotACleanResult(t *testing.T) {
 
 func pretoolPayload(t *testing.T, transcriptPath, session, event string) string {
 	t.Helper()
-	raw, err := json.Marshal(stopPayload{SessionID: session, TranscriptPath: transcriptPath, HookEventName: event})
+	raw, err := json.Marshal(stopPayload{SessionID: session, TranscriptPath: transcriptPath, HookEventName: event,
+		ToolUseID: lastToolUseID(transcriptPath)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+// lastToolUseID is the id of the transcript's newest tool_use: the call the
+// hook is being asked about. A file with none (or unreadable) gets a placeholder.
+func lastToolUseID(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "toolu_unreadable"
+	}
+	id := "toolu_none"
+	for _, l := range bytes.Split(b, []byte("\n")) {
+		_, m, ok := decodeEntry(l)
+		if !ok {
+			continue
+		}
+		if ids := toolUseIDs(m.Content); len(ids) > 0 {
+			id = ids[len(ids)-1]
+		}
+	}
+	return id
 }
 
 func turnUUID(uuid, text string) line {
@@ -965,7 +986,7 @@ func TestPretoolDeniesATurnOpeningOnAToolCall(t *testing.T) {
 }
 
 func TestPretoolAllowsTextThenTool(t *testing.T) {
-	wantAllow(t, "text-first", turnUUID("t1", "proceed"), assistantText("a1", "Looking."), assistantToolUse("a2"))
+	wantAllow(t, "text-first", turnUUID("t1", "proceed"), assistantText("a1", stamp(clock)+"\n\nLooking."), assistantToolUse("a2"))
 }
 
 // ⛔ INTERSTITIAL TEXT IS THE TURN'S FIRST TEXT: the test is "any text since the
@@ -973,7 +994,7 @@ func TestPretoolAllowsTextThenTool(t *testing.T) {
 func TestPretoolAllowsTextBetweenTools(t *testing.T) {
 	wantAllow(t, "between",
 		turnUUID("t1", "proceed"), assistantToolUse("a1"), toolResult("ok"),
-		assistantText("a2", "Now the second step."), assistantToolUse("a3"))
+		assistantText("a2", stamp(clock)+"\n\nNow the second step."), assistantToolUse("a3"))
 }
 
 func TestPretoolDeniesAfterACompactionWhenNoText(t *testing.T) {
@@ -985,14 +1006,14 @@ func TestPretoolDeniesAfterACompactionWhenNoText(t *testing.T) {
 func TestPretoolTextBeforeACompactionDoesNotExcuseTheNewTurn(t *testing.T) {
 	// The only text is from the previous turn; the continuation is the anchor.
 	wantDeny(t, "compaction-old-text",
-		turnUUID("t0", "old"), assistantText("a0", "old reply"), compactionTurn("c1"))
+		turnUUID("t0", "old"), assistantText("a0", "old reply"), compactionTurn("c1"), assistantToolUse("a1"))
 }
 
 func TestPretoolAToolResultIsNotAUserTurn(t *testing.T) {
 	// Text, tool, tool_result, tool: the tool_result must not move the anchor
 	// to after the text, or this would deny.
 	wantAllow(t, "toolresult",
-		turnUUID("t1", "go"), assistantText("a1", "first"), assistantToolUse("a2"),
+		turnUUID("t1", "go"), assistantText("a1", stamp(clock)+"\n\nfirst"), assistantToolUse("a2"),
 		toolResult("out"), assistantToolUse("a3"))
 }
 
@@ -1085,8 +1106,220 @@ func TestPretoolMaxBlocksIsHonoured(t *testing.T) {
 	}
 }
 
-func TestPretoolUnstampedTextIsTheStopHooksBusiness(t *testing.T) {
-	wantAllow(t, "unstamped-text", turnUUID("t1", "go"), assistantText("a1", "no stamp here"), assistantToolUse("a2"))
+// ⛔ #277 part 1: the text before the tool call is already shown, and it did
+// not open with the stamp. Skip the stamp check in runPretool and this is the
+// test that goes red.
+func TestPretoolDeniesUnstampedTextThenTool(t *testing.T) {
+	code, stdout, _ := pretool(t, transcript(t, turnUUID("t1", "go"),
+		assistantText("a1", "I'm testing it on this session's transcript."), assistantToolUse("a2")), "unstamped")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	ok, d := denied(t, stdout)
+	if !ok {
+		t.Fatalf("unstamped first text then a tool was allowed: %q", stdout)
+	}
+	r := d.HookSpecificOutput.PermissionDecisionReason
+	if !strings.Contains(r, "cannot be edited") || !strings.Contains(r, "NEW line") || !strings.Contains(r, "**[") {
+		t.Errorf("the reason must say the shown text cannot be edited and ask for a stamped line now: %q", r)
+	}
+}
+
+// ⛔ The unstamped first text cannot be edited, so the turn must be RECOVERABLE:
+// deny, then a stamped line written now makes the repeated call pass. Restore
+// earliest-only judging and the second half goes red.
+func TestPretoolAStampedLineWrittenNowRecoversTheTurn(t *testing.T) {
+	wantDeny(t, "recover-1", turnUUID("t1", "go"),
+		assistantText("a1", "no stamp"), assistantToolUse("a2"))
+	wantAllow(t, "recover-2", turnUUID("t1", "go"),
+		assistantText("a1", "no stamp"), assistantToolUse("a2"), toolResult("ok"),
+		assistantText("a3", stamp(clock)+"\n\nwritten now"), assistantToolUse("a4"))
+}
+
+func assistantToolUseID(uuid, id string, text string) line {
+	c := []line{{"type": "tool_use", "name": "Bash", "id": id}}
+	if text != "" {
+		c = append([]line{{"type": "text", "text": text}}, c...)
+	}
+	return line{"type": "assistant", "uuid": uuid, "message": line{"role": "assistant", "content": c}}
+}
+
+// appendLater appends l to the transcript after d, from a goroutine.
+func appendLater(t *testing.T, p string, d time.Duration, l line) chan error {
+	t.Helper()
+	raw, err := json.Marshal(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(d)
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, err = f.Write(append(raw, '\n'))
+			f.Close()
+		}
+		done <- err
+	}()
+	return done
+}
+
+func pretoolWithID(t *testing.T, p, session, id string) (string, time.Duration) {
+	t.Helper()
+	raw, err := json.Marshal(stopPayload{SessionID: session, TranscriptPath: p, HookEventName: "PreToolUse", ToolUseID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	code, stdout, _ := drive(t, string(raw), "--pretool")
+	took := time.Since(start)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	return stdout, took
+}
+
+// ⛔ The tool_use (and the text of its message) lands 1 s late. Remove the
+// tool_use_id wait and the first read sees no text: a false deny.
+func TestPretoolWaitsForTheToolUseThenJudgesIt(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"))
+	done := appendLater(t, p, 400*time.Millisecond, assistantToolUseID("a1", "toolu_1", stamp(clock)+"\n\nlanded"))
+	stdout, took := pretoolWithID(t, p, "late-ok", "toolu_1")
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a compliant turn was refused while its tool_use was in flight: %q", stdout)
+	}
+	if took < 400*time.Millisecond {
+		t.Errorf("returned after %v, before the entry landed", took)
+	}
+
+	// Judged correctly once it lands: unstamped text is still a deny.
+	p = transcript(t, turnUUID("t1", "go"))
+	done = appendLater(t, p, 400*time.Millisecond, assistantToolUseID("a1", "toolu_2", "no stamp"))
+	stdout, _ = pretoolWithID(t, p, "late-bad", "toolu_2")
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := denied(t, stdout); !ok {
+		t.Fatalf("unstamped text was allowed after the wait: %q", stdout)
+	}
+}
+
+func TestPretoolAllowsWhenTheToolUseNeverLands(t *testing.T) {
+	if toolWait != 3*time.Second {
+		t.Fatalf("the cap is %v, want 3s", toolWait)
+	}
+	saved := toolWait
+	toolWait = 500 * time.Millisecond
+	t.Cleanup(func() { toolWait = saved })
+	p := transcript(t, turnUUID("t1", "go"), assistantToolUseID("a1", "toolu_other", ""))
+	stdout, took := pretoolWithID(t, p, "never-lands", "toolu_missing")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a tool_use that never lands must allow: %q", stdout)
+	}
+	if took < toolWait || took > toolWait+300*time.Millisecond {
+		t.Errorf("waited %v, cap %v", took, toolWait)
+	}
+}
+
+// With the tool_use already on disk there is nothing to wait for.
+func TestPretoolDoesNotWaitWhenTheToolUseIsPresent(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"), assistantToolUseID("a1", "toolu_1", stamp(clock)+"\n\nok"))
+	stdout, took := pretoolWithID(t, p, "present", "toolu_1")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("denied: %q", stdout)
+	}
+	if took > 50*time.Millisecond {
+		t.Errorf("allow with the tool_use present took %v", took)
+	}
+	t.Logf("allow latency with tool_use present: %v", took)
+	// And a real no-text deny with the id present is immediate too.
+	p = transcript(t, turnUUID("t1", "go"), assistantToolUseID("a1", "toolu_1", ""))
+	stdout, took = pretoolWithID(t, p, "present-deny", "toolu_1")
+	if ok, _ := denied(t, stdout); !ok || took > 50*time.Millisecond {
+		t.Errorf("no-text deny with tool_use present: denied=%v after %v", ok, took)
+	}
+}
+
+// A payload without tool_use_id comes from a client we cannot read: allow, even
+// when the turn has no text.
+func TestPretoolAllowsAPayloadWithoutAToolUseID(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
+	stdout, took := pretoolWithID(t, p, "no-id", "")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("no tool_use_id: want allow, got %q", stdout)
+	}
+	if took > 50*time.Millisecond {
+		t.Errorf("it waited %v for nothing", took)
+	}
+}
+
+// A read error while waiting allows rather than denying on the earlier state.
+// The remover is joined before the test returns, so no goroutine outlives it.
+func TestPretoolAllowsWhenTheTranscriptVanishesDuringTheWait(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"))
+	done := make(chan struct{})
+	go func(path string) {
+		defer close(done)
+		time.Sleep(120 * time.Millisecond)
+		os.Remove(path)
+	}(p)
+	stdout, _ := pretoolWithID(t, p, "vanish", "toolu_1")
+	<-done
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a read error during the wait must allow: %q", stdout)
+	}
+}
+
+func TestPretoolDeniesAStaleStamp(t *testing.T) {
+	wantDeny(t, "stale", turnUUID("t1", "go"),
+		assistantText("a1", stamp(clock.Add(-5*time.Hour))+"\n\nok"), assistantToolUse("a2"))
+}
+
+func TestPretoolStaleStampHonoursTolerance(t *testing.T) {
+	p := transcript(t, turnUUID("t1", "go"),
+		assistantText("a1", stamp(clock.Add(-5*time.Hour))+"\n\nok"), assistantToolUse("a2"))
+	_, stdout, _ := pretool(t, p, "tol", "--tolerance=6h")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a stamp inside --tolerance was refused: %q", stdout)
+	}
+}
+
+// The bound is shared by both deny kinds and keyed on the turn.
+func TestPretoolBoundIsSharedByBothDenies(t *testing.T) {
+	dir := t.TempDir()
+	saved := stateDir
+	stateDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { stateDir = saved })
+	savedNow := now
+	now = func() time.Time { return clock }
+	t.Cleanup(func() { now = savedNow })
+	run := func(p string) bool {
+		c := RootCmd()
+		c.SetIn(strings.NewReader(pretoolPayload(t, p, "shared", "PreToolUse")))
+		var out, errOut bytes.Buffer
+		if code := cli.Drive(c, []string{"--pretool"}, &out, &errOut); code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		ok, _ := denied(t, out.String())
+		return ok
+	}
+	noText := transcript(t, turnUUID("t1", "go"), assistantToolUse("a1"))
+	unstamped := transcript(t, turnUUID("t1", "go"), assistantText("a1", "no stamp"), assistantToolUse("a2"))
+	got := []bool{run(noText), run(unstamped), run(unstamped), run(noText)}
+	want := []bool{true, true, false, false}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("denials over one turn = %v, want %v", got, want)
+		}
+	}
+	// A new turn re-arms it.
+	again := transcript(t, turnUUID("t2", "next"), assistantText("a1", "no stamp"), assistantToolUse("a2"))
+	if !run(again) {
+		t.Fatalf("a new turn must be refused again")
+	}
 }
 
 // ------------------------------------------------- review fixes on --pretool
@@ -1250,5 +1483,104 @@ func TestHookModeNeverCallsTheStalenessWarning(t *testing.T) {
 	calls := 0
 	if dispatch([]string{"--transcript", "x"}, io.Discard, io.Discard, func(io.Writer) { calls++ }) || calls != 1 {
 		t.Errorf("outside hook mode the warning must run once (calls=%d)", calls)
+	}
+}
+
+// ------------------------------------------- #278 follow-up: real hook entries
+
+// hookAttachment is the shape the PostToolUse hook leaves in a transcript,
+// copied from a real one (Claude Code 2.1.x): an entry of type "attachment",
+// NOT a user entry, whose attachment.type is hook_success or
+// hook_additional_context.
+func hookAttachment(uuid, attType, toolUseID string) line {
+	a := line{"type": attType, "hookName": "PostToolUse:Bash", "toolUseID": toolUseID, "hookEvent": "PostToolUse"}
+	if attType == "hook_additional_context" {
+		a["content"] = []string{"Current date/time: 2026-11-11 21:30:00 CET (Wednesday)"}
+	} else {
+		a["content"] = ""
+		a["stdout"] = `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"Current date/time: 2026-11-11 21:30:00 CET (Wednesday)"}}`
+		a["exitCode"] = 0
+	}
+	return line{"type": "attachment", "uuid": uuid, "attachment": a,
+		"rendered":     []line{{"content": "<system-reminder>\nPostToolUse:Bash hook additional context: Current date/time\n</system-reminder>"}},
+		"renderedRole": "system"}
+}
+
+func stopHookSummary(uuid string) line {
+	return line{"type": "system", "subtype": "stop_hook_summary", "uuid": uuid}
+}
+
+func toolResultFor(uuid, id string) line {
+	return line{"type": "user", "uuid": uuid, "message": line{"role": "user",
+		"content": []line{{"type": "tool_result", "tool_use_id": id, "content": "ok"}}}}
+}
+
+// ⛔ The persistent-refusal hypothesis: the PostToolUse hook's entry, landing
+// between the stamped text and the next tool call, is taken for a new user
+// turn, so the next call sees "no text since the turn began". The real entries
+// are type "attachment", so they must not move the anchor. Make isUserTurn's
+// caller treat an attachment as a turn and this goes red.
+func TestPretoolPostToolUseHookEntriesDoNotMoveTheAnchor(t *testing.T) {
+	stamped := stamp(clock) + "\n\nopening"
+	p := transcript(t,
+		turnUUID("t1", "go"),
+		assistantText("a1", stamped),
+		assistantToolUseID("a2", "toolu_1", ""),
+		hookAttachment("h1", "hook_success", "toolu_1"),
+		toolResultFor("r1", "toolu_1"),
+		hookAttachment("h2", "hook_additional_context", "toolu_1"),
+		stopHookSummary("s1"),
+		assistantToolUseID("a3", "toolu_2", ""),
+	)
+	stdout, _ := pretoolWithID(t, p, "hookentries", "toolu_2")
+	if ok, _ := denied(t, stdout); ok {
+		t.Fatalf("a PostToolUse hook entry between text and the next call refused a compliant turn: %q", stdout)
+	}
+}
+
+// A task notification is a user entry with turnOrigin task_notification, as the
+// harness writes it. It starts a turn that must be stamped.
+func taskNotification(uuid string) line {
+	return line{"type": "user", "uuid": uuid, "turnOrigin": "task_notification", "promptSource": "system",
+		"message": line{"role": "user", "content": "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}}
+}
+
+func TestPretoolATaskNotificationStartsATurnThatMustBeStamped(t *testing.T) {
+	wantDeny(t, "notif-unstamped", turnUUID("t1", "go"), assistantText("a1", stamp(clock)+"\n\nold"),
+		taskNotification("n1"), assistantToolUse("a2"))
+	wantAllow(t, "notif-stamped", turnUUID("t1", "go"), assistantText("a1", stamp(clock)+"\n\nold"),
+		taskNotification("n1"), assistantText("a2", stamp(clock)+"\n\nreply"), assistantToolUse("a3"))
+}
+
+// ⛔ #278 follow-up, the clock deadlock: after an idle gap the only clock the
+// model has is yesterday's PostToolUse line. Every refusal must carry the
+// CURRENT time as a ready stamp.
+func TestRefusalsCarryTheCurrentTimeAsAStamp(t *testing.T) {
+	want := stamp(clock)
+	for name, lines := range map[string][]line{
+		"no text":   {turnUUID("t1", "go"), assistantToolUse("a1")},
+		"unstamped": {turnUUID("t1", "go"), assistantText("a1", "no stamp"), assistantToolUse("a2")},
+		"yesterday": {turnUUID("t1", "go"), assistantText("a1", stamp(clock.Add(-20*time.Hour))+"\n\nok"), assistantToolUse("a2")},
+	} {
+		_, stdout, _ := pretool(t, transcript(t, lines...), "clk-"+name)
+		ok, d := denied(t, stdout)
+		if !ok {
+			t.Fatalf("%s: allowed", name)
+		}
+		r := d.HookSpecificOutput.PermissionDecisionReason
+		if !strings.Contains(r, "exactly "+want) {
+			t.Errorf("%s: the deny must offer the current stamp %s; got %q", name, want, r)
+		}
+		if !stampRe.MatchString(want) {
+			t.Fatalf("the offered stamp %s does not pass the stamp check", want)
+		}
+	}
+	// And the Stop hook's refusal.
+	for name, text := range map[string]string{"missing": "no stamp", "yesterday": stamp(clock.Add(-20*time.Hour)) + "\n\nok"} {
+		p := transcript(t, userTurn("proceed"), assistantText("a1", text))
+		_, stdout, _ := drive(t, `{"session_id":"stop-`+name+`","transcript_path":"`+p+`","hook_event_name":"Stop"}`, "--hook")
+		if !strings.Contains(stdout, "exactly "+want) {
+			t.Errorf("Stop refusal (%s) must carry the current stamp %s; got %q", name, want, stdout)
+		}
 	}
 }
