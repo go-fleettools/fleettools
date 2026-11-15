@@ -1,9 +1,12 @@
 // Copyright (c) the go-fleettools authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
-// viaonly says which calls bypass the wrapper they were supposed to go through.
+// viaonly says where a rule is honoured at some siblings and not at others.
 //
-//	viaonly --wraps await --via '(*Peer).awaited' .
+//	viaonly --wraps await --via '(*Peer).awaited' .          # call sites
+//	viaonly --asks '(*Peer).gathered' --in '(*Peer).Offer' .  # exit points
+//
+// The second rule, and why the first could not answer it, is in exits.go.
 //
 // ⛔ WHY IT EXISTS. go-crdt/collab shipped the same defect three times in four
 // days: a rule honoured at some call sites and not at its siblings.
@@ -45,6 +48,13 @@
 // Test files are not scanned unless --tests is given, because a test calling the
 // raw function directly is ordinary. The count of files skipped is printed, so
 // the skipping is never silent.
+//
+// ⛔ --asks, the exit-point rule, DOES accept a method written (*T).name, and
+// matches it by the spelling of the selector — the half-match --wraps refuses.
+// The reason is the direction of the error: for "which call bypasses the
+// wrapper" a half-match invents a finding, while for "did this exit ask the
+// question" it can only invent a PASS, so the run says on every line that a
+// call to that name on any receiver counts. Narrowing it needs go/types.
 package main
 
 import (
@@ -64,15 +74,29 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const longHelp = `Says which calls bypass the wrapper they were supposed to go through.
+const longHelp = `Says where a rule is honoured at some siblings and not at others.
 
-The pairing is DECLARED, never inferred:
+There are two rules, one per run, and each pairing is DECLARED, never inferred:
 
     viaonly --wraps await --via '(*Peer).awaited' ./path
+    viaonly --asks '(*Peer).gathered' --in '(*Peer).gatherICE' ./path
 
 --wraps is the callee that must not be called directly. --via is the only
 function allowed to call it. Neither has a default: without both, there is no
 rule to enforce and the command refuses rather than passing.
+
+--asks is a predicate every EXIT POINT of --in must have asked, and it is
+repeatable: an exit satisfies the rule by asking any one of them, which is how
+a branch that needs its own error sentence composes the primitives instead of
+recopying the contract. An exit is a return, or the closing brace of a function
+with no results whose body does not terminate.
+
+⛔ The second rule exists because an early return does not read as an exit, and
+a return is not a CALL: the first rule cannot see it. Dominance is syntactic —
+a call counts for what follows it in the same statement list, and for the body
+of a statement whose header evaluates it — and a defer, a go statement and the
+inside of a function literal are deliberately NOT credited, because crediting
+an ask that runs later would make the check err toward passing.
 
 --via accepts a plain function name (helper) or a method, written as Go writes
 it in a doc comment: (*Peer).awaited or (Peer).awaited.
@@ -99,21 +123,27 @@ func RootCmd() *cobra.Command {
 	var (
 		wraps  string
 		via    string
+		asks   []string
+		in     string
 		allow  []string
 		tests  bool
 		expect int
 	)
-	c := cli.New("viaonly --wraps <func> --via <func> [flags] [directory]",
-		"Which calls bypass the wrapper they were supposed to go through", longHelp)
+	c := cli.New("viaonly --wraps <func> --via <func> | --asks <pred> --in <func> [flags] [directory]",
+		"Which calls bypass the wrapper, or which exits never asked the question", longHelp)
 	c.RunE = func(cmd *cobra.Command, args []string) error {
 		return cli.FromStatus(check(cli.Out(cmd), cli.Err(cmd), opts{
-			wraps: wraps, via: via, allow: allow, tests: tests, expect: expect,
+			wraps: wraps, via: via, asks: asks, in: in, allow: allow, tests: tests, expect: expect,
 		}, args))
 	}
 	c.Flags().StringVar(&wraps, "wraps", "",
 		"the callee that must not be called directly (required, no default)")
 	c.Flags().StringVar(&via, "via", "",
 		"the only function allowed to call it: name, (*T).name or (T).name (required, no default)")
+	c.Flags().StringArrayVar(&asks, "asks", nil,
+		"a predicate every exit of --in must have asked: name or (*T).name. Repeatable, and an exit satisfies the rule by asking ANY of them — that is how a branch composes the primitives instead of recopying the contract (the other rule; no default)")
+	c.Flags().StringVar(&in, "in", "",
+		"the function whose exit points are examined, with --asks: name, (*T).name or (T).name")
 	c.Flags().StringArrayVar(&allow, "allow", nil,
 		"waive one site: '(*T).Func=why' or 'file.go:LINE=why'. Name the function — a line moves. The reason is printed (repeatable)")
 	c.Flags().BoolVar(&tests, "tests", false,
@@ -131,6 +161,8 @@ func run(args []string, out, errOut io.Writer) int {
 type opts struct {
 	wraps  string
 	via    string
+	asks   []string
+	in     string
 	allow  []string
 	tests  bool
 	expect int
@@ -176,7 +208,23 @@ func check(out, errOut io.Writer, o opts, args []string) int {
 			len(args), strings.Join(args, " "))
 		return 2
 	}
-	if o.wraps == "" || o.via == "" {
+	// ⛔ TWO RULES, ONE AT A TIME, and the refusal names both rather than the one
+	// the caller happened to half-spell. A run that silently picked a rule
+	// because the other's flags were empty would be deciding what the caller
+	// meant, which is the inference this command refuses everywhere else.
+	exitsRule := len(o.asks) > 0 || o.in != ""
+	callsRule := o.wraps != "" || o.via != ""
+	switch {
+	case exitsRule && callsRule:
+		fmt.Fprintln(errOut, "viaonly: one rule at a time: --wraps/--via asks which CALLS bypass a wrapper, --asks/--in asks which EXITS never asked a question. They report different sites and a single exit status cannot carry both")
+		return 2
+	case !exitsRule && !callsRule:
+		fmt.Fprintln(errOut, "viaonly: give a rule: --wraps <func> --via <func> for call sites, or --asks <pred> --in <func> for exit points. Neither has a default, and without one there is nothing to enforce")
+		return 2
+	case exitsRule && (len(o.asks) == 0 || o.in == ""):
+		fmt.Fprintln(errOut, "viaonly: --asks and --in are both required: without both there is no rule to enforce")
+		return 2
+	case callsRule && (o.wraps == "" || o.via == ""):
 		fmt.Fprintln(errOut, "viaonly: --wraps and --via are both required: without both there is no rule to enforce")
 		return 2
 	}
@@ -185,7 +233,7 @@ func check(out, errOut io.Writer, o opts, args []string) int {
 	// "(" changed nothing, because every method-shaped example also carries a
 	// dot. A charset says what is forbidden and keeps missing a case; this says
 	// what is required.
-	if !isIdent(o.wraps) {
+	if callsRule && !isIdent(o.wraps) {
 		fmt.Fprintf(errOut, "viaonly: --wraps %q is not an unqualified function name; a dotted or method-shaped name would half-match on the selector and report calls to any receiver\n", o.wraps)
 		return 2
 	}
@@ -233,6 +281,12 @@ func check(out, errOut io.Writer, o opts, args []string) int {
 	if len(files) == 0 {
 		fmt.Fprintf(errOut, "viaonly: no Go files in %s that this run would read\n", dir)
 		return 2
+	}
+	// The two rules share the reader, so they can never disagree about which
+	// files a directory holds — and the file order they both report is the one
+	// sort above.
+	if exitsRule {
+		return checkExits(out, errOut, fset, files, o, dir, waived, skipped)
 	}
 
 	// ⛔ Both declared names have to EXIST. A rule naming something absent is a
@@ -392,6 +446,13 @@ func unmatched(waived map[string]string, found []site) []string {
 		used[s.key()] = true
 		used[s.where()] = true
 	}
+	return keysNotIn(waived, used)
+}
+
+// keysNotIn returns the waiver keys nothing answered to, sorted so a refusal
+// reads the same twice. Both rules report stale waivers, and one sort means
+// they cannot differ about the order — the lesson of the file sort above.
+func keysNotIn(waived map[string]string, used map[string]bool) []string {
 	var stale []string
 	for k := range waived {
 		if !used[k] {
