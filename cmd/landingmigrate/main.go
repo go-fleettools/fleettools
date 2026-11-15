@@ -141,6 +141,7 @@ func migrateCmd() *cobra.Command {
 	c.Flags().StringVar(&kit, "kit", "", "the kit version to require (vX.Y.Z)")
 	c.Flags().StringArrayVar(&data, "data", nil, `a data licence chip for the strip, e.g. "fonts: OFL-1.1" (repeatable, at most two)`)
 	c.Flags().StringVar(&rep, "report", "", "write what was done here, for verify and the pull request")
+	c.Flags().BoolVar(&followLogo, "follow-logo", false, "an external-stylesheet landing whose brand.css disagrees with its logo takes the logo's palette instead of being refused")
 	return c
 }
 
@@ -157,6 +158,9 @@ func summary(r report) string {
 	}
 	if len(r.Data) > 0 {
 		fmt.Fprintf(&b, "  data chips: %s\n", strings.Join(r.Data, " | "))
+	}
+	for _, n := range r.Notes {
+		fmt.Fprintf(&b, "  note: %s\n", n)
 	}
 	for _, f := range r.Fragments {
 		state := "KEPT, says more: review"
