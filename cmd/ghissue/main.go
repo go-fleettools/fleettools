@@ -234,9 +234,9 @@ func RootCmd() *cobra.Command {
 	// The prior-art gate on --new (priorgate.go): a REASON each, stamped into
 	// the published body, for the same reason as --allow-private-path.
 	f.StringVar(&prior, "prior-art", "",
-		"--new after a priorart run that found something: what you read and why this issue is not a duplicate (STAMPED into the issue)")
+		"--new after a priorart run that found something: what you read and why this issue is not a duplicate (STAMPED into the issue on a repository you can push to; printed for you elsewhere)")
 	f.StringVar(&priorWv, "prior-art-waiver", "",
-		"--new without a recent priorart run: why (STAMPED into the issue)")
+		"--new without a recent priorart run: why (STAMPED into the issue on a repository you can push to; printed for you elsewhere)")
 	// The bit-parity gate (paritygate.go): a REASON, stamped into the published
 	// text, like the two above.
 	f.StringVar(&parityWv, "parity-waiver", "",
@@ -301,12 +301,12 @@ func runNew(cmd *cobra.Command, args []string, o opts) error {
 		return err
 	}
 	// The prior-art gate, before anything is read from the network: a
-	// duplicate is refused locally, and the stamp goes into what is sent.
+	// duplicate is refused locally. Whether the stamp is PUBLISHED depends on
+	// whose repository it is, which only the repository read below can say.
 	stamp, err := priorArtStamp(owner+"/"+repo, o.priorArt, o.priorWaiver)
 	if err != nil {
 		return err
 	}
-	body = strings.TrimRight(body, "\n") + "\n\n" + stamp + "\n"
 	if !strings.HasPrefix(o.base, "https://") && !isTestBase(o.base) {
 		return fmt.Errorf("base %q: must be https", o.base)
 	}
@@ -324,6 +324,7 @@ func runNew(cmd *cobra.Command, args []string, o opts) error {
 	if !r.HasIssues {
 		return fmt.Errorf("%s has issues turned off", r.FullName)
 	}
+	body = withPriorArtStamp(out, r, body, stamp)
 	if o.dryRun {
 		fmt.Fprintf(out, "\n-- new issue, NOT sent --\ntitle: %s\n\n%s\n", title, body)
 		return nil
@@ -361,6 +362,41 @@ type repoInfo struct {
 	FullName  string `json:"full_name"`
 	HTMLURL   string `json:"html_url"`
 	HasIssues bool   `json:"has_issues"`
+	// Permissions is what the token may do here. GitHub sends it only to an
+	// authenticated caller; nil means the reply did not say.
+	Permissions *struct {
+		Push bool `json:"push"`
+	} `json:"permissions"`
+}
+
+// ours reports whether the token can push to the repository: the fleet's own
+// repositories, as opposed to someone else's project we file an issue on.
+func (r repoInfo) ours() bool {
+	return r.Permissions != nil && r.Permissions.Push
+}
+
+// withPriorArtStamp appends the prior-art stamp to a new issue's body on a
+// repository we can push to, and only there.
+//
+// The stamp is a statement made in public on purpose (priorgate.go), but the
+// public it is meant for is the fleet. On someone else's project it is our
+// tooling's bookkeeping printed into their tracker: yaml/go-yaml#513 went out
+// ending with "Prior art: `priorart` "…" at … CET reported prior art; checked:
+// …", which its maintainers can neither use nor act on, and which an edit does
+// not erase (GitHub keeps the original under "edited"). There the gate still
+// RAN, before any request; the stamp is printed for the caller instead. When
+// the reply does not say what the token may do, the stamp is withheld too: a
+// line missing from our own issue costs less than one published on theirs.
+func withPriorArtStamp(out io.Writer, r repoInfo, body, stamp string) string {
+	if r.ours() {
+		return strings.TrimRight(body, "\n") + "\n\n" + stamp + "\n"
+	}
+	why := "no push access: someone else's repository"
+	if r.Permissions == nil {
+		why = "the reply did not say what this token may do"
+	}
+	fmt.Fprintf(out, "prior-art stamp NOT published (%s):\n  %s\n", why, stamp)
+	return body
 }
 
 func getRepo(c *http.Client, base, tok, owner, repo string) (repoInfo, error) {

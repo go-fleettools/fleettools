@@ -244,8 +244,16 @@ func TestSplitRepoAndNumber(t *testing.T) {
 	}
 }
 
-// repoServer stands in for the repository and issue-creation endpoints.
+// repoServer stands in for the repository and issue-creation endpoints of a
+// repository the token can push to.
 func repoServer(t *testing.T, hasIssues bool) *server {
+	t.Helper()
+	return repoServerWith(t, hasIssues, `,"permissions":{"admin":true,"push":true,"pull":true}`)
+}
+
+// repoServerWith is repoServer with the permissions part of the reply given
+// verbatim (a leading comma, or "" for a reply that carries none).
+func repoServerWith(t *testing.T, hasIssues bool, perms string) *server {
 	t.Helper()
 	s := &server{}
 	mux := http.NewServeMux()
@@ -255,7 +263,7 @@ func repoServer(t *testing.T, hasIssues bool) *server {
 		if hasIssues {
 			has = "true"
 		}
-		_, _ = io.WriteString(w, `{"full_name":"o/r","html_url":"https://github.com/o/r","has_issues":`+has+`}`)
+		_, _ = io.WriteString(w, `{"full_name":"o/r","html_url":"https://github.com/o/r","has_issues":`+has+perms+`}`)
 	})
 	mux.HandleFunc("/repos/o/r/issues", func(w http.ResponseWriter, r *http.Request) {
 		s.record(r)
@@ -296,6 +304,43 @@ func TestNewOpensAnIssueAndReportsWhatGitHubGave(t *testing.T) {
 		if a != "Bearer SEKRIT" {
 			t.Errorf("request %d: Authorization = %q", i, a)
 		}
+	}
+}
+
+// On someone else's repository the gate still runs, but its stamp is printed
+// for the caller instead of being published: yaml/go-yaml#513 went out ending
+// with our tooling's bookkeeping. A reply that does not say what the token may
+// do is treated the same way.
+func TestNewKeepsThePriorArtStampOffSomeoneElsesRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name, perms, why string
+	}{
+		{"pull only", `,"permissions":{"admin":false,"push":false,"pull":true}`, "no push access"},
+		{"no permissions in the reply", ``, "did not say"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := repoServerWith(t, true, tc.perms)
+			out, err := exec(t, "o/r", "--new", "--title", "t", "--base", s.URL,
+				"--token-file", tokenFile(t, "k"), "--body-file", bodyFile(t, "the report\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(s.bodies) != 2 {
+				t.Fatalf("requests = %v, want the repository read then one POST", s.methods)
+			}
+			var sent map[string]string
+			if err := json.Unmarshal([]byte(s.bodies[1]), &sent); err != nil {
+				t.Fatal(err)
+			}
+			if sent["body"] != "the report\n" {
+				t.Errorf("body sent = %q, want the file's bytes and nothing else", sent["body"])
+			}
+			// The stamp was computed (the gate ran) and is shown to the caller.
+			if !strings.Contains(out, "prior-art stamp NOT published") || !strings.Contains(out, tc.why) ||
+				!strings.Contains(out, "Prior art: `priorart` \"the test subject\"") {
+				t.Errorf("output does not show the withheld stamp and why:\n%s", out)
+			}
+		})
 	}
 }
 
