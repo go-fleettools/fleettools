@@ -195,6 +195,95 @@ func TestItRefusesRatherThanReportingACleanCorpus(t *testing.T) {
 	}
 }
 
+// badLedger is a memory directory whose ledger cannot be read: a directory
+// stands where the file belongs, which fails on Linux and macOS alike and needs
+// no permission fixture.
+func badLedger(t *testing.T) string {
+	t.Helper()
+	dir := mem(t, map[string]string{"came-back.md": "Troisième récidive."})
+	if err := os.Mkdir(filepath.Join(dir, ledgerName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// badMemory is a directory holding a .md that cannot be read: a dangling
+// symbolic link, which ReadDir lists and does not call a directory, and which
+// ReadFile fails on as a plain user.
+func badMemory(t *testing.T) string {
+	t.Helper()
+	dir := mem(t, map[string]string{"came-back.md": "Troisième récidive."})
+	if err := os.Symlink(filepath.Join(dir, "nothing-here"), filepath.Join(dir, "dangling.md")); err != nil {
+		t.Skip(err)
+	}
+	return dir
+}
+
+// ⛔⛔ AND IT ALLOWS A CORPUS WITH NOTHING LEFT OPEN, which is the state the
+// machine is in most of the time and which NO test reached: deleting
+// `len(open) == 0` from the hook left the suite green, and that deletion makes
+// the gate deny every gitpush, ghmerge and ghrelease on this machine over a
+// clean ledger. The row above for a non-publishing command cannot reach it,
+// because publishes() answers first and returns early.
+func TestTheHookAllowsWhenEveryRecurrenceIsAccountedFor(t *testing.T) {
+	dir := mem(t, map[string]string{"came-back.md": "Troisième récidive."})
+	if code, out, _ := drive(t, "--memory", dir, "--accept", "came-back", "--gate", "cmd/x"); code != 0 {
+		t.Fatalf("accepting: %d %s", code, out)
+	}
+	var out, errOut bytes.Buffer
+	code := hookMode(&out, &errOut, opts{memory: dir},
+		strings.NewReader(`{"tool_input":{"command":"gitpush -u origin topic"}}`))
+	if code != 0 {
+		t.Fatalf("code %d, want 0", code)
+	}
+	if strings.Contains(out.String(), `"permissionDecision":"deny"`) {
+		t.Errorf("nothing is open, so a publishing command must pass; it said %q", out.String())
+	}
+}
+
+// ⛔ --hook WITH NO --memory ALLOWS, and the report mode with no --memory
+// REFUSES. The two look like one check written twice and they are opposite
+// contracts: a hook that cannot be configured must not block every session on
+// this machine, while a report asked for nothing must not answer about a
+// directory it guessed. A mutsweep showed the hook-side check surviving its own
+// deletion — the outcome is the same either way, because hookMode then fails to
+// Stat "" and allows — so without this the gate allowed by ACCIDENT rather than
+// on purpose, which is the distinction this whole command is about.
+func TestWithNoMemoryTheHookAllowsAndTheReportRefuses(t *testing.T) {
+	code, _, errOut := drive(t, "--hook")
+	if code != 0 {
+		t.Fatalf("the hook must allow when it is misconfigured, got %d", code)
+	}
+	if !strings.Contains(errOut, "--hook needs --memory") {
+		t.Errorf("it must say what is missing; stderr = %q", errOut)
+	}
+	code, _, errOut = drive(t)
+	if code != 2 {
+		t.Fatalf("the report must refuse rather than guess a directory, got %d", code)
+	}
+	if !strings.Contains(errOut, "--memory is required") {
+		t.Errorf("it must say what is missing; stderr = %q", errOut)
+	}
+}
+
+// ⛔ And --hook REACHES that mode. Deleting the dispatch left the suite green,
+// because every hook test called hookMode directly: the flag could have stopped
+// being wired and the gate would have become a silent no-op that printed a
+// report nobody reads to a hook that ignores stdout.
+//
+// The discriminator is the stderr line: with no payload on stdin, hookMode says
+// it could not read one and allows, while the report prints a count.
+func TestTheHookFlagIsWiredToTheHookMode(t *testing.T) {
+	dir := mem(t, map[string]string{"came-back.md": "Troisième récidive."})
+	_, out, errOut := drive(t, "--hook", "--memory", dir)
+	if !strings.Contains(errOut, "hook payload") {
+		t.Errorf("--hook must reach the hook mode; stderr = %q", errOut)
+	}
+	if strings.Contains(out, "recurrence(s) read") {
+		t.Errorf("--hook printed the report instead; stdout = %q", out)
+	}
+}
+
 // ⛔ THE GATE BLOCKS ON ONE CONDITION ONLY. About 25 sessions share this
 // machine; a detector that halted them all because it could not read a file
 // would be a worse defect than the one it is here to catch. Only a definite
@@ -214,6 +303,15 @@ func TestTheHookDeniesOnlyADefiniteFinding(t *testing.T) {
 		{name: "a memory directory that will not open", memory: filepath.Join(dir, "nope"),
 			payload: push, warns: "allowing"},
 		{name: "a payload it cannot read", memory: dir, payload: "not json at all", warns: "allowing"},
+		// ⛔⛔ THE TWO READ FAILURES THE TABLE DID NOT REACH, found by a full
+		// mutsweep of the file rather than by the mutations I thought of:
+		// deleting the error check after readLedger, and the one after scan,
+		// both left the suite GREEN. The row above only reaches the Stat on
+		// the directory. "It allows whenever it cannot read" was written in
+		// the doc comment and held at one read of three — this package's own
+		// recurring defect, in the contract that protects every session here.
+		{name: "a ledger it cannot read", memory: badLedger(t), payload: push, warns: "allowing"},
+		{name: "a memory file it cannot read", memory: badMemory(t), payload: push, warns: "allowing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, errOut bytes.Buffer

@@ -22,7 +22,25 @@ import (
 // position 0 after environment assignments and nothing else: not quotes, not a
 // leading backslash, not grouping, not a leading redirection, not a wrapper
 // program, not a shell's -c operand.
+// ⛔⛔ THE FLOORS ARE THE GATE, and they exist because a review measured that
+// the sentence above was a WRITTEN RULE WITH NOTHING ENFORCING IT: mutating
+// each table's lone t.Errorf away left the whole suite green, so a later edit
+// could empty either table and the oracle would go one-directional again in
+// silence. A minimum row count fails instead. The numbers are the populations
+// as measured, and raising a floor is how a reader is told the table grew.
+const (
+	minRunRows   = 30
+	minProseRows = 14
+)
+
 func TestEveryFormAShellWouldRunCountsAsPublishing(t *testing.T) {
+	rows := 0
+	defer func() {
+		if rows < minRunRows {
+			t.Errorf("%d rows, want at least %d: this table is one half of the oracle, "+
+				"and an emptied half cannot see a miss", rows, minRunRows)
+		}
+	}()
 	for _, tc := range []struct{ name, cmd string }{
 		{"bare", "gitpush -u origin topic"},
 		{"by path", "~/.local/bin/gitpush -u origin topic"},
@@ -54,7 +72,24 @@ func TestEveryFormAShellWouldRunCountsAsPublishing(t *testing.T) {
 		{"bash -c double quoted", `bash -c "gitpush -u origin topic"`},
 		{"command substitution", `echo "$(ghmerge o/r 1)"`},
 		{"backtick substitution", "echo `ghmerge o/r 1`"},
+		// ⛔ Witnessed by a second review with shimmed publishers on PATH: a
+		// publisher really ran and the previous version answered false.
+		{"eval", `eval 'gitpush -u origin topic'`},
+		{"sh with bundled flags", `sh -ec 'gitpush -u origin topic'`},
+		{"bash with a login flag", `bash -lc 'gitpush -u origin topic'`},
+		{"after a single ampersand", "echo hi & gitpush -u origin topic"},
+		{"a case arm", "case topic in *) gitpush -u origin topic ;; esac"},
+		{"nested command substitution", `echo "pushed $(gitpush -u origin $(echo topic))"`},
+		{"find -exec", `find . -name x -exec gitpush -u origin topic \;`},
+		{"command without -v", "command gitpush -u origin topic"},
+		// ⛔ `command gitpush -v` RUNS gitpush, with -v as gitpush's own flag.
+		// Found by a full mutsweep: deleting describesOnly's "a non-option
+		// means the program, and no -v was seen" check left the suite green,
+		// and that deletion makes this line read as a lookup.
+		{"command with a program before a v flag", "command gitpush -v"},
+		{"a backtick inside a double-quoted body", "ghissue --new --body \"run `ghmerge o/r 1` to land it\""},
 	} {
+		rows++
 		t.Run(tc.name, func(t *testing.T) {
 			if !publishes(tc.cmd) {
 				t.Errorf("publishes(%q) = false, but a shell runs the publisher", tc.cmd)
@@ -74,6 +109,13 @@ func TestEveryFormAShellWouldRunCountsAsPublishing(t *testing.T) {
 // that cannot be satisfied is a gate somebody removes, so every row below is a
 // command no shell runs a publisher for, and each is a separator inside quotes.
 func TestProseThatMerelyNamesAPublisherIsNotPublishing(t *testing.T) {
+	rows := 0
+	defer func() {
+		if rows < minProseRows {
+			t.Errorf("%d rows, want at least %d: this is the half of the oracle that "+
+				"sees an OVER-refusal, and nothing else can", rows, minProseRows)
+		}
+	}()
 	for _, tc := range []struct{ name, cmd string }{
 		{"the remedy itself", `recur --accept l --gate-pending "lands when ghmerge stops refusing"`},
 		{"a semicolon in the reason", `recur --accept l --gate-pending "mergeable; ghmerge must land it"`},
@@ -92,7 +134,50 @@ func TestProseThatMerelyNamesAPublisherIsNotPublishing(t *testing.T) {
 		// every command it runs into a command position.
 		{"a wrapper running something that merely prints the name", `timeout 30 echo "gitpush is the tool"`},
 		{"a wrapper running grep", "xargs -n1 grep ghmerge"},
+		// ⛔⛔ The FIFTH generation, measured by a second review: this is the
+		// install check CLAUDE.md tells every session on this machine to run,
+		// and the gate was denying it.
+		{"the install check", "command -v gitpush"},
+		{"the install check, verbose", "command -V ghmerge"},
+		// ⛔⛔ The SIXTH: a substitution inside SINGLE quotes runs nothing, and
+		// shellcmd.InsideQuotes already knew that while this did not ask.
+		{"a code span in a single-quoted body", "ghissue --new --body 'the gate refuses `ghmerge` until it lands'"},
+		{"a dollar-paren inside single quotes", `git commit -m 'run $(ghmerge o/r 1) to land it'`},
+		{"a backtick inside single quotes", "git commit -m 'the `gitpush` wrapper carries the scope'"},
+		// ⛔⛔ THE TWO FALSE POSITIVES #260 MEASURED, in another session, while
+		// trying to land the very gate a lesson here was waiting for. They are
+		// that issue's own command lines, kept verbatim: the first has the
+		// publisher names as GREP PATTERNS, the second has them in a MESSAGE
+		// BODY — and `agentsync tell` writes to a local mailbox, so refusing it
+		// made it impossible to tell a peer about the bug with the tool meant
+		// for telling peers. Both are allowed now, and both are rows here so
+		// nobody has to measure them a third time.
+		{"the publisher names as grep patterns", `git ls-tree -r HEAD --name-only; git grep -n "gitpush\|ghmerge\|ghrelease\|publish" -- cmd/recur`},
+		{"the publisher names in a peer message", `agentsync tell go-gitsafe/gitsafe "the hook denies gitpush/ghmerge/ghrelease while one lesson is unaccounted for"`},
+		// ⛔ A `-c` WITH NOTHING AFTER IT. A boundary sweep found
+		// `i+1 < len(args)` surviving its move to `<=`, which indexes one past
+		// the end: no row had -c as the last word. It is a broken command line
+		// that runs nothing, so it must be allowed AND must not panic — the
+		// second half is what the guard is for.
+		{"a shell with a dangling -c", "sh -c"},
+		{"a shell with flags and a dangling -c", "bash -lc"},
+		// ⛔⛔ AN UNBALANCED SUBSTITUTION RUNS NOTHING, and this is the SEVENTH
+		// generation of the over-refusal, caught by measuring instead of
+		// reasoning. The code leaned toward refusing here on the argument that
+		// "a broken command is not a clean one" — but bash does not PARSE
+		// either of these:
+		//
+		//	bash -n -c 'echo "$(someprog -u origin topic'   -> unexpected EOF, exit 2
+		//	bash -n -c 'echo `someprog -u origin topic'     -> unexpected EOF, exit 2
+		//
+		// A line no shell will execute cannot publish, so a doubt about it is
+		// not a doubt at all. (Measured with a neutral program name because the
+		// gate refuses its own measurement command when a publisher is named in
+		// it — which is itself worth relaying, since `bash -n` runs nothing.)
+		{"an unbalanced dollar-paren", `echo "$(gitpush -u origin topic`},
+		{"an unbalanced backtick", "echo `gitpush -u origin topic"},
 	} {
+		rows++
 		t.Run(tc.name, func(t *testing.T) {
 			if publishes(tc.cmd) {
 				t.Errorf("publishes(%q) = true, but no shell runs a publisher here", tc.cmd)

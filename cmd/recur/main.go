@@ -178,10 +178,25 @@ var wrappers = map[string]bool{
 	"setsid": true, "nice": true, "ionice": true, "timeout": true,
 }
 
-// keyword opens a compound command; the program follows it.
-var keyword = map[string]bool{
+// evals take a command LINE as an argument and run it, so what follows has to
+// be read as a command line of its own rather than as arguments.
+var evals = map[string]bool{"eval": true}
+
+// boundary is a word after which the next word is a COMMAND POSITION again,
+// even though an ordinary program has already been seen in this stage.
+//
+// ⛔ `echo hi & gitpush -u origin topic` is the case that made this a state
+// rather than a loop over the first few words: shellcmd.Statements does not
+// split on a lone `&`, so the stage still held two commands and the scan had
+// already stopped at `echo`. `case topic in *) gitpush … ;; esac` and
+// `find . -exec gitpush … \;` are the same shape through different words.
+var boundary = map[string]bool{
+	"&": true, ";": true, ";;": true, "|": true, "&&": true, "||": true,
+	"(": true, ")": true, "{": true, "}": true,
 	"if": true, "then": true, "else": true, "elif": true, "while": true,
-	"until": true, "for": true, "do": true, "{": true, "!": true,
+	"until": true, "for": true, "do": true, "done": true, "fi": true,
+	"case": true, "in": true, "esac": true, "!": true,
+	"-exec": true, "-execdir": true,
 }
 
 // redirectBare is a redirection operator whose target is the NEXT word, so that
@@ -236,11 +251,8 @@ func runs(cmd string, depth int) bool {
 				return true
 			}
 		}
-		// ⛔ $( … ) and backticks RUN even inside double quotes, which
-		// shellcmd.InsideQuotes says in so many words. `echo "$(ghmerge …)"`
-		// is a merge.
-		for _, m := range substitution.FindAllStringSubmatch(st, -1) {
-			if runs(m[1]+m[2], depth+1) {
+		for _, body := range substitutions(st) {
+			if runs(body, depth+1) {
 				return true
 			}
 		}
@@ -248,26 +260,108 @@ func runs(cmd string, depth int) bool {
 	return false
 }
 
-// substitution finds the body of a $( … ) or a ` … `.
-var substitution = regexp.MustCompile("\\$\\(([^()]*)\\)|`([^`]*)`")
+// substitutions returns the body of every command substitution in a statement
+// that the shell would actually RUN.
+//
+// ⛔ IT ASKS shellcmd.InsideQuotes, which the first version did not, and that
+// cost the fifth and sixth generation of "the gate refuses its own remedy":
+// `ghissue --new --body 'the gate refuses `ghmerge` until it lands'` was
+// DENIED over a markdown code span in a single-quoted body, as was
+// `git commit -m 'run $(ghmerge o/r 1) to land it'`. Single quotes stop a
+// substitution; double quotes do NOT, and InsideQuotes already encodes exactly
+// that distinction. It was sitting unused one import away.
+//
+// ⛔ AND THE PARENTHESES ARE BALANCED, not matched by a regex. The regex was
+// `\$\(([^()]*)\)`, which cannot match a body containing a nested
+// substitution, so `echo "pushed $(gitpush -u origin $(echo topic))"` was a
+// reachable MISS — both bash and zsh ran the push, and the stage scan saw only
+// `echo`. A character class is not a parser.
+func substitutions(st string) []string {
+	var out []string
+	for i := 0; i < len(st); i++ {
+		switch {
+		case st[i] == '$' && i+2 <= len(st)-1 && st[i+1] == '(':
+			// ⛔ THE POSITION ASKED ABOUT IS THE ONE INSIDE THE PARENTHESIS, not
+			// the `$`. Measured: for `echo "$(ghmerge o/r 1)"` InsideQuotes
+			// answers TRUE at the `$` — which is correct, the dollar really is
+			// inside double quotes — and FALSE one character into the body,
+			// which is the question being asked: does the shell interpret what
+			// is in there. Asking at the `$` made every double-quoted
+			// substitution invisible, turning a fix for an over-refusal into a
+			// miss of the plainest form there is.
+			if shellcmd.InsideQuotes(st, i+2) {
+				continue // single-quoted: the shell runs nothing here
+			}
+			depth, j := 0, i+1
+			for ; j < len(st); j++ {
+				if st[j] == '(' {
+					depth++
+				} else if st[j] == ')' {
+					if depth--; depth == 0 {
+						break
+					}
+				}
+			}
+			// ⛔⛔ AN UNBALANCED `$(` CONTRIBUTES NOTHING, and the sentence that
+			// stood here said the opposite. It read: "a broken command is not a
+			// clean one when the answer gates publishing, so the rest of the
+			// line is read as the body — I cannot tell leans toward refusing."
+			// That reasoning is wrong, and MEASURING it is what showed how:
+			//
+			//	$ bash -n -c 'echo "$(someprog -u origin topic'
+			//	unexpected EOF while looking for matching `)'   (exit 2)
+			//
+			// bash does not PARSE it, so no shell runs anything, so there is
+			// nothing to lean about — and reading the tail as a body makes the
+			// gate refuse a line no shell executes. That is the seventh
+			// generation of "the gate refuses its own remedy", written by me in
+			// the comment where I claimed to be leaning the right way. A doubt
+			// is only a doubt where something might actually run.
+			if j >= len(st) {
+				return out
+			}
+			out = append(out, st[i+2:j])
+			i = j
+		case st[i] == '`':
+			if i+1 < len(st) && shellcmd.InsideQuotes(st, i+1) {
+				continue
+			}
+			if j := strings.IndexByte(st[i+1:], '`'); j >= 0 {
+				out = append(out, st[i+1:i+1+j])
+				i = i + 1 + j
+			}
+		}
+	}
+	return out
+}
 
 // stageRuns reads one pipeline stage and answers whether its program is one of
 // the publishing ones.
 func stageRuns(stage string, depth int) bool {
 	words := split(stage)
-	// wrapped says a wrapper has already been passed, so the program is still
-	// ahead and the wrapper's OWN options and operands stand in between.
+	// atCommand says the next word is read as a PROGRAM. It starts true, goes
+	// false once an ordinary program has been seen — its arguments follow — and
+	// comes back on a boundary word.
 	//
-	// ⛔ `timeout 30 gitpush` was the case that found this: `timeout` was passed
-	// as a wrapper and `30` was then read as the program, so the line answered
-	// false. `nice -n 5`, `xargs -n1` and `env -i` all have the same shape. An
-	// ordinary program still STOPS the scan, which is what keeps
-	// `timeout 30 echo "gitpush"` from being read as a push.
-	wrapped := false
+	// ⛔ It is a state rather than "the first few words" because of
+	// `echo hi & gitpush -u origin topic`: Statements does not split on a lone
+	// `&`, so one stage held two commands and the scan had already stopped.
+	//
+	// wrapped says a wrapper has been passed, so the program is still ahead and
+	// the wrapper's OWN options and operands stand in between. `timeout 30
+	// gitpush` found that: `30` was being read as the program.
+	atCommand, wrapped := true, false
 	for i := 0; i < len(words); i++ {
 		w := words[i]
+		if boundary[w] {
+			atCommand, wrapped = true, false
+			continue
+		}
+		if !atCommand {
+			continue // an argument of something already identified
+		}
 		switch {
-		case w == "" || envAssign.MatchString(w) || keyword[w] || redirectJoined.MatchString(w):
+		case w == "" || envAssign.MatchString(w) || redirectJoined.MatchString(w):
 			continue
 		case wrapped && operandish(w):
 			continue
@@ -282,21 +376,62 @@ func stageRuns(stage string, depth int) bool {
 		switch {
 		case publishing[prog]:
 			return true
+		case prog == "command" && describesOnly(words[i+1:]):
+			// ⛔⛔ `command -v gitpush` DOES NOT RUN IT: -v and -V ask where it
+			// is and print a line. And this is the install check CLAUDE.md
+			// tells every session on this machine to run, so denying it was
+			// the FIFTH generation of "the gate refuses its own remedy" —
+			// refusing the command a session runs to find out whether the
+			// fleet tool it is being told to use is even installed.
+			return false
 		case shells[prog]:
-			// sh -c '<a command line>' runs whatever that string runs.
-			for j := i + 1; j < len(words)-1; j++ {
-				if words[j] == "-c" {
-					return runs(words[j+1], depth+1)
-				}
+			// sh -c '<a command line>' runs whatever that string runs, and the
+			// flag may be bundled: `sh -ec`, `bash -lc`.
+			if body, ok := dashC(words[i+1:]); ok {
+				return runs(body, depth+1)
 			}
 			return false
+		case evals[prog]:
+			// eval takes a command line and runs it; its arguments are joined
+			// with a space, which is what the shell does before parsing them.
+			return runs(strings.Join(words[i+1:], " "), depth+1)
 		case wrappers[prog]:
 			wrapped = true
 			continue // the program it runs is further along this stage
 		}
-		return false // an ordinary program: the rest of the stage is arguments
+		atCommand = false // an ordinary program: what follows are its arguments
 	}
 	return false
+}
+
+// describesOnly reports whether `command`'s arguments ask it to DESCRIBE rather
+// than run: -v or -V, possibly bundled with -p.
+func describesOnly(args []string) bool {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return false // the program itself, reached with no -v seen
+		}
+		if strings.ContainsAny(a, "vV") {
+			return true
+		}
+	}
+	return false
+}
+
+// dashC returns the operand of a shell's -c, which may be bundled with other
+// single-letter flags.
+//
+// ⛔ `sh -ec '…'` and `bash -lc '…'` were MISSES because only the exact word
+// `-c` was looked for, and both are ordinary spellings a script uses.
+var dashCFlag = regexp.MustCompile(`^-[A-Za-z]*c$`)
+
+func dashC(args []string) (string, bool) {
+	for i, a := range args {
+		if dashCFlag.MatchString(a) && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
 }
 
 // operandish is the shape of a wrapper's own option or operand: an option, or
@@ -345,10 +480,23 @@ func split(stage string) []string {
 			i++
 			cur.WriteByte(stage[i])
 			open = true
-		case c == ' ' || c == '\t' || c == '(' || c == ')' || c == '}' || c == ';':
-			// Grouping is not a word, and `(gitpush …)` is a subshell running
-			// gitpush. `{` IS a word, and is in keyword above.
+		case c == ' ' || c == '\t':
 			flush()
+		case c == '(' || c == ')' || c == '}' || c == '&':
+			// ⛔ EMITTED AS WORDS, not dropped. The first version swallowed
+			// them, which cost two misses: `(gitpush …)` was fine by accident
+			// but `echo hi & gitpush …` lost the only thing saying a second
+			// command had begun, and a `case` pattern's `)` likewise.
+			flush()
+			out = append(out, string(c))
+		case c == ';':
+			flush()
+			if i+1 < len(stage) && stage[i+1] == ';' {
+				i++
+				out = append(out, ";;") // the end of a case arm
+				continue
+			}
+			out = append(out, ";")
 		default:
 			cur.WriteByte(c)
 			open = true
