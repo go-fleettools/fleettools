@@ -19,8 +19,28 @@
 // failing for any reason other than "there is a diff" (a missing toolchain, a
 // broken go.mod, no network) is UNREAD, and UNREAD outranks untidy.
 //
+// ⛔⛔ AND A NON-VERDICT IS NAMED, NEVER GUESSED. Two of them exist, both
+// measured on 2026-11-15:
+//
+//  1. A module with NO GO SOURCE. `go mod tidy` can then only REMOVE
+//     requirements, so its verdict carries no information -- and the remedy it
+//     prescribes destroys the repository. go-fft/docs is a Hugo site whose only
+//     requirement is a theme; tidying it deletes the theme from go.mod AND
+//     go.sum, and the hook's own text told the next session to commit that
+//     (#294). Such a module is `skipped`, with the reason named. The Hugo
+//     config is reported, never what decides: that site has no [module] block,
+//     so a rule keyed on one would miss the occurrence it was written for. And
+//     the tools-file trick the landings use CANNOT be applied -- a Hugo theme
+//     carries a go.mod but no Go package, so no import can hold it.
+//  2. A DIRECTIVE FLOOR ABOVE THE LOCAL TOOLCHAIN. GOTOOLCHAIN=local on a host
+//     whose installed Go is older than a module's `go` line cannot build it at
+//     all, and in the hook UNREAD means allow -- so the gate went silently off
+//     for every repository Renovate raised to go 1.27.4, this one included
+//     (#300). The check retries once with the toolchain the directive NAMES.
+//
 // Exit status: 0 every module is tidy, 1 a module is untidy, 2 a module could
-// not be read (or no module was found).
+// not be read (or no module was found). A skipped module is none of those: it
+// is printed, counted, and does not decide the status.
 package main
 
 import (
@@ -43,6 +63,7 @@ import (
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
+	"golang.org/x/mod/modfile"
 )
 
 const longHelp = `Checks that every go.mod of a clone is tidy, nested modules included.
@@ -56,9 +77,19 @@ with "updates to go.mod needed". Each module is judged with
 GOTOOLCHAIN=local GOWORK=off go mod tidy -diff, which is what the CI sees.
 vendor/, testdata/ and directories starting with "." or "_" are skipped.
 
-Each module is reported tidy, untidy (with the diff) or UNREAD (the command
-failed for another reason: toolchain missing, broken go.mod). UNREAD is never
+Each module is reported tidy, untidy (with the diff), UNREAD (the command failed
+for another reason: broken go.mod, no network) or skipped. UNREAD is never
 clean.
+
+A module with no .go file of its own is skipped, with the reason named: tidy can
+only REMOVE requirements there, so it has nothing to say, and running it would
+delete them -- a Hugo site whose go.mod pins only a theme loses its theme. A
+nested module's sources never answer for its parent.
+
+When a module's go directive asks for a newer Go than the installed one, the
+check retries with the toolchain the directive NAMES and says which it used.
+That is what the CI runner has; GOTOOLCHAIN=auto would leave the version
+unstated.
 
 --hook is a PreToolUse hook for the Bash tool. It acts only when a command
 position of the line is gitpush or git push (words in prose, quotes and heredocs
@@ -116,13 +147,14 @@ func driveHook(args []string, stdout, stderr io.Writer) {
 // stdin is the seam the tests feed the hook payload through.
 var stdin io.Reader = os.Stdin
 
-// tidyRun runs the CI's tidy check in one module directory.
-type tidyRun func(ctx context.Context, dir string) (stdout, stderr string, code int, err error)
+// tidyRun runs the CI's tidy check in one module directory, under the named
+// GOTOOLCHAIN.
+type tidyRun func(ctx context.Context, dir, toolchain string) (stdout, stderr string, code int, err error)
 
-func goTidy(ctx context.Context, dir string) (string, string, int, error) {
+func goTidy(ctx context.Context, dir, toolchain string) (string, string, int, error) {
 	c := exec.CommandContext(ctx, "go", "mod", "tidy", "-diff")
 	c.Dir = dir
-	c.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off")
+	c.Env = append(os.Environ(), "GOTOOLCHAIN="+toolchain, "GOWORK=off")
 	var so, se bytes.Buffer
 	c.Stdout, c.Stderr = &so, &se
 	c.Stdin = nil
@@ -146,14 +178,22 @@ const (
 	tidy state = iota
 	untidy
 	unread
+	// skipped is a module `go mod tidy` cannot say anything about: it holds no
+	// Go source, so the check could only ever REMOVE requirements. Never
+	// silently clean -- it is printed and counted like every other class.
+	skipped
 )
 
 type result struct {
-	dir   string // as shown: relative to the scanned root
-	abs   string
-	state state
-	text  string // the diff for untidy, the reason for unread
+	dir       string // as shown: relative to the scanned root
+	abs       string
+	state     state
+	text      string // the diff for untidy, the reason for unread or skipped
+	toolchain string // set when the verdict needed one other than "local"
 }
+
+// localToolchain is the CI's constraint, and the first thing tried.
+const localToolchain = "local"
 
 // findModules lists the directories under root that hold a go.mod, nested ones
 // included, skipping vendor/, testdata/ and any directory whose name starts with
@@ -184,6 +224,111 @@ func skipDir(name string) bool {
 		strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
 }
 
+// hasGoSource says whether the module rooted at dir holds a .go file of its
+// own. ⛔ A directory with its own go.mod is a DIFFERENT module, so its sources
+// never answer for this one; vendor/, testdata/ and dot or underscore
+// directories are skipped, exactly as findModules skips them, because the go
+// command does not read them either.
+//
+// A file behind a build constraint still counts: `go mod tidy` considers every
+// build configuration, which is why a `//go:build tools` file holding a blank
+// import is the documented way to keep a requirement no package uses.
+func hasGoSource(dir string) (bool, error) {
+	found := false
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if p == dir {
+				return nil
+			}
+			if skipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			if _, err := os.Stat(filepath.Join(p, "go.mod")); err == nil {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".go") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found, err
+}
+
+// hugoConfigNames are the files that make a directory a Hugo site.
+//
+// ⛔ The presence of one is REPORTED, never what decides. Hugo mounts a theme
+// module through `theme = [...]` as well as through a [module] block, and
+// go-fft/docs -- the repository #294 was filed for -- has no [module] block at
+// all, so a rule keyed on that block would miss its own occurrence.
+var hugoConfigNames = []string{
+	"hugo.toml", "hugo.yaml", "hugo.yml", "hugo.json",
+	"config.toml", "config.yaml", "config.yml", "config.json",
+}
+
+func hugoConfig(dir string) string {
+	for _, n := range hugoConfigNames {
+		if st, err := os.Stat(filepath.Join(dir, n)); err == nil && !st.IsDir() {
+			return n
+		}
+	}
+	if st, err := os.Stat(filepath.Join(dir, "config", "_default")); err == nil && st.IsDir() {
+		return "config/_default"
+	}
+	return ""
+}
+
+// noSourceReason says why the tidy check carries no information for this
+// module, naming a Hugo configuration when one is there.
+func noSourceReason(dir string) string {
+	why := "no Go source, so go mod tidy can only REMOVE requirements: it has nothing to say here, and running it would delete them"
+	if c := hugoConfig(dir); c != "" {
+		why += " (Hugo module site: " + c + ")"
+	}
+	return why
+}
+
+// parsableGoMod says whether the module's go.mod reads as one.
+//
+// ⛔ A module whose go.mod is BROKEN must not be skipped on the strength of
+// holding no .go file: skipping is a clean answer, and nothing in that
+// reasoning has read the file that is wrong. It goes to the tidy check
+// instead, which names the real error and reports UNREAD. The repository's own
+// corpus caught this -- `broken/go.mod` holding "garbage" has no Go source
+// either.
+func parsableGoMod(dir string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = modfile.Parse("go.mod", b, nil)
+	return err == nil
+}
+
+// directive is the `go` line of the module's go.mod, or "" when it cannot be
+// read. It is the authority for which toolchain the module asks for; the error
+// text only says that the local one is too old.
+func directive(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	f, err := modfile.Parse("go.mod", b, nil)
+	if err != nil || f.Go == nil {
+		return ""
+	}
+	return f.Go.Version
+}
+
+// floorRe matches the one failure a newer toolchain fixes:
+// "go.mod requires go >= 1.27.4 (running go 1.27.3; GOTOOLCHAIN=local)".
+var floorRe = regexp.MustCompile(`requires go >= [0-9]`)
+
 func check(ctx context.Context, root string) ([]result, error) {
 	mods, err := findModules(root)
 	if err != nil {
@@ -193,8 +338,35 @@ func check(ctx context.Context, root string) ([]result, error) {
 	for _, m := range mods {
 		rel, _ := filepath.Rel(root, m)
 		r := result{dir: rel, abs: m}
+		src, serr := hasGoSource(m)
+		switch {
+		case serr != nil:
+			r.state, r.text = unread, serr.Error()
+		case !src && parsableGoMod(m):
+			// Decided WITHOUT running go: there is nothing to resolve, so this
+			// needs no toolchain and no network.
+			r.state, r.text = skipped, noSourceReason(m)
+		default:
+			judge(ctx, &r)
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// judge fills r by running the tidy check, retrying once with the toolchain the
+// module's directive NAMES when the local one is too old to build it.
+//
+// ⛔ That retry reproduces the CI rather than loosening the check: the runner
+// there HAS the version the directive requires, which is the only reason
+// GOTOOLCHAIN=local succeeds for it. Deliberately not GOTOOLCHAIN=auto, which
+// would leave the version used unstated -- an instrument whose version is
+// implicit is not an instrument. GOWORK=off is untouched either way, so a
+// sibling module still cannot satisfy a requirement the CI would not see.
+func judge(ctx context.Context, r *result) {
+	for tc := localToolchain; ; {
 		mctx, cancel := context.WithTimeout(ctx, moduleTimeout)
-		so, se, code, err := runner(mctx, m)
+		so, se, code, err := runner(mctx, r.abs, tc)
 		cancel()
 		switch {
 		case err != nil:
@@ -206,9 +378,20 @@ func check(ctx context.Context, root string) ([]result, error) {
 		default:
 			r.state, r.text = unread, strings.TrimSpace(se+" (exit "+strconv.Itoa(code)+")")
 		}
-		out = append(out, r)
+		if tc != localToolchain {
+			// The retry has had its turn: its answer stands, whatever it is.
+			r.toolchain = tc
+			return
+		}
+		if r.state != unread || !floorRe.MatchString(r.text) {
+			return
+		}
+		d := directive(r.abs)
+		if d == "" {
+			return // the floor is unreadable, so UNREAD it stays
+		}
+		tc = "go" + d
 	}
-	return out, nil
 }
 
 // RootCmd is the command, driven by tests through SetArgs/SetOut/SetErr.
@@ -244,20 +427,23 @@ func report(ctx context.Context, w io.Writer, dir string) error {
 	if len(res) == 0 {
 		return cli.Unanswerable("modtidy: no go.mod under %s: nothing was checked", dir)
 	}
-	var nu, nr int
+	var nu, nr, ns int
 	for _, r := range res {
 		switch r.state {
 		case tidy:
-			fmt.Fprintf(w, "tidy    %s\n", r.dir)
+			fmt.Fprintf(w, "tidy    %s%s\n", r.dir, usedToolchain(r))
 		case untidy:
 			nu++
-			fmt.Fprintf(w, "untidy  %s\n%s", r.dir, indent(r.text))
+			fmt.Fprintf(w, "untidy  %s%s\n%s", r.dir, usedToolchain(r), indent(r.text))
 		case unread:
 			nr++
-			fmt.Fprintf(w, "UNREAD  %s: %s\n", r.dir, r.text)
+			fmt.Fprintf(w, "UNREAD  %s%s: %s\n", r.dir, usedToolchain(r), r.text)
+		case skipped:
+			ns++
+			fmt.Fprintf(w, "skipped %s: %s\n", r.dir, r.text)
 		}
 	}
-	fmt.Fprintf(w, "%d module(s): %d untidy, %d UNREAD\n", len(res), nu, nr)
+	fmt.Fprintf(w, "%d module(s): %d untidy, %d UNREAD, %d skipped\n", len(res), nu, nr, ns)
 	switch {
 	case nr > 0:
 		return cli.Unanswerable("modtidy: %d module(s) could not be read", nr)
@@ -265,6 +451,16 @@ func report(ctx context.Context, w io.Writer, dir string) error {
 		return cli.Found("modtidy: %d module(s) untidy", nu)
 	}
 	return nil
+}
+
+// usedToolchain names the toolchain when it was not the local one, so a reader
+// can tell a verdict reached under the directive's version from one reached
+// under whatever this host happens to have installed.
+func usedToolchain(r result) string {
+	if r.toolchain == "" {
+		return ""
+	}
+	return " (GOTOOLCHAIN=" + r.toolchain + ")"
 }
 
 func indent(s string) string {
@@ -336,6 +532,8 @@ func runHook(in io.Reader, stdout, stderr io.Writer) {
 		}
 		for _, r := range res {
 			switch r.state {
+			case skipped:
+				fmt.Fprintf(stderr, "modtidy: %s skipped: %s\n", r.dir, firstLine(r.text))
 			case unread:
 				fmt.Fprintf(stderr, "modtidy: %s UNREAD (%s); not blocking\n", r.dir, firstLine(r.text))
 			case untidy:
