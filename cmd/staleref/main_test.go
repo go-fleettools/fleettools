@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func tree(t *testing.T, files map[string]string) string {
@@ -1098,6 +1100,78 @@ func TestTheRootCommandAnswersHelpWithZero(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("--help does not mention %s", want)
 		}
+	}
+}
+
+// ⛔⛔ THE REPORT IS ALWAYS VALID UTF-8, AND grep IS WHY.
+//
+// Measured 2026-11-12, sweeping go-zpkg with this command:
+//
+//	$ staleref … <three trees> > report      # 12 STALE findings in it
+//	$ grep -c STALE report ; echo "rc=$?"
+//	rc=1
+//
+// grep printed NOTHING — not even 0 — and exited 1. ONE partial rune anywhere
+// in a file makes grep treat the whole thing as binary and skip it, so the
+// answer was indistinguishable from a clean tree: the single failure mode a
+// sweep must not have, and the third time this family has been recorded here.
+//
+// The cause was trimAround cutting its context at a BYTE width, and this
+// command's own output puts `…` and `⚠` in the lines it cuts.
+//
+// ⛔ THE ASSERTION IS ON THE PROPERTY, NOT ON trimAround. A unit test of the
+// function would have passed the day someone adds a second place that
+// truncates — and the report is what a caller greps, not the function. So this
+// drives the whole command and asks utf8.Valid of everything it wrote.
+//
+// The fixture puts a multi-byte rune at EVERY offset in the 40-byte context
+// window on either side of the match, because a byte cut is only wrong when it
+// lands inside a character: a fixture with one ellipsis is a coin toss, and a
+// test that passes by luck is the thing being guarded against.
+//
+// ⛔ AND IT MUST PRODUCE **UNSURE** FINDINGS, WHICH IS WHAT THE CONTROL FOUND.
+// The first version of this test used `github.com/go-pkgx/zbk`, which is an
+// org path and reports STALE — and a STALE finding prints the MATCHED TEXT, so
+// trimAround never runs. Mutating the fix away left the test GREEN. Only a
+// bare-name mention carries the context window this guards.
+func TestTheReportIsAlwaysValidUTF8(t *testing.T) {
+	files := map[string]string{}
+	for i := 0; i < 48; i++ {
+		// `…` is three bytes; sliding the padding by one byte at a time walks
+		// the cut through every one of them, on both sides of the name.
+		pad := strings.Repeat("…", i/3) + strings.Repeat("x", i%3)
+		files[fmt.Sprintf("doc%02d.md", i)] = pad + " pkgx is the name " + pad + "\n"
+	}
+	root := tree(t, files)
+
+	c := RootCmd()
+	var out, errOut bytes.Buffer
+	c.SetOut(&out)
+	c.SetErr(&errOut)
+	c.SetArgs([]string{"--old", "go-pkgx", "--new", "go-zpkg", "--retired", "pkgx=zpkgx", root})
+	if err := c.Execute(); err == nil {
+		t.Fatal("the fixture carries retired names and the command passed")
+	}
+	for name, b := range map[string][]byte{"stdout": out.Bytes(), "stderr": errOut.Bytes()} {
+		if utf8.Valid(b) {
+			continue
+		}
+		// Name the offset, because "not valid UTF-8" alone sends the reader
+		// looking at the fixture instead of at the cut.
+		for i := 0; i < len(b); {
+			r, n := utf8.DecodeRune(b[i:])
+			if r == utf8.RuneError && n <= 1 {
+				lo := max(0, i-60)
+				t.Fatalf("%s is not valid UTF-8 at byte %d — grep will skip this report:\n…%q…",
+					name, i, b[lo:min(len(b), i+10)])
+			}
+			i += n
+		}
+	}
+	// ⛔ The fixture has to have produced the finding KIND that carries a
+	// context window, or the whole test is vacuous — which it was, once.
+	if !strings.Contains(out.String(), "48 UNSURE") {
+		t.Errorf("the fixture did not produce the 48 UNSURE findings it was built for:\n%s", out.String())
 	}
 }
 
