@@ -672,57 +672,172 @@ func TestOneAcceptDoesNotEraseAnotherEntrysInstant(t *testing.T) {
 	}
 }
 
-// ⛔ #303: an index hub quotes each child's recurrence sentence one per line.
-// The child is judged under its own name; the quotation must not make the hub a
-// lesson, or every fold into the hub refuses every publish.
-func TestAHubOfPointerLinesIsNotALesson(t *testing.T) {
-	code, out, _ := drive(t, "--memory", "testdata/hub")
-	if code != 1 {
-		t.Fatalf("code %d, want 1 (the child still recorded one)\n%s", code, out)
+// fixture copies testdata/<name> into a temp directory, so a test can account
+// for a lesson there without ever writing under testdata.
+func fixture(t *testing.T, name string) string {
+	t.Helper()
+	files := map[string]string{}
+	ents, err := os.ReadDir(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, "child recorded a recurrence") {
-		t.Errorf("the child must still be judged under its own name; got %q", out)
+	for _, e := range ents {
+		b, err := os.ReadFile(filepath.Join("testdata", name, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[e.Name()] = string(b)
 	}
-	if strings.Contains(out, "hub recorded a recurrence") {
-		t.Errorf("a hub of pointer lines is not a lesson; got %q", out)
+	return mem(t, files)
+}
+
+func account(t *testing.T, dir, lesson string) {
+	t.Helper()
+	if code, _, e := drive(t, "--memory", dir, "--accept", lesson, "--no-gate", "because"); code != 0 {
+		t.Fatalf("accepting %s: %d %s", lesson, code, e)
 	}
 }
 
-// The required control: a hub with a recurrence sentence of its OWN, which is
-// not a pointer line, must still fire.
-func TestAHubWithASentenceOfItsOwnStillFires(t *testing.T) {
-	code, out, _ := drive(t, "--memory", "testdata/hub-own")
-	if code != 1 {
-		t.Fatalf("code %d, want 1\n%s", code, out)
+// ⛔ #303: an INDEX lists one line per child. Once the child is accounted for
+// under its own name, a line that points at it is not a recurrence of the index,
+// and folding another accounted lesson into the index must not re-fire the gate.
+func TestAnIndexLinePointingAtAnAccountedLessonIsNotRead(t *testing.T) {
+	dir := fixture(t, "hub")
+	account(t, dir, "child")
+	code, out, _ := drive(t, "--memory", dir)
+	if code != 0 || strings.Contains(out, "hub recorded") {
+		t.Fatalf("code %d; an index of accounted pointers is not a lesson\n%s", code, out)
 	}
+	// The fold: one more accounted lesson, one more pointer line.
+	if err := os.WriteFile(filepath.Join(dir, "second.md"), []byte("Quatrième récidive, ailleurs.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	account(t, dir, "second")
+	f, err := os.OpenFile(filepath.Join(dir, "hub.md"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("- [second](second.md): 4e fois, replié\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, _ := drive(t, "--memory", dir); code != 0 {
+		t.Fatalf("a fold of an accounted lesson re-fired the gate: code %d\n%s", code, out)
+	}
+}
+
+// Controls: the same index fires while its target is NOT accounted for (the
+// child is reported under its own name and the line counts for the index).
+func TestAnIndexLineFiresWhileItsTargetIsNotAccounted(t *testing.T) {
+	_, out, _ := drive(t, "--memory", "testdata/hub")
 	if !strings.Contains(out, "hub recorded a recurrence") {
-		t.Errorf("the hub's own sentence must count; got %q", out)
+		t.Errorf("an unaccounted target must not hide the line; got %q", out)
 	}
 }
 
-// A pointer to nothing is prose: a missing target, a URL, a path outside the
-// directory, a non-memory file, an empty target, and a line that merely
-// contains a link all count.
-func TestALinkThatPointsAtNothingIsNotAPointer(t *testing.T) {
+// The required control: a recurrence in the index's OWN words fires even when
+// every pointer is skipped.
+func TestAnIndexWithASentenceOfItsOwnStillFires(t *testing.T) {
+	dir := fixture(t, "hub-own")
+	account(t, dir, "child")
+	code, out, _ := drive(t, "--memory", dir)
+	if code != 1 || !strings.Contains(out, "hub recorded a recurrence") {
+		t.Fatalf("the index's own sentence must count; code %d\n%s", code, out)
+	}
+}
+
+// A pointer to nothing is prose, even in an index.
+func TestAnIndexLinkToAMissingFileIsNotAPointer(t *testing.T) {
 	code, out, _ := drive(t, "--memory", "testdata/hub-dangling")
 	if code != 1 || !strings.Contains(out, "hub recorded a recurrence") {
-		t.Fatalf("code %d; a dangling hub must fire\n%s", code, out)
+		t.Fatalf("code %d; a dangling index line must fire\n%s", code, out)
+	}
+}
+
+// ⛔ The three cases the review of #322 found. In an ORDINARY lesson no line is
+// ever skipped, even when its target is accounted for, so each must fire; and
+// the same lines inside an INDEX whose target is not accounted for fire too.
+func TestNothingIsSkippedOutsideAnIndexOrForAnUnaccountedTarget(t *testing.T) {
+	lines := map[string]string{
+		"sibling": "- [[sibling]]: récidive ×3 ici, même erreur que là-bas.\n",
+		"self":    "- [[lesson]]: deuxième fois aujourd'hui.\n",
+	}
+	const index = "---\nmetadata:\n  node_type: index\n---\n"
+	for name, line := range lines {
+		for _, tc := range []struct {
+			label, body string
+			account     bool
+		}{
+			{"ordinary lesson, target accounted", line, true},
+			{"index, target not accounted", index + line, false},
+		} {
+			t.Run(name+"/"+tc.label, func(t *testing.T) {
+				dir := mem(t, map[string]string{"lesson.md": tc.body, "sibling.md": "Troisième récidive de x.\n"})
+				if tc.account {
+					account(t, dir, "sibling")
+				}
+				_, out, _ := drive(t, "--memory", dir)
+				if !strings.Contains(out, "lesson recorded a recurrence") {
+					t.Errorf("must fire; got %q", out)
+				}
+			})
+		}
+	}
+	// The third case: appending a related-lesson line to an accounted ordinary
+	// lesson must change its fingerprint.
+	dir := mem(t, map[string]string{"lesson.md": "Deuxième fois, déjà.\n", "other.md": "Troisième récidive de x.\n"})
+	account(t, dir, "other")
+	account(t, dir, "lesson")
+	if err := os.WriteFile(filepath.Join(dir, "lesson.md"),
+		[]byte("Deuxième fois, déjà.\n- [o](other.md): 3e fois, encore, ici même.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := drive(t, "--memory", dir)
+	if code != 1 || !strings.Contains(out, "lesson recorded a NEW recurrence") {
+		t.Errorf("an appended related-lesson line must re-fire; code %d, %q", code, out)
+	}
+}
+
+func TestIsIndexReadsOnlyTheFrontmatterKey(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{"---\nmetadata:\n  node_type: index\n---\nx", true},
+		{"---\nname: n\nmetadata:\n  type: reference\n  node_type: \"index\"\n---\nx", true},
+		{"---\nmetadata:\n\tnode_type: index\n---\nx", true},
+		{"---\nmetadata:\n  node_type: memory\n---\nx", false},
+		{"---\nnode_type: index\n---\nx", false},                              // not under metadata
+		{"---\nmetadata:\n  a: b\nother:\n  node_type: index\n---\nx", false}, // under another key
+		{"---\nmetadata:\n  node_type: memory\n---\nmetadata:\n  node_type: index\n", false},
+		{"# no frontmatter\nmetadata:\n  node_type: index\n", false},
+		{"", false},
+		{"---\nmetadata:\n  a: b\n", false}, // frontmatter never closed
+	} {
+		if got := isIndex([]byte(tc.body)); got != tc.want {
+			t.Errorf("isIndex(%q) = %v, want %v", tc.body, got, tc.want)
+		}
 	}
 }
 
 // Each shape on its own, so a mutation of one guard is caught by name.
 func TestPointerShapes(t *testing.T) {
-	const q = "Troisième récidive de x."
-	body := "---\ndescription: \"récidive ×3 de x\"\n---\n" + q + "\n"
 	dir := mem(t, map[string]string{
-		"x.md":      body,
-		"y.md":      "---\ndescription: hello\n---\nnothing repeated here\n",
-		ledgerName:  body,
-		"MEMORY.md": body,
+		"x.md": "x", "b.md": "x", "p.md": "x", "n.md": "x", "u.md": "x", "w.md": "x",
+		ledgerName: "x", "MEMORY.md": "x",
 	})
 	if err := os.Mkdir(filepath.Join(dir, "d.md"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	known := map[string]entry{
+		"x": {state: "gate"}, "p": {state: "pending"}, "n": {state: "no-gate"},
+		"b": {state: "backlog"}, "w": {state: "gatee"}, "d": {state: "gate"},
+		"missing": {state: "gate"}, "MEMORY": {state: "gate"}, "": {state: "gate"},
+		strings.TrimSuffix(ledgerName, ".md"): {state: "gate"},
+	}
+	const q = "résumé"
 	for _, tc := range []struct {
 		line string
 		self string
@@ -734,24 +849,19 @@ func TestPointerShapes(t *testing.T) {
 		{"> [[x]]: " + q, "z.md", true},
 		{"[[x|alias]]: " + q, "z.md", true},
 		{"[[x#h]]: " + q, "z.md", true},
-		{"- [t](x.md):  “Troisième   récidive de x.” ", "z.md", true},
-		{"- [t](x.md): récidive ×3 de x", "z.md", true}, // the description
+		{"- [t](p.md): " + q, "z.md", true},  // pending counts
+		{"- [t](n.md): " + q, "z.md", true},  // no-gate counts
+		{"- [t](b.md): " + q, "z.md", false}, // backlog is not a decision
+		{"- [t](w.md): " + q, "z.md", false}, // a state nobody chose is not one
+		{"- [t](u.md): " + q, "z.md", false}, // no ledger entry
+		{"- [[x]]: " + q, "x.md", false},     // a self-link
+		{"- [t](" + ledgerName + "): " + q, "z.md", false},
+		{"- [t](MEMORY.md): " + q, "z.md", false},
 		// ⛔ A prose sentence that merely OPENS with a link is the memory's own
 		// recurrence, not a pointer: measured on the real corpus, a-sweep-that-
 		// cannot-see-dot-github says "[[x]] — c'est la deuxième fois" at column 0.
 		{"[[x]] — c'est la deuxième fois", "z.md", false},
 		{"   [[x]] — récidive le même jour.", "z.md", false},
-		// ⛔ A link is not a quotation (review of #322): a lesson's own sentence
-		// about a sibling, a self-link, and an empty or absent quotation fire.
-		{"- [[x]]: récidive ×3 ici, même erreur que là-bas.", "z.md", false},
-		{"- [o](x.md): 3e fois, encore, ici même.", "z.md", false},
-		{"- [[x]]: " + q, "x.md", false},
-		{"- [t](x.md):", "z.md", false},
-		{"- [t](x.md): récidive", "z.md", false}, // a stub inside the description, not a quotation
-		{"- [t](x.md): Troisième récidive", "z.md", false},
-		{"- [t](y.md): hello", "z.md", false},
-		{"- [t](" + ledgerName + "): " + q, "z.md", false},
-		{"- [t](MEMORY.md): " + q, "z.md", false},
 		{"- [t](missing.md): " + q, "z.md", false},
 		{"- [[missing]]: " + q, "z.md", false},
 		{"- [t](d.md): " + q, "z.md", false},
@@ -763,41 +873,8 @@ func TestPointerShapes(t *testing.T) {
 		{"see [t](x.md): " + q, "z.md", false},
 		{"récidive", "z.md", false},
 	} {
-		if got := pointer(tc.line, dir, tc.self); got != tc.want {
+		if got := pointer(tc.line, dir, tc.self, known); got != tc.want {
 			t.Errorf("pointer(%q, self %s) = %v, want %v", tc.line, tc.self, got, tc.want)
 		}
 	}
-}
-
-// The three cases the review of #322 found, end to end: each must FIRE, and the
-// third must change the fingerprint of an accounted lesson.
-func TestALinkToASiblingIsNotAQuotation(t *testing.T) {
-	sibling := "Troisième récidive de x.\n"
-	for _, tc := range []struct{ name, lesson string }{
-		{"sibling", "- [[sibling]]: récidive ×3 ici, même erreur que là-bas.\n"},
-		{"self", "- [[lesson]]: deuxième fois aujourd'hui.\n"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := mem(t, map[string]string{"lesson.md": tc.lesson, "sibling.md": sibling})
-			_, out, _ := drive(t, "--memory", dir)
-			if !strings.Contains(out, "lesson recorded a recurrence") {
-				t.Errorf("a lesson's own sentence must fire; got %q", out)
-			}
-		})
-	}
-	t.Run("fingerprint", func(t *testing.T) {
-		before := "Deuxième fois, déjà.\n"
-		after := before + "- [o](other.md): 3e fois, encore, ici même.\n"
-		dir := mem(t, map[string]string{"lesson.md": before, "other.md": sibling})
-		if code, _, e := drive(t, "--memory", dir, "--accept", "lesson", "--no-gate", "because"); code != 0 {
-			t.Fatalf("accept: %d %s", code, e)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "lesson.md"), []byte(after), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		code, out, _ := drive(t, "--memory", dir)
-		if code != 1 || !strings.Contains(out, "lesson recorded a NEW recurrence") {
-			t.Errorf("an appended related-lesson line must re-fire the gate; code %d, %q", code, out)
-		}
-	})
 }

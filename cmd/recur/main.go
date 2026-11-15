@@ -604,7 +604,7 @@ func findings(o opts) (open []finding, total, backlog int, err error) {
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("reading the ledger: %w", err)
 	}
-	found, err := scan(o.memory)
+	found, err := scan(o.memory, known)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -730,7 +730,7 @@ func check(out, errOut io.Writer, o opts) int {
 		return 2
 	}
 
-	found, err := scan(o.memory)
+	found, err := scan(o.memory, known)
 	if err != nil {
 		fmt.Fprintln(errOut, "recur:", err)
 		return 2
@@ -903,7 +903,7 @@ type recorded struct {
 
 // scan returns the memories whose text records a recurrence, each with its
 // fingerprint.
-func scan(dir string) ([]recorded, error) {
+func scan(dir string, known map[string]entry) ([]recorded, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -920,7 +920,7 @@ func scan(dir string) ([]recorded, error) {
 			// refuses rather than reporting a corpus it could not finish.
 			return nil, fmt.Errorf("reading %s: %w", name, err)
 		}
-		if mark, ok := fingerprint(b, dir, name); ok {
+		if mark, ok := fingerprint(b, dir, name, known); ok {
 			found = append(found, recorded{lesson: strings.TrimSuffix(name, ".md"), mark: mark})
 		}
 	}
@@ -941,21 +941,28 @@ func scan(dir string) ([]recorded, error) {
 // sentence fires too, and that is a false positive. It costs one --accept, and
 // the alternative is the silence above.
 //
-// ⛔ A POINTER LINE IS NOT A RECURRENCE OF THE MEMORY THAT HOLDS IT (#303). An
-// index hub is one line per child — "[title](child.md): ⛔⛔ récidive …" — quoting
-// the child's own sentence. The child is judged under its own name; counting the
-// quotation as well made every fold into the hub change the hub's fingerprint,
-// and refused gitpush, ghmerge and ghrelease for every session although the
-// child was accounted for. So a line that is only a pointer to a memory that
-// EXISTS in dir is not read. A recurrence sentence of the hub's OWN still is,
-// and so is a "pointer" whose target is not there: it points at nothing, so it
-// is prose.
-func fingerprint(b []byte, dir, self string) (string, bool) {
+// ⛔ AN INDEX'S POINTER LINE IS NOT A RECURRENCE OF THE INDEX (#303). An index
+// hub is one line per child — "[title](child.md): ⛔⛔ récidive …" — written in
+// the index's own words. The child is judged under its own name; counting the
+// line as well made every fold into the hub change the hub's fingerprint, and
+// refused gitpush, ghmerge and ghrelease for every session although the child
+// was accounted for.
+//
+// So, and ONLY so: in a file that DECLARES itself an index (isIndex), a line
+// that points at ANOTHER memory the ledger already accounts for is not read.
+// Nothing is inferred from the shape alone — a lesson's own "- [[sibling]]:
+// récidive ×3 ici", a self-link, and a related-lesson line appended to an
+// accounted lesson are the memory's own sentences, and an earlier, shape-only
+// form of this rule dropped them. In an index the same lines still count when
+// the target is not accounted for, and so does a recurrence in the index's own
+// words.
+func fingerprint(b []byte, dir, self string, known map[string]entry) (string, bool) {
+	index := isIndex(b)
 	var hit []string
 	for _, line := range strings.Split(string(b), "\n") {
 		for _, re := range markers {
 			if re.MatchString(line) {
-				if !pointer(line, dir, self) {
+				if !(index && pointer(line, dir, self, known)) {
 					hit = append(hit, strings.TrimSpace(line))
 				}
 				break
@@ -969,19 +976,47 @@ func fingerprint(b []byte, dir, self string) (string, bool) {
 	return hex.EncodeToString(sum[:6]), true
 }
 
+// isIndex reports whether the frontmatter declares `node_type: index` under
+// `metadata:` — the key every memory already carries (memory, feedback,
+// reference), so an index is marked by a value, not by a new field. ⛔ Only the
+// frontmatter is read: the words in a body prove nothing about what a file is.
+func isIndex(b []byte) bool {
+	lines := strings.Split(string(b), "\n")
+	if strings.TrimSpace(lines[0]) != "---" {
+		return false
+	}
+	inMeta := false
+	for _, l := range lines[1:] {
+		if strings.TrimSpace(l) == "---" {
+			return false
+		}
+		if !strings.HasPrefix(l, " ") && !strings.HasPrefix(l, "\t") {
+			inMeta = strings.TrimSpace(l) == "metadata:"
+			continue
+		}
+		if k, v, _ := strings.Cut(strings.TrimSpace(l), ":"); inMeta && k == "node_type" &&
+			strings.Trim(strings.TrimSpace(v), "\"'") == "index" {
+			return true
+		}
+	}
+	return false
+}
+
 // pointerRe finds a line that OPENS, at column 0, with a link to another memory
 // — after an optional list bullet or quote mark, "[t](x.md)" or "[[x]]" — and
-// that the link is followed by ':' or ';', the way an index quotes its child.
+// that the link is followed by ':' or ';', the way an index lists its child.
 // ⛔ Both constraints are measured, not guessed: a prose sentence that merely
 // begins with a wikilink ("[[x]] — c'est la deuxième fois", indented or not) is
 // the memory's OWN recurrence, and an earlier, looser form of this pattern
 // dropped it from a-sweep-that-cannot-see-dot-github and from two others.
 var pointerRe = regexp.MustCompile(`^(?:[-*+>]\s+)?(?:\[[^\]]*\]\(([^)\s]+)\)|\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\])\s*[:;]`)
 
-// pointer reports whether line opens with a link to a memory that exists in
-// dir. A URL, a link to a file that is not there, or a line that does not open
-// with a link is not a pointer.
-func pointer(line, dir, self string) bool {
+// pointer reports whether line is a pointer to ANOTHER memory that exists in dir
+// and that the ledger accounts for with a decision (gate, pending or no-gate; a
+// backlog entry is "seeded, not triaged", not a decision). A URL, a path outside
+// dir, a missing file, a self-link, the ledger, MEMORY.md and an unaccounted
+// target are not.
+func pointer(line, dir, self string, known map[string]entry) bool {
 	m := pointerRe.FindStringSubmatch(line)
 	if m == nil {
 		return false
@@ -999,62 +1034,15 @@ func pointer(line, dir, self string) bool {
 	if target == "" || target != filepath.Base(target) || !strings.HasSuffix(target, ".md") {
 		return false
 	}
-	// ⛔ A link is not a quotation. The target must be ANOTHER memory that scan
-	// fingerprints (never this file, never the ledger or MEMORY.md), and what
-	// follows the separator must QUOTE it; "- [[sibling]]: récidive ×3 ici" is
-	// the memory's own sentence about its sibling, and dropping it would let a
-	// lesson gain occurrences in silence.
 	if target == self || target == ledgerName || target == "MEMORY.md" {
 		return false
 	}
-	tb, err := os.ReadFile(filepath.Join(dir, target))
-	if err != nil {
+	st, err := os.Stat(filepath.Join(dir, target))
+	if err != nil || !st.Mode().IsRegular() {
 		return false
 	}
-	return quotes(line[len(m[0]):], tb)
-}
-
-// norm collapses whitespace and strips the quotation marks a description is
-// wrapped in, so a quotation and its source compare equal.
-func norm(s string) string {
-	return strings.Trim(strings.Join(strings.Fields(s), " "), "\"'`«»“”")
-}
-
-// quotes reports whether text is a quotation of the memory body: the whole of
-// its frontmatter description (what mem-add writes into an index), or the whole
-// of one of its recurrence lines. ⛔ A memory with no recurrence line has
-// nothing a hub could be quoting, so the words are the hub's own.
-// Equality, not prefix: measured on the real hub, no pointer line is a prefix of
-// its target's description or recurrence lines either, and a prefix rule would
-// let any short stub like "3e fois" through.
-func quotes(text string, body []byte) bool {
-	want := norm(text)
-	if want == "" {
-		return false
-	}
-	var cands []string
-	recurs := false
-	for _, l := range strings.Split(string(body), "\n") {
-		if v, ok := strings.CutPrefix(l, "description:"); ok {
-			cands = append(cands, norm(v))
-		}
-		for _, re := range markers {
-			if re.MatchString(l) {
-				recurs = true
-				cands = append(cands, norm(strings.TrimLeft(strings.TrimSpace(l), "-*+># ")))
-				break
-			}
-		}
-	}
-	if !recurs {
-		return false
-	}
-	for _, c := range cands {
-		if c == want {
-			return true
-		}
-	}
-	return false
+	e, ok := known[strings.TrimSuffix(target, ".md")]
+	return ok && states[e.state] && e.state != "backlog"
 }
 
 func readLedger(path string) (map[string]entry, error) {
