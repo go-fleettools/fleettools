@@ -101,6 +101,18 @@ jobs:
       - name: fuzz the paritycheck text scanner
         run: go test -run '^$' -fuzz FuzzScan -fuzztime 30s ./internal/paritytext
 
+      # editurl reads a base out of each repository's own hugo.yaml and walks
+      # ~1300 checkouts, so that base is untrusted input from anybody who can
+      # push to any of them. The path it derives is STAT-ed, and `path.Join`
+      # cleans `..` rather than refusing it: a base ending in `..` yielded
+      # "../passwd" and stat-ed outside the checkout. The properties are that
+      # nothing stat-ed leaves the tree and that every refusal carries a
+      # sentence; 45s found 588 interesting inputs and no failure.
+      - name: fuzz the edit-link resolver
+        run: go test -run '^$' -fuzz FuzzResolve -fuzztime 30s ./cmd/editurl
+      - name: fuzz the hugo configuration reader
+        run: go test -run '^$' -fuzz FuzzReadConfigDoesNotPanic -fuzztime 30s ./cmd/editurl
+
       # The planted xz bomb (1.5 GiB declared over a few bytes) runs as a
       # compiled binary under a virtual memory limit and GOMEMLIMIT, so a
       # regression fails by itself instead of allocating gigabytes of the runner.

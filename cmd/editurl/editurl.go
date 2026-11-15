@@ -200,6 +200,7 @@ const (
 	ReasonOtherRepo                  // it is an edit URL for another repository
 	ReasonOtherBranch                // it is an edit URL for a branch this checkout's remote does not serve by default
 	ReasonNoSuchPath                 // the shape is right and the path is not in the tree
+	ReasonEscapesRepo                // the path it names lies outside the repository
 )
 
 // Link is one rendered href and the verdict on it.
@@ -260,6 +261,20 @@ func Resolve(base, rel, owner, name, branch string) Link {
 		return l
 	}
 	l.InRepo = path.Join(path.Join(segs[4:]...), rel)
+	// ⛔ THE BASE IS UNTRUSTED INPUT AND path.Join CLEANS RATHER THAN REFUSES.
+	// It comes out of a repository's own hugo.yaml, and this command walks
+	// ~1300 checkouts; any one of them can write what it likes there. A base
+	// ending in `..` left InRepo as "../passwd", and Inspect then stat-ed a
+	// path OUTSIDE the checkout -- existence only, never a read, but an
+	// existence oracle over the file system is not something a documentation
+	// checker gets to have. Witnessed by
+	// TestABaseThatEscapesTheRepositoryIsRefused on the released v0.124.0 code
+	// before this guard existed, and held by FuzzResolve as a property.
+	if l.InRepo == ".." || strings.HasPrefix(l.InRepo, "../") || strings.HasPrefix(l.InRepo, "/") {
+		l.Why = fmt.Sprintf("the path it names, %s, is outside the repository", l.InRepo)
+		l.Reason = ReasonEscapesRepo
+		l.InRepo = ""
+	}
 	return l
 }
 
