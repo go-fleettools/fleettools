@@ -62,13 +62,18 @@ const longHelp = `Repository-level GitHub writes, each after showing the reposit
   ghrepo <owner/repo> delete --confirm <owner/repo>
   ghrepo <owner/repo> sync [--branch B]
   ghrepo <owner/repo> secret-set <NAME> (--value-file F | --value-stdin)
-  ghrepo <owner/repo> pages workflow
+  ghrepo <owner/repo> pages <workflow|gh-pages>
 
 pages workflow makes the Pages site publish what a workflow deploys (build type
 "workflow"), creating the site when there is none. A repository named
 <org>.github.io starts as "legacy", which publishes the repository's own files
 from main; a site whose workflow builds its content needs this once. It is the
-only value: going back to "legacy" is refused.
+going back to "legacy" is refused.
+
+pages gh-pages creates the Pages site of a documentation repository, served
+from its gh-pages branch at the root (build type "legacy", source gh-pages).
+It only CREATES: a repository with no Pages site gets one; one already serving
+gh-pages is left alone; any other site is refused, never changed.
 
 --topic REPLACES the whole topic set (GitHub's endpoint does); repeat it for
 several, and run edit without it to leave topics alone.
@@ -102,6 +107,7 @@ type opts struct {
 	topics                                                                         []string
 	dryRun, valueStdin                                                             bool
 	descSet, homeSet, topicSet                                                     bool
+	pagesMode                                                                      string // "workflow" or "gh-pages"
 }
 
 // RootCmd builds the command; tests drive it with SetArgs/SetOut/SetErr.
@@ -220,9 +226,10 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 			return fmt.Errorf("secret name %q: letters, digits and underscores, not starting with a digit or GITHUB_", arg)
 		}
 	case "pages":
-		if arg != "workflow" {
-			return fmt.Errorf("pages: want the one value \"workflow\", got %q", arg)
+		if arg != "workflow" && arg != "gh-pages" {
+			return fmt.Errorf("pages: want \"workflow\" or \"gh-pages\", got %q", arg)
 		}
+		o.pagesMode = arg
 	default:
 		return fmt.Errorf("unknown verb %q: want fork, edit, rename, archive, delete, sync, secret-set or pages", verb)
 	}
@@ -496,6 +503,9 @@ func pagesBuildType(c *http.Client, repoURL, tok string) (buildType string, foun
 // doPages makes the Pages site's build type "workflow": the state is read back
 // after the write, and a site that did not take it is an error.
 func doPages(out io.Writer, c *http.Client, repoURL, tok string, r repoInfo, o opts) error {
+	if o.pagesMode == "gh-pages" {
+		return doPagesBranch(out, c, repoURL, tok, r, o)
+	}
 	before, found, err := pagesBuildType(c, repoURL, tok)
 	if err != nil {
 		return err
@@ -530,6 +540,62 @@ func doPages(out io.Writer, c *http.Client, repoURL, tok string, r repoInfo, o o
 		return fmt.Errorf("pages: asked for workflow, the site says site=%t build_type=%q", found, after)
 	}
 	fmt.Fprintf(out, "pages: build_type=%q on %s\n", after, r.FullName)
+	return nil
+}
+
+// doPagesBranch creates the Pages site of a documentation repository, served
+// from its gh-pages branch. It only creates: a site already serving gh-pages is
+// left alone, any other site is refused, and the state is read back after the
+// write.
+func doPagesBranch(out io.Writer, c *http.Client, repoURL, tok string, r repoInfo, o opts) error {
+	read := func() (found bool, bt, branch string, err error) {
+		st, b, err := do(c, http.MethodGet, repoURL+"/pages", tok, nil, http.StatusOK, http.StatusNotFound)
+		if err != nil {
+			return false, "", "", err
+		}
+		if st == http.StatusNotFound {
+			return false, "", "", nil
+		}
+		var p struct {
+			BuildType string `json:"build_type"`
+			Source    struct {
+				Branch string `json:"branch"`
+				Path   string `json:"path"`
+			} `json:"source"`
+		}
+		if err := json.Unmarshal(b, &p); err != nil || p.BuildType == "" {
+			return true, "", "", errors.New("pages: the reply carried no build_type, so nothing proves what it is")
+		}
+		return true, p.BuildType, p.Source.Branch + p.Source.Path, nil
+	}
+	found, bt, src, err := read()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "pages: site=%t build_type=%q source=%q\n", found, bt, src)
+	if found {
+		if bt == "legacy" && src == "gh-pages/" {
+			fmt.Fprintln(out, "already serves the gh-pages branch; nothing to do")
+			return nil
+		}
+		return fmt.Errorf("pages: %s already has a Pages site (build_type=%q source=%q); gh-pages only creates one, it never changes an existing site", r.FullName, bt, src)
+	}
+	if o.dryRun {
+		fmt.Fprintln(out, "would create the Pages site served from the gh-pages branch")
+		return nil
+	}
+	payload, _ := json.Marshal(map[string]any{"source": map[string]string{"branch": "gh-pages", "path": "/"}})
+	if _, _, err := do(c, http.MethodPost, repoURL+"/pages", tok, payload, http.StatusCreated); err != nil {
+		return err
+	}
+	found, bt, src, err = read()
+	if err != nil {
+		return err
+	}
+	if !found || bt != "legacy" || src != "gh-pages/" {
+		return fmt.Errorf("pages: asked for gh-pages, the site says site=%t build_type=%q source=%q", found, bt, src)
+	}
+	fmt.Fprintf(out, "pages: serves gh-pages on %s\n", r.FullName)
 	return nil
 }
 
