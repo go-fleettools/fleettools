@@ -20,6 +20,27 @@ type Peer struct{ ready bool }
 func gathered(p *Peer) bool { return p.ready }
 `
 
+// The shape the short-circuit cases need: a method predicate, a couple of
+// fields to put on the cheap side of an operator, and btoi so a bool can sit
+// in an int expression.
+const shortFixture = `package p
+
+type T struct {
+	closed bool
+	fast   bool
+	n      int
+}
+
+func (t *T) ready() bool { return !t.closed }
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+`
+
 // ⛔⛔ THE INCIDENT, AS SMALL AS IT GETS. Round 2 of collab#274: the question
 // "is this offer usable?" was asked in ONE branch, and the exits around it
 // returned flatly. Three of the five exits below never ask it — the fast path
@@ -625,6 +646,207 @@ func (p *Peer) Offer() error {
 	}
 }
 
+// ⛔⛔ MENTIONING THE QUESTION IS NOT ASKING IT, and this table is the second
+// time this command credited the one for the other. Each row pairs a shape
+// where the predicate is NOT evaluated on the way to the exit with the same
+// shape where it IS: the pair is the point, because a rule that reported
+// everything would pass the left column too.
+//
+// Found by an independent review that RAN these cases against the built
+// command rather than reading the walk, after recurrence 5 of the same lesson
+// had already been fixed one level up. `if t.closed || !t.ready()` was reported
+// as asking at both exits — the incident's own fast-path shape, surviving
+// inside the gate written against it.
+func TestMentioningThePredicateIsNotAskingIt(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		body string
+		bad  int
+	}{
+		{"the right operand of || is not evaluated when the left is true", `
+	if t.closed || !t.ready() {
+		return 1, nil
+	}
+	return 2, nil`, 2},
+		{"the LEFT operand of || always is", `
+	if !t.ready() || t.closed {
+		return 1, nil
+	}
+	return 2, nil`, 0},
+		{"the right operand of && is not evaluated when the left is false", `
+	if t.closed && t.ready() {
+		return 1, nil
+	}
+	return 2, nil`, 2},
+		{"the LEFT operand of && always is", `
+	if t.ready() && t.closed {
+		return 1, nil
+	}
+	return 2, nil`, 0},
+		{"a short circuit inside the return's own expression", `
+	if t.closed {
+		_ = 1
+	}
+	return btoi(t.closed || t.ready()), nil`, 1},
+		{"and the same return with the operands the other way round", `
+	if t.closed {
+		_ = 1
+	}
+	return btoi(t.ready() || t.closed), nil`, 0},
+		{"a case list is evaluated in order, so only its FIRST expression is sure", `
+	switch t.n {
+	case 1, btoi(t.ready()):
+		return 1, nil
+	}
+	return 2, nil`, 2},
+		{"its first expression is sure", `
+	switch t.n {
+	case btoi(t.ready()), 1:
+		return 1, nil
+	}
+	return 2, nil`, 1},
+		{"a clause entered by fallthrough evaluated none of its own expressions", `
+	switch t.n {
+	case 1:
+		fallthrough
+	case btoi(t.ready()):
+		return 1, nil
+	}
+	return 2, nil`, 2},
+		{"the same clause without the fallthrough above it", `
+	switch t.n {
+	case 1:
+		return 0, nil
+	case btoi(t.ready()):
+		return 1, nil
+	}
+	return 2, nil`, 2},
+		// ⛔ An EMPTY case body, which is the one the fallthrough check reads
+		// backwards from: nothing held its length guard, and without it the
+		// read of the last statement is an index of -1.
+		{"an empty case body above one that asks", `
+	switch t.n {
+	case 1:
+	case btoi(t.ready()):
+		return 1, nil
+	}
+	return 2, nil`, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := pkg(t, map[string]string{"p.go": shortFixture + `
+func (t *T) Offer() (int, error) {` + c.body + `
+}
+`})
+			code, out, errOut := drive(t, "--asks", "(*T).ready", "--in", "(*T).Offer", dir)
+			wantCode := 0
+			if c.bad > 0 {
+				wantCode = 1
+			}
+			if code != wantCode {
+				t.Fatalf("code %d, want %d\nout: %s\nerr: %s", code, wantCode, out, errOut)
+			}
+			if got := strings.Count(out, "without asking ready"); got != c.bad {
+				t.Errorf("%d exit(s) named, want %d\n%s", got, c.bad, out)
+			}
+		})
+	}
+}
+
+// ⛔⛔ A goto MAKES SOURCE ORDER A LIE, and source order is all this pass has.
+// `if t.fast { goto done }` jumps over the ask and reaches an exit that was
+// credited because the ask sits above it in the text.
+func TestAGotoIsRefusedRatherThanCredited(t *testing.T) {
+	dir := pkg(t, map[string]string{"p.go": shortFixture + `
+func (t *T) Offer() (int, error) {
+	if t.closed {
+		goto done
+	}
+	if !t.ready() {
+		return 0, nil
+	}
+done:
+	return 1, nil
+}
+`})
+	code, out, errOut := drive(t, "--asks", "(*T).ready", "--in", "(*T).Offer", dir)
+	if code != 2 {
+		t.Fatalf("code %d, want 2 (refused to decide)\nout: %s\nerr: %s", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "contains a goto") {
+		t.Errorf("the refusal must name the jump; it said %q", errOut)
+	}
+	if strings.Contains(out, "every one of the") {
+		t.Errorf("a refusal must not also report a clean function: %q", out)
+	}
+}
+
+// ⛔ A body that gives `panic` a local meaning has no builtin panic in it, so
+// the closing brace is still an exit. Believing otherwise LOSES one, silently.
+func TestAShadowedPanicDoesNotTerminateABody(t *testing.T) {
+	dir := pkg(t, map[string]string{"p.go": shortFixture + `
+func (t *T) Close() {
+	panic := func(string) {}
+	if t.closed {
+		return
+	}
+	panic("gone")
+}
+`})
+	code, out, _ := drive(t, "--asks", "(*T).ready", "--in", "(*T).Close", dir)
+	if code != 1 {
+		t.Fatalf("code %d, want 1\nout: %s", code, out)
+	}
+	if !strings.Contains(out, "2 of 2 exit(s)") {
+		t.Errorf("the closing brace is still an exit; it said %q", out)
+	}
+}
+
+// ⛔⛔ WAIVING EVERY EXIT IS NOT A VERDICT. It used to exit 0 with a tail line
+// that contradicted itself: "every one of the 2 exit(s) asks … except 2 waived".
+func TestWaivingEveryExitIsRefused(t *testing.T) {
+	dir := pkg(t, map[string]string{"p.go": shortFixture + `
+func (t *T) Offer() (int, error) {
+	if t.closed {
+		return 1, nil
+	}
+	return 2, nil
+}
+`})
+	code, out, errOut := drive(t, "--asks", "(*T).ready", "--in", "(*T).Offer",
+		"--allow", "p.go:20=one", "--allow", "p.go:22=the other", dir)
+	if code != 2 {
+		t.Fatalf("code %d, want 2\nout: %s\nerr: %s", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "nothing was judged") {
+		t.Errorf("it should say nothing was judged; it said %q", errOut)
+	}
+	if strings.Contains(out, "every one of the") {
+		t.Errorf("the self-contradicting tail must be gone: %q", out)
+	}
+}
+
+// ⛔ --expect 0 is a caller saying "I mean zero", and the answer must not be a
+// pass asserted about nothing.
+func TestExpectZeroDoesNotClaimEveryExitAsks(t *testing.T) {
+	dir := pkg(t, map[string]string{"p.go": shortFixture + `
+func (t *T) Spin() {
+	for {
+		_ = t.ready()
+	}
+}
+`})
+	code, out, _ := drive(t, "--asks", "(*T).ready", "--in", "(*T).Spin", "--expect", "0", dir)
+	if code != 0 {
+		t.Fatalf("code %d, want 0\nout: %s", code, out)
+	}
+	if strings.Contains(out, "every one of the 0 exit(s)") {
+		t.Errorf("a pass about zero exits must not be phrased as one: %q", out)
+	}
+	if !strings.Contains(out, "no exit point in (*T).Spin") {
+		t.Errorf("it should say there was none; it said %q", out)
+	}
+}
+
 // ⛔ A malformed --asks gets its OWN refusal, not the absent-name one. Both exit
 // 2, which is why a mutation that deleted this check survived until the message
 // was asserted: an exit status alone cannot tell a caller which mistake they
@@ -668,17 +890,23 @@ func (p *Peer) Offer() int {
 // crash, so deleting it crashes, and a panic red says the code broke without
 // saying what the guard was for.
 func TestTheEdgesOfTheTerminationJudgement(t *testing.T) {
-	if endsTerminating(nil) {
+	if endsTerminating(nil, true) {
 		t.Error("an empty body cannot terminate: there is no statement to do it")
 	}
 	// An expression statement that is not a call — a receive — is not a panic
 	// call, so it does not terminate.
 	recv := &ast.ExprStmt{X: &ast.UnaryExpr{Op: token.ARROW, X: ast.NewIdent("ch")}}
-	if terminating(recv) {
+	if terminating(recv, true) {
 		t.Error("<-ch does not terminate a body")
 	}
-	if !terminating(&ast.ExprStmt{X: &ast.CallExpr{Fun: ast.NewIdent("panic")}}) {
+	panicCall := &ast.ExprStmt{X: &ast.CallExpr{Fun: ast.NewIdent("panic")}}
+	if !terminating(panicCall, true) {
 		t.Error("panic() does terminate a body")
+	}
+	// ⛔ And the same statement does NOT terminate when the body gave `panic` a
+	// local meaning: believing it does loses the closing brace as an exit.
+	if terminating(panicCall, false) {
+		t.Error("a shadowed panic is an ordinary call and terminates nothing")
 	}
 	// ⛔ asksIn is handed a nil node on nearly every statement it reads, and it
 	// no longer guards that itself: the check inside the walk answers it. If

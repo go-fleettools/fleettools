@@ -25,12 +25,16 @@
 // that cries wolf is a guard somebody turns off — this fleet has that measured
 // twice over.
 //
-// Exit status, following assetpath's and priorart's:
+// Exit status, following assetpath's and priorart's, and the same for both
+// rules:
 //
-//	0  every call to --wraps is inside --via
-//	1  at least one call bypasses it; each is printed with its position
-//	2  REFUSED TO DECIDE: the directory would not parse, or --wraps or --via
-//	   names nothing in it
+//	0  every call to --wraps is inside --via; or every exit of --in asked one
+//	   of --asks
+//	1  at least one call bypasses it, or one exit never asked; each is printed
+//	   with its position
+//	2  REFUSED TO DECIDE: the directory would not parse; a declared name is
+//	   not in it; nothing was examined; every site is waived; or, under
+//	   --asks/--in, the examined function contains a goto
 //
 // ⛔ The 2 is the whole point, as it is for assetpath. If --wraps resolves to no
 // function, "0 direct calls" is true and worthless: the tool measured a name it
@@ -92,19 +96,32 @@ recopying the contract. An exit is a return, or the closing brace of a function
 with no results whose body does not terminate.
 
 ⛔ The second rule exists because an early return does not read as an exit, and
-a return is not a CALL: the first rule cannot see it. Dominance is syntactic —
-a call counts for what follows it in the same statement list, and for the body
-of a statement whose header evaluates it — and a defer, a go statement and the
-inside of a function literal are deliberately NOT credited, because crediting
-an ask that runs later would make the check err toward passing.
+a return is not a CALL: the first rule cannot see it.
+
+Dominance is syntactic, and what counts is what is EVALUATED, never what is
+merely written nearby. A call counts for the statements after it in the same
+list, and for a body under a header that evaluates it unconditionally: an if's
+or a switch's init and tag, a for's init and condition, a range expression, a
+clause's FIRST case expression. It does NOT count on the right of && or ||, in
+a case expression after the first, in a clause a fallthrough can enter, or
+inside a defer, a go statement or a function literal — each of those is a way
+to reach the exit without asking, and crediting it would make the check err
+toward passing. A goto in the examined function is refused outright (2): source
+order is all this pass has, and a jump makes it a lie.
+
+⛔ --allow names file.go:LINE under this rule, NOT a function: every exit of
+--in is in the same function, so a function-named waiver would waive them all
+at once. Waiving every exit is refused as well, because then nothing was
+judged.
 
 --via accepts a plain function name (helper) or a method, written as Go writes
 it in a doc comment: (*Peer).awaited or (Peer).awaited.
 
 A waiver names a site and says why, and the reason is PRINTED with the result.
-Name the FUNCTION, not the line: a line number is the most brittle handle there
-is, and a CI file that carries one stops naming the site the day somebody adds
-an import.
+Under --wraps/--via, name the FUNCTION rather than the line: a line number is
+the most brittle handle there is, and a CI file that carries one stops naming
+the site the day somebody adds an import. Under --asks/--in it is the other way
+round, and the function form is REFUSED — see that rule above.
 
     --allow '(*Peer).AcceptAnswer=no call after it can be blocked'
     --allow 'peer_js.go:180=…'                 # also accepted, and worse
@@ -149,7 +166,7 @@ func RootCmd() *cobra.Command {
 	c.Flags().BoolVar(&tests, "tests", false,
 		"scan _test.go files too; by default they are skipped and the count is printed")
 	c.Flags().IntVar(&expect, "expect", -1,
-		"fail unless EXACTLY this many calls were examined: a guard against a rule that matched nothing")
+		"fail unless EXACTLY this many sites were examined — calls under --wraps/--via, exits under --asks/--in: a guard against a rule that matched nothing")
 	return c
 }
 

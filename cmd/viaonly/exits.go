@@ -131,6 +131,22 @@ func checkExits(out, errOut io.Writer, fset *token.FileSet, files []*ast.File, o
 			o.in, len(decls))
 	}
 
+	// ⛔⛔ A goto MAKES SOURCE ORDER A LIE, and this pass has nothing but source
+	// order. Measured by review: `if t.fast { goto done }` … `if !t.ready() {
+	// return err }` … `done: return nil` credited that last return, because the
+	// ask sits above it in the text — and the jump reaches it without asking.
+	// Refusing to decide is the only honest answer: following a jump is a
+	// control-flow analysis, which this command does not do, and crediting the
+	// exit anyway is the one direction a gate must not take.
+	for _, fd := range decls {
+		if pos, ok := firstGoto(fd.Body); ok {
+			p := fset.Position(pos)
+			fmt.Fprintf(errOut, "viaonly: %s contains a goto at %s:%d. This pass reads a body in SOURCE ORDER, and a jump can reach an exit without evaluating the call that asks; refusing to decide rather than crediting it\n",
+				o.in, filepath.Base(p.Filename), p.Line)
+			return 2
+		}
+	}
+
 	var found []exit
 	for _, fd := range decls {
 		found = append(found, exitsOf(fset, fd, o.in, names)...)
@@ -191,6 +207,20 @@ func checkExits(out, errOut io.Writer, fset *token.FileSet, files []*ast.File, o
 	}
 	if len(stale) > 0 {
 		return 2
+	}
+	// ⛔⛔ WAIVING EVERY EXIT IS NOT A VERDICT. It used to exit 0 saying "every
+	// one of the 2 exit(s) asks … except 2 waived above" — a tail line that
+	// contradicts itself, which is the exact contradiction the call-site rule
+	// already carries a fix for. Nothing was judged, so the status is 2.
+	if len(found) > 0 && waivedCount == len(found) {
+		fmt.Fprintf(errOut, "viaonly: all %d exit(s) of %s are waived, so nothing was judged; refusing to report a function clean against a rule every site is exempt from\n", len(found), o.in)
+		return 2
+	}
+	// ⛔ --expect 0 is a caller saying "I mean zero", and it used to answer
+	// "every one of the 0 exit(s) asks" — a pass asserted about nothing.
+	if len(found) == 0 {
+		fmt.Fprintf(out, "no exit point in %s, and --expect 0 says that is meant\n", o.in)
+		return 0
 	}
 	if waivedCount > 0 {
 		fmt.Fprintf(out, "every one of the %d exit(s) of %s asks %s, except %d waived above\n", len(found), o.in, asksName, waivedCount)
@@ -266,15 +296,79 @@ func exitsOf(fset *token.FileSet, fd *ast.FuncDecl, in string, asks map[string]b
 		out = append(out, exit{file: filepath.Base(p.Filename), line: p.Line, in: in, asked: asked, implicit: implicit})
 	}
 	asked := walkStmts(fd.Body.List, false, asks, add)
+	// ⛔ A body that DEFINES the name `panic` has no builtin panic in it, so a
+	// call spelled that way does not terminate anything. Believing it does
+	// LOSES the closing brace as an exit, which is the silent direction.
+	// Measured: `panic := func(string){}` made a two-exit function report one.
+	panicOK := !defines(fd.Body, "panic")
 	// ⛔ THE CLOSING BRACE IS AN EXIT TOO, for a function with no results. Without
 	// this, a void function whose last statement is not a `return` had its final
 	// exit — the common one — counted nowhere, and a rule can be broken at a hole
 	// a pass does not look through. A function WITH results cannot fall off its
 	// end; the compiler refuses it, so there is nothing to add.
-	if !hasResults(fd) && !endsTerminating(fd.Body.List) {
+	if !hasResults(fd) && !endsTerminating(fd.Body.List, panicOK) {
 		add(fd.Body.Rbrace, asked, true)
 	}
 	return out
+}
+
+// firstGoto returns the position of the first goto in a body, outside function
+// literals — a jump inside a literal belongs to that literal.
+func firstGoto(n ast.Node) (token.Pos, bool) {
+	var at token.Pos
+	found := false
+	ast.Inspect(n, func(x ast.Node) bool {
+		if found || x == nil {
+			return false
+		}
+		switch v := x.(type) {
+		case *ast.FuncLit:
+			return false
+		case *ast.BranchStmt:
+			if v.Tok == token.GOTO {
+				at, found = v.Pos(), true
+				return false
+			}
+		}
+		return true
+	})
+	return at, found
+}
+
+// defines reports whether a body gives the name a local meaning, which is how
+// a builtin stops being the builtin.
+func defines(n ast.Node, name string) bool {
+	found := false
+	ast.Inspect(n, func(x ast.Node) bool {
+		if found || x == nil {
+			return false
+		}
+		var names []*ast.Ident
+		switch v := x.(type) {
+		case *ast.AssignStmt:
+			if v.Tok == token.DEFINE {
+				for _, lhs := range v.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						names = append(names, id)
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			names = v.Names
+		case *ast.Field:
+			names = v.Names
+		case *ast.FuncDecl:
+			names = []*ast.Ident{v.Name}
+		}
+		for _, id := range names {
+			if id.Name == name {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 func hasResults(fd *ast.FuncDecl) bool {
@@ -360,21 +454,46 @@ func walkStmt(s ast.Stmt, asked bool, asks map[string]bool, add func(token.Pos, 
 	return asked || asksIn(asks, s)
 }
 
+// walkCases walks the clauses of a switch or a select.
+//
+// ⛔⛔ TWO MORE WAYS A CLAUSE'S OWN HEADER IS NOT EVALUATED, both measured by
+// the same review that found the short-circuit:
+//
+//   - A case list is evaluated IN ORDER, up to the first match. So when a
+//     clause's body runs, the only expression certainly evaluated is the
+//     FIRST: `case t.n == 1, t.ready():` runs its body on the first match
+//     without ever calling ready().
+//   - A clause entered by FALLTHROUGH evaluated none of its own expressions.
+//     `case t.fast: fallthrough` then `case t.ready(): return nil` credited
+//     that return, and the fallthrough path never asks.
 func walkCases(list []ast.Stmt, asked bool, asks map[string]bool, add func(token.Pos, bool, bool)) {
+	fellThrough := false
 	for _, c := range list {
 		switch cc := c.(type) {
 		case *ast.CaseClause:
 			inner := asked
-			for _, e := range cc.List {
-				if asksIn(asks, e) {
-					inner = true
-				}
+			// Only the first expression, and only when this clause cannot have
+			// been entered from the one above it.
+			if !fellThrough && len(cc.List) > 0 && asksIn(asks, cc.List[0]) {
+				inner = true
 			}
 			walkStmts(cc.Body, inner, asks, add)
+			fellThrough = endsWithFallthrough(cc.Body)
 		case *ast.CommClause:
+			// A select's chosen clause DID evaluate its own communication, and
+			// select has no fallthrough. What the comment at the SelectStmt
+			// case refuses is crediting it for what follows the select.
 			walkStmts(cc.Body, asked || asksIn(asks, cc.Comm), asks, add)
 		}
 	}
+}
+
+func endsWithFallthrough(body []ast.Stmt) bool {
+	if len(body) == 0 {
+		return false
+	}
+	b, ok := body[len(body)-1].(*ast.BranchStmt)
+	return ok && b.Tok == token.FALLTHROUGH
 }
 
 // endsTerminating reports whether a body cannot fall off its end, following the
@@ -387,14 +506,14 @@ func walkCases(list []ast.Stmt, asked bool, asks map[string]bool, add func(token
 // when it does adds a phantom exit at the closing brace, which is a visible
 // false positive a reader can answer. So every case below has to be certain,
 // and anything else is "does not terminate".
-func endsTerminating(list []ast.Stmt) bool {
+func endsTerminating(list []ast.Stmt, panicOK bool) bool {
 	if len(list) == 0 {
 		return false
 	}
-	return terminating(list[len(list)-1])
+	return terminating(list[len(list)-1], panicOK)
 }
 
-func terminating(s ast.Stmt) bool {
+func terminating(s ast.Stmt, panicOK bool) bool {
 	switch st := s.(type) {
 	case *ast.ReturnStmt:
 		return true
@@ -406,23 +525,23 @@ func terminating(s ast.Stmt) bool {
 			return false
 		}
 		id, ok := call.Fun.(*ast.Ident)
-		return ok && id.Name == "panic"
+		return ok && id.Name == "panic" && panicOK
 	case *ast.BlockStmt:
-		return endsTerminating(st.List)
+		return endsTerminating(st.List, panicOK)
 	case *ast.IfStmt:
 		// Without an else, the body may be skipped.
-		return st.Else != nil && endsTerminating(st.Body.List) && terminating(st.Else)
+		return st.Else != nil && endsTerminating(st.Body.List, panicOK) && terminating(st.Else, panicOK)
 	case *ast.ForStmt:
 		// `for {}` with no break: the specification's own case.
 		return st.Cond == nil && !hasBreak(st.Body)
 	case *ast.LabeledStmt:
-		return terminating(st.Stmt)
+		return terminating(st.Stmt, panicOK)
 	case *ast.SwitchStmt:
-		return casesTerminate(st.Body, true)
+		return casesTerminate(st.Body, true, panicOK)
 	case *ast.TypeSwitchStmt:
-		return casesTerminate(st.Body, true)
+		return casesTerminate(st.Body, true, panicOK)
 	case *ast.SelectStmt:
-		return casesTerminate(st.Body, false)
+		return casesTerminate(st.Body, false, panicOK)
 	}
 	return false
 }
@@ -431,7 +550,7 @@ func terminating(s ast.Stmt) bool {
 // terminating statement, with no break out of it. A switch also needs a
 // default, or it may match nothing; a select always blocks until one clause
 // runs, so it does not.
-func casesTerminate(body *ast.BlockStmt, needDefault bool) bool {
+func casesTerminate(body *ast.BlockStmt, needDefault, panicOK bool) bool {
 	if hasBreak(body) {
 		return false
 	}
@@ -442,14 +561,14 @@ func casesTerminate(body *ast.BlockStmt, needDefault bool) bool {
 			if cc.List == nil {
 				seenDefault = true
 			}
-			if !endsTerminating(cc.Body) {
+			if !endsTerminating(cc.Body, panicOK) {
 				return false
 			}
 		case *ast.CommClause:
 			if cc.Comm == nil {
 				seenDefault = true
 			}
-			if !endsTerminating(cc.Body) {
+			if !endsTerminating(cc.Body, panicOK) {
 				return false
 			}
 		default:
@@ -504,31 +623,52 @@ func hasBreak(n ast.Node) bool {
 // load-bearing is worse than one that is, so the outer one is gone.
 func asksIn(asks map[string]bool, n ast.Node) bool {
 	found := false
-	ast.Inspect(n, func(x ast.Node) bool {
-		// x == nil is the nil node itself AND the end of every node's visit;
-		// `found` only short-circuits the rest of the walk, and deleting it
-		// cannot change the answer.
-		if found || x == nil {
-			return false
-		}
-		switch v := x.(type) {
-		case *ast.FuncLit, *ast.DeferStmt, *ast.GoStmt:
-			return false // runs later, or never: see walkStmt
-		case *ast.CallExpr:
-			switch fun := v.Fun.(type) {
-			case *ast.Ident:
-				if asks[fun.Name] {
-					found = true
+	var walk func(ast.Node)
+	walk = func(root ast.Node) {
+		ast.Inspect(root, func(x ast.Node) bool {
+			// x == nil is the nil node itself AND the end of every node's visit;
+			// `found` only short-circuits the rest of the walk, and deleting it
+			// cannot change the answer.
+			if found || x == nil {
+				return false
+			}
+			switch v := x.(type) {
+			case *ast.FuncLit, *ast.DeferStmt, *ast.GoStmt:
+				return false // runs later, or never: see walkStmt
+			case *ast.BinaryExpr:
+				// ⛔⛔ THE SECOND TIME THIS CREDITED A MENTION AS AN EVALUATION,
+				// and the first was recurrence 5 of the lesson this command
+				// exists for. `if t.closed || !t.ready() { return err }` reached
+				// here as one Cond containing a call, so the return was credited
+				// — while a closed peer never evaluates ready() at all. That is
+				// the incident's own shape (a fast path at the top of a
+				// function) surviving inside the gate written against it, found
+				// by an independent review that RAN the case rather than read
+				// the walk.
+				//
+				// Only the LEFT operand of && and || is always evaluated. The
+				// right is the whole point of those operators.
+				if v.Op == token.LAND || v.Op == token.LOR {
+					walk(v.X)
 					return false
 				}
-			case *ast.SelectorExpr:
-				if asks[fun.Sel.Name] {
-					found = true
-					return false
+			case *ast.CallExpr:
+				switch fun := v.Fun.(type) {
+				case *ast.Ident:
+					if asks[fun.Name] {
+						found = true
+						return false
+					}
+				case *ast.SelectorExpr:
+					if asks[fun.Sel.Name] {
+						found = true
+						return false
+					}
 				}
 			}
-		}
-		return true
-	})
+			return true
+		})
+	}
+	walk(n)
 	return found
 }
