@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
+	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
 )
 
@@ -98,4 +99,7 @@ func RootCmd() *cobra.Command {
 	return c
 }
 
-func main() { cli.Run(RootCmd()) }
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	cli.Run(RootCmd())
+}

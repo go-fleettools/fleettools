@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
+	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
 )
 
@@ -334,4 +335,7 @@ func record(p string, r result) error {
 	return nil
 }
 
-func main() { cli.Run(RootCmd()) }
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	cli.Run(RootCmd())
+}
