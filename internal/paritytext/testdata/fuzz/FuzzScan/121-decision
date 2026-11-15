@@ -1,0 +1,2 @@
+go test fuzz v1
+string("## Decision (maintainer, 2026-11-11)\n\nBit identity with the pure-Go reference is not a goal of go-fft. It was a step: while the SIMD kernels were being ported, it served as an exact equality oracle.\n\n- FFTW and scipy.fft (pocketfft) are not bit-identical across machines, plans or builds either.\n- The remaining gaps to FFTW are all behind bit identity:\n  - Zen 4 complex 256 at 1.26x (instruction count);\n\n2. **Bit-exact mode as an option.** The relative RMS error stays at or below `c·ε·log2(n)`.\n")

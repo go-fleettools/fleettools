@@ -288,6 +288,12 @@ func render(l landing, org string) (index, terminal string) {
 		w(`<link rel="icon" type="image/svg+xml" href="/favicon.svg">`, "\n")
 	}
 	w(`{{ partial "styles.html" . }}`, "\n")
+	for _, c := range l.CTAs {
+		if ctaKind(c) == "try" {
+			w(`{{ partial "btn-try-style.html" . }}`, "\n")
+			break
+		}
+	}
 	if css := legacyCSS(l.Style); css != "" {
 		w("{{/* The template's own rules for what <main> holds, kept for it alone (class legacy),\n     its colours read from the kit's tokens. Written by landingmigrate. */}}\n<style>\n", css, "</style>\n")
 	}
@@ -309,18 +315,11 @@ func render(l landing, org string) (index, terminal string) {
     <div>
       <h1 class="head">`, renameIcons(l.H1), "</h1>\n")
 	if l.Tagline != "" {
-		w(`      <p class="sub">`, renameIcons(l.Tagline), "</p>\n")
+		w(`      <p class="sub">`, wrapTagline(renameIcons(l.Tagline)), "</p>\n")
 	}
 	if len(l.CTAs) > 0 {
-		w(`      <div class="cta">`, "\n")
-		for i, c := range l.CTAs {
-			cls := "btn btn-ghost"
-			if i == 0 {
-				cls = "btn btn-primary"
-			}
-			w(`        <a class="`, cls, `" href="`, c.Href, `">`, renameIcons(c.Inner), "</a>\n")
-		}
-		w("      </div>\n")
+		// the kit renders the row, from [[params.cta]] in hugo.toml (ctaToml)
+		w("      {{/* [[params.cta]] in hugo.toml: the kit renders the row */}}\n      {{ partial \"cta.html\" . }}\n")
 	}
 	switch {
 	case l.PillsRaw != "":
@@ -353,6 +352,142 @@ func render(l landing, org string) (index, terminal string) {
 	}
 	w("</body>\n</html>\n")
 	return b.String(), terminal
+}
+
+var pureGo = regexp.MustCompile(`(?i)\bpure[- ]go\b`)
+
+// wrapTagline makes the hero's sub-text say the strip's values only without
+// the strip: `landingkit check` fails a hero sub-text that repeats "Pure Go",
+// CGO_ENABLED=0 or the licence. "pure Go" becomes plain "Go" while the strip
+// shows ("reStructuredText in pure Go" -> "reStructuredText in Go"); the other
+// mantra words are hidden outright. A tagline with a Hugo action is left as
+// written. Done by hand on two of the first eleven batch-B landings.
+func wrapTagline(t string) string {
+	if strings.Contains(t, "{{") {
+		return t
+	}
+	t = pureGo.ReplaceAllStringFunc(t, func(m string) string {
+		return `{{ if partial "mantra-on.html" . }}Go{{ else }}` + m + `{{ end }}`
+	})
+	// the rest of the mantra words, outside what is already wrapped
+	parts := strings.Split(t, "{{ end }}")
+	for i, p := range parts {
+		if k := strings.Index(p, "{{ else }}"); k >= 0 {
+			continue
+		}
+		parts[i] = mantraRest.ReplaceAllStringFunc(p, hide)
+	}
+	return strings.Join(parts, "{{ end }}")
+}
+
+// mantraRest is the strip's values other than "pure Go".
+var mantraRest = regexp.MustCompile(`(?i)CGO_ENABLED\s*=\s*0|\bCGO\s*=\s*0|\bcgo[- ]free\b|\bno[- ]cgo\b|\bzero[- ]cgo\b|\bwithout[- ]cgo\b|BSD[- ]?3(?:[- ]clause)?`)
+
+var (
+	ctaExprRe = regexp.MustCompile(`(?s)\{\{.*?\}\}`)
+	ctaTagRe  = regexp.MustCompile(`(?s)<[^>]*>`)
+)
+
+// ctaKind is the kit's kind of a button: the first is the documentation (the
+// primary), a link to a playground is the red try button, a link to GitHub is
+// the GitHub one, any other is a plain link.
+func ctaKind(c cta) string {
+	switch {
+	case strings.Contains(c.Href, "playground"):
+		return "try"
+	case strings.HasPrefix(c.Href, "https://github.com/"):
+		return "github"
+	}
+	return "link"
+}
+
+var (
+	siteTitleExpr = regexp.MustCompile(`\{\{\s*\$?\.Site\.Title\s*\}\}`)
+	siteParamExpr = regexp.MustCompile(`\{\{\s*\$?\.Site\.Params\.(\w+)\s*\}\}`)
+	labelParamRe  = regexp.MustCompile(`^(\w+)_label$`)
+)
+
+// tomlString is the string value of a top-level or [params] key of a hugo.toml.
+func tomlString(conf, key string) (string, bool) {
+	m := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*"((?:[^"\\]|\\.)*)"`).FindStringSubmatch(conf)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// resolveCTAs writes a button's expressions as the literal values hugo.toml
+// holds, when the expression only READS one: `{{ .Site.Title }}` (the title),
+// `{{ $.Site.Params.x }}` (a param), and the bare `{{ . }}` of a href whose label
+// is `{{ $.Site.Params.NAME_label }}`, which is the param NAME_url (the layout of
+// go-attest, go-keyring, go-mswin, go-scss, go-versions and nano-container-linux:
+// the `with` that gave `.` its meaning was lost in an earlier migration, and the
+// built page links to the runner's content file instead). A value hugo.toml does
+// not hold leaves the expression, and the caller refuses.
+func resolveCTAs(ctas []cta, conf string) []cta {
+	out := make([]cta, 0, len(ctas))
+	for _, c := range ctas {
+		href, inner := c.Href, c.Inner
+		// a button whose label is a param hugo.toml does not set renders with no
+		// words (go-attest: secondary_label is not set), and its href `{{ . }}`
+		// with the path of the runner's content file: it is dropped
+		if p := labelParamName(inner); p != "" {
+			if _, ok := tomlString(conf, p); !ok {
+				continue
+			}
+		}
+		if strings.TrimSpace(href) == "{{ . }}" {
+			if m := labelParamRe.FindStringSubmatch(labelParamName(inner)); m != nil {
+				if v, ok := tomlString(conf, m[1]+"_url"); ok {
+					href = v
+				}
+			}
+		}
+		if t, ok := tomlString(conf, "title"); ok {
+			href = siteTitleExpr.ReplaceAllString(href, t)
+			inner = siteTitleExpr.ReplaceAllString(inner, t)
+		}
+		sub := func(s string) string {
+			return siteParamExpr.ReplaceAllStringFunc(s, func(m string) string {
+				if v, ok := tomlString(conf, siteParamExpr.FindStringSubmatch(m)[1]); ok {
+					return v
+				}
+				return m
+			})
+		}
+		out = append(out, cta{Href: sub(href), Inner: sub(inner)})
+	}
+	return out
+}
+
+// labelParamName is the param a button's label reads, "" when it reads none.
+func labelParamName(inner string) string {
+	if m := siteParamExpr.FindStringSubmatch(inner); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// ctaLabel is a button's words without its icon partials and tags; empty when
+// the words are a Hugo expression.
+func ctaLabel(c cta) string {
+	return strings.TrimSpace(ctaTagRe.ReplaceAllString(ctaExprRe.ReplaceAllString(c.Inner, ""), ""))
+}
+
+// ctaToml writes the buttons as [[params.cta]]: the first button, whatever it
+// says, is the primary ("docs"), and the kit puts the order right.
+func ctaToml(ctas []cta) string {
+	var b strings.Builder
+	b.WriteString("# The hero's buttons, rendered by landingkit's cta.html in the kit's order.\n")
+	for i, c := range ctas {
+		kind := ctaKind(c)
+		if i == 0 && kind != "try" {
+			kind = "docs"
+		}
+		label := ctaLabel(c)
+		fmt.Fprintf(&b, "[[params.cta]]\n  kind  = %q\n  href  = %q\n  label = %q\n", kind, c.Href, label)
+	}
+	return b.String()
 }
 
 // legacyCSS keeps the template's rules for what its <main> holds, scoped to

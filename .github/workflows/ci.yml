@@ -93,6 +93,14 @@ jobs:
       - name: fuzz the copycheck number normaliser
         run: go test -run '^$' -fuzz FuzzCanon -fuzztime 15s ./internal/copycheck
 
+      # paritycheck's text scanner reads whatever an issue or a pull request
+      # says, and it is the gate behind ghissue and ghpr: any bytes must give
+      # findings with a real line or none, never a panic, and a waiver's stamp
+      # must never change what is found. The corpus is committed under
+      # internal/paritytext/testdata/fuzz.
+      - name: fuzz the paritycheck text scanner
+        run: go test -run '^$' -fuzz FuzzScan -fuzztime 30s ./internal/paritytext
+
       # The planted xz bomb (1.5 GiB declared over a few bytes) runs as a
       # compiled binary under a virtual memory limit and GOMEMLIMIT, so a
       # regression fails by itself instead of allocating gigabytes of the runner.

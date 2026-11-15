@@ -261,7 +261,30 @@ func Canon(text string) (canon string, ok bool) {
 	if v == math.Trunc(v) && math.Abs(v) < 1<<53 {
 		return strconv.FormatInt(int64(v), 10), true
 	}
-	return strconv.FormatFloat(v, 'g', 7, 64), true
+	// ⛔⛔ THE INTEGRAL QUESTION IS ASKED AGAIN OF THE **ROUNDED** VALUE, because
+	// rounding is what can make it integral. Found by FuzzCanon, 2026-11-12:
+	//
+	//	Canon("10000000.1") -> "1e+07" -> "10000000"
+	//
+	// 10000000.1 is not integral, so it took this branch and 7 significant
+	// digits made it 1e+07 — which IS integral, so a second pass took the
+	// branch above and answered differently. Canon disagreed with itself about
+	// its own output, and this function's whole job is that the same VALUE gets
+	// the same spelling.
+	//
+	// It is asked SECOND and not instead: deciding on the rounded value from
+	// the start would round an integral float too, and 9007199254740991 would
+	// canonicalise to 9007199000000000 — losing exactly the "a table written
+	// with ints in C and floats in Go still matches" property above.
+	rounded := strconv.FormatFloat(v, 'g', 7, 64)
+	r, err := strconv.ParseFloat(rounded, 64)
+	if err != nil {
+		return "", false
+	}
+	if r == math.Trunc(r) && math.Abs(r) < 1<<53 {
+		return strconv.FormatInt(int64(r), 10), true
+	}
+	return rounded, true
 }
 
 // err2range reports whether t is a well-formed integer literal that merely does

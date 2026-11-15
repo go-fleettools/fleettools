@@ -29,6 +29,14 @@ var mantraWords = regexp.MustCompile(`(?i)BSD[- ]?3(?:[- ]clause)?|\bBSD\b|CGO_E
 // filler is what a sentence made only of the mantra is built with.
 var filler = regexp.MustCompile(`(?i)\b(is|are|it|its|it's|everything|all|and|the|a|an|under|with|in|of|written|code|whole|stack|entirely|fully|everywhere|throughout|disabled|enabled|zero|no|only|by|default|100|%|itself)\b`)
 
+// mentionsStrip: the licence, cgo or "pure Go". Sentences, pills and badges
+// still start from `mention` (a bare "pure Go" is the fleet's subject there);
+// a FOOTER segment that is only "Pure Go" repeats the strip, which
+// `landingkit check` refuses (go-ansible's footer).
+func mentionsStrip(t string) bool { return mentionsStripRe.MatchString(t) }
+
+var mentionsStripRe = regexp.MustCompile(`(?i)\bBSD\b|\bBSD[- ]?3|\bcgo\b|CGO_ENABLED|\bCGO\s*=|\bpure[- ]go\b`)
+
 // repeat says whether text (HTML allowed) says nothing but the mantra.
 func repeat(text string) bool {
 	// a fragment with a Hugo action renders content this cannot read (a
@@ -36,8 +44,21 @@ func repeat(text string) bool {
 	if strings.Contains(text, "{{") {
 		return false
 	}
+	return repeatWith(text, mention)
+}
+
+// repeatFooter is repeat for a footer segment, where a bare "pure Go" repeats
+// the strip too.
+func repeatFooter(text string) bool {
+	return repeatWith(text, mentionsStripRe)
+}
+
+func repeatWith(text string, gate *regexp.Regexp) bool {
+	if strings.Contains(text, "{{") {
+		return false
+	}
 	t := plain(text)
-	if !mention.MatchString(t) {
+	if !gate.MatchString(t) {
 		return false
 	}
 	t = mantraWords.ReplaceAllString(t, " ")
@@ -90,6 +111,9 @@ func repeats(body string) (string, []fragment) {
 	note := func(where, h string, hidden bool) {
 		frags = append(frags, fragment{Where: where, HTML: h, Text: plain(h), Hidden: hidden})
 	}
+	// the architectures a card lists go first: the sentence pass below then sees
+	// them already wrapped, and a strip wrap next to them splits cleanly
+	body = hideArchCards(body, note)
 	// pills and the hero's trust line: one element is one fragment
 	body = eachElement(body, `<span class="pill"`, "span", func(whole string) string {
 		if !mention.MatchString(plain(whole)) {
@@ -119,7 +143,143 @@ func repeats(body string) (string, []fragment) {
 			return sentences(whole, tag, note)
 		})
 	}
+	// feature cards whose subject is the strip's own: "Pure Go, CGO=0",
+	// "BSD-3-Clause". Hidden whole while the strip shows (`landingkit check`
+	// fails a card that repeats it). A card that is about something more is kept.
+	body = hideCards(body, note)
 	return body, frags
+}
+
+// goarchOff is the condition under which the strip's architectures line is
+// NOT shown: what a card says about the tested architectures shows only then.
+const goarchOff = `{{ if not (and $.Site.Params.mantra $.Site.Params.mantra.goarch) }}`
+
+func hideGoarch(s string) string { return goarchOff + s + end }
+
+var archWords = []string{"amd64", "arm64", "riscv64", "loong64", "ppc64le", "s390x", "386", "arm"}
+
+// namesArches: a text naming at least two architectures, as whole words (the
+// kit's `check` rule for the strip's "Tested on" line).
+func namesArches(t string) bool {
+	n := 0
+	for _, a := range archWords {
+		if regexp.MustCompile(`(?i)(^|[^a-z0-9])` + a + `($|[^a-z0-9])`).MatchString(t) {
+			n++
+		}
+	}
+	return n >= 2
+}
+
+// hideArchCards: a static feature card that names the tested architectures
+// says the strip's goarch line again (`landingkit check` fails it). Only the
+// sentences that list them go, under the goarch condition, so the rest of what
+// the card says stays. A card whose blurb is data (a Hugo action in the markup,
+// the text living in hugo.toml) cannot be read at this point and is left, for a
+// person; so is a hero sub-text.
+func hideArchCards(body string, note func(string, string, bool)) string {
+	var out strings.Builder
+	i := 0
+	for {
+		j := indexOpen(body, `<div class="card"`, i)
+		if j < 0 {
+			out.WriteString(body[i:])
+			return out.String()
+		}
+		k := closeOf(body, j, "div")
+		if k < 0 {
+			out.WriteString(body[i:])
+			return out.String()
+		}
+		out.WriteString(body[i:j])
+		whole := body[j:k]
+		switch {
+		case !namesArches(plain(whole)) || strings.Contains(whole, goarchOff) || strings.HasSuffix(out.String(), ifOff) || strings.HasSuffix(out.String(), goarchOff):
+			out.WriteString(whole)
+		default:
+			out.WriteString(eachElement(whole, "<p", "p", func(p string) string {
+				return archSentences(p, note)
+			}))
+		}
+		i = k
+	}
+}
+
+// archSentences hides, under the goarch condition, the sentences of a card's
+// paragraph that name at least two architectures.
+func archSentences(p string, note func(string, string, bool)) string {
+	gt := strings.Index(p, ">")
+	inner := p[gt+1 : len(p)-len("</p>")]
+	var b strings.Builder
+	any := false
+	for _, s := range splitSentences(inner) {
+		// an action in the sentence is a wrap done already (the strip's, above)
+		// or a value this cannot read: only a sentence of plain text is judged
+		if namesArches(plain(s)) && !strings.Contains(s, "{{") {
+			any = true
+			lead := s[:len(s)-len(strings.TrimLeft(s, " \t\n"))]
+			t := strings.TrimLeft(s, " \t\n")
+			note("arch sentence", t, true)
+			b.WriteString(lead + hideGoarch(t))
+			continue
+		}
+		b.WriteString(s)
+	}
+	if !any {
+		return p
+	}
+	return p[:gt+1] + b.String() + "</p>"
+}
+
+// hideCards wraps each feature card whose heading is the strip's own subject.
+// A card already wrapped is left alone (a second pass changes nothing); what
+// is inside it was wrapped by the sentence pass above, which is harmless: the
+// outer wrapper hides it all.
+func hideCards(body string, note func(string, string, bool)) string {
+	var out strings.Builder
+	i := 0
+	for {
+		j := indexOpen(body, `<div class="card"`, i)
+		if j < 0 {
+			out.WriteString(body[i:])
+			return out.String()
+		}
+		k := closeOf(body, j, "div")
+		if k < 0 {
+			out.WriteString(body[i:])
+			return out.String()
+		}
+		out.WriteString(body[i:j])
+		whole := body[j:k]
+		m := h3Re.FindStringSubmatch(whole)
+		switch {
+		case m == nil || strings.Contains(m[1], "{{") || !subjectIsTheStrip(plain(m[1])):
+			out.WriteString(whole)
+		case strings.HasSuffix(out.String(), ifOff):
+			out.WriteString(whole) // already hidden
+		default:
+			note("card", whole, true)
+			out.WriteString(hide(whole))
+		}
+		i = k
+	}
+}
+
+var h3Re = regexp.MustCompile(`(?s)<h3[^>]*>(.*?)</h3>`)
+
+// subjectIsTheStrip: a heading that says only what the strip says (pure Go,
+// no cgo, CGO=0, the licence) and nothing else.
+func subjectIsTheStrip(t string) bool {
+	if !mention.MatchString(t) && !pureGo.MatchString(t) {
+		return false
+	}
+	t = mantraWords.ReplaceAllString(t, " ")
+	t = filler.ReplaceAllString(t, " ")
+	for _, r := range t {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r > 0x7f && r != '·' && r != '—' && r != '–' && r != ' ' && r != '’' {
+			return false
+		}
+	}
+	return true
 }
 
 var licenceBadges = regexp.MustCompile(`(?is)(<a\b[^>]*>\s*)?<img\b[^>]*(?:alt="licen[cs]e"|/badge/licen[cs]e)[^>]*>(\s*</a>)?`)
@@ -201,8 +361,8 @@ func footerSegments(whole string, note func(string, string, bool)) string {
 		// split on middle dots that are outside tags and actions
 		idx := middot.FindAllStringIndex(s, -1)
 		if len(idx) == 0 {
-			if mention.MatchString(plain(s)) && strings.TrimSpace(plain(s)) != "" && !strings.Contains(s, "<span") && !strings.Contains(s, "<div") {
-				if repeat(s) {
+			if mentionsStrip(plain(s)) && strings.TrimSpace(plain(s)) != "" && !strings.Contains(s, "<span") && !strings.Contains(s, "<div") {
+				if repeatFooter(s) {
 					note("footer", s, true)
 					return hide(s)
 				}
@@ -220,12 +380,12 @@ func footerSegments(whole string, note func(string, string, bool)) string {
 		segs = append(segs, s[last:])
 		var b strings.Builder
 		for i, seg := range segs {
-			r := mention.MatchString(plain(seg)) && repeat(seg)
+			r := mentionsStrip(plain(seg)) && repeatFooter(seg)
 			// what is hidden is noted as hidden, separator included, so
 			// verify takes out of the page exactly what the page lost
 			switch {
 			case !r:
-				if mention.MatchString(plain(seg)) {
+				if mentionsStrip(plain(seg)) {
 					note("footer", seg, false)
 				}
 				b.WriteString(seg)
@@ -258,7 +418,7 @@ func footerSegments(whole string, note func(string, string, bool)) string {
 		return eachElement(whole, "<span", "span", func(sp string) string {
 			gt := strings.Index(sp, ">")
 			inner := sp[gt+1 : len(sp)-len("</span>")]
-			if strings.TrimSpace(plain(inner)) != "" && repeat(inner) {
+			if strings.TrimSpace(plain(inner)) != "" && repeatFooter(inner) {
 				note("footer", inner, true)
 				return hide(sp)
 			}

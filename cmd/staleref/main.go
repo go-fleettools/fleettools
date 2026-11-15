@@ -22,10 +22,17 @@
 // theirs is a question about the sentence. So this reports, with the line, and
 // a person decides. What it buys is that nobody has to FIND them.
 //
-// Three verdicts, and the third is the honest one:
+// The verdicts, of which UNSURE is the honest one and DOUBLED the one nothing
+// else here can reach:
 //
 //	STALE     names our own old identity — an org path, our own old command,
 //	          our own old environment variable
+//	DEBT      the code reads it AND its name is retired: the CODE is the half
+//	          to change, and --code-var does not excuse it
+//	DOUBLED   the replacement carries its own added prefix twice, because the
+//	          rename ran over its own output: `ZpkgxBin` → `ZzpkgxBin`. It
+//	          COMPILES, and looking for the RETIRED spelling cannot find it,
+//	          because what is there is the CORRECT name with a letter in front
 //	CITATION  names upstream — their org, their domain, their tool as theirs
 //	UNSURE    says the old token with nothing around it to decide by
 //
@@ -46,6 +53,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
@@ -125,7 +134,41 @@ const (
 	citation verdict = "CITATION"
 	unsure   verdict = "UNSURE"
 	debt     verdict = "DEBT"
+	doubled  verdict = "DOUBLED"
 )
+
+// ⛔⛔ DOUBLED IS THE ONE SHAPE A RETIRED-NAME SWEEP STRUCTURALLY CANNOT SEE.
+//
+// Boundaries protect the SOURCE from over-matching. Ordering protects the
+// RESULT from being matched again, and nothing here was watching it.
+//
+// Measured 2026-11-11, renaming zbk's 410 occurrences. The capitalised pair ran
+// first — `Pkgx`→`Zpkgx` — and the lowercase pair second, `pkgx`→`zpkgx`. The
+// new name `Zpkgx` CONTAINS the old one, so the second rule fired inside the
+// first rule's output:
+//
+//	ZpkgxBin  →  ZzpkgxBin
+//
+// ⛔ AND IT COMPILED. `go build ./...` returned 0, because a consistently
+// doubled identifier is a valid identifier. The tests passed. Every sweep in
+// this command reported the file clean — correctly, by its own rule: `Zzpkgx`
+// contains `zpkgx`, which is the CORRECT name, and the retired name `pkgx` is
+// nowhere in it. Looking for what was retired can never find this.
+//
+// What CAN find it is the pair itself. In every rename this fleet has done the
+// replacement is the retired spelling with something in front of it — `z`+`pkgx`,
+// `Z`+`BK_` — so the damage a wrong order does has a fixed shape, `prefix + now`,
+// computable from `was=now` and from nothing else. That is what this looks for.
+//
+// ⛔ The match is deliberately UNANCHORED on both sides. The real occurrence was
+// `ZzpkgxBin`: a right boundary would have missed it, and a left boundary would
+// miss `getZzpkgxBin`. The string it looks for is specific enough that this
+// costs nothing — no English word, path or identifier contains `zzpkgx`.
+//
+// ⛔ A pair whose replacement is NOT its retired spelling with a prefix gets no
+// pattern and is skipped, rather than guessed at. `pkgx`→`zpkgx` qualifies;
+// a rename to an unrelated word has no doubled form to look for, and inventing
+// one would report findings nobody can act on.
 
 // ⛔⛔ DEBT EXISTS BECAUSE --code-var WAS THE INSTRUMENT OF A REPEATED MISTAKE.
 //
@@ -169,6 +212,10 @@ type finding struct {
 	Kind    string
 	Text    string
 	Suggest string
+	// Was is the verdict this finding would have carried had --allow not
+	// exempted its page. An exemption that cannot be counted is one nobody can
+	// review.
+	Was verdict
 }
 
 // retired is one spelling the project no longer uses, with the spelling that
@@ -186,6 +233,11 @@ type retired struct {
 	old, new string
 	bare     *regexp.Regexp
 	envVar   *regexp.Regexp
+	// dbl matches the replacement with its own added prefix in front of it
+	// again — the damage a wrong rename ORDER does. nil when the replacement
+	// is not the retired spelling plus a prefix.
+	dbl     *regexp.Regexp
+	dblText string
 }
 
 // classifier holds the patterns, built from --old/--new/--upstream/--retired so
@@ -307,15 +359,76 @@ func newClassifier(old, new string, upstream, keep, alsoRetired []string, codeVa
 	return c
 }
 
+// doubledArmed reports whether any retired pair has a doubled form to look
+// for. Without one, "0 DOUBLED" means the check did not run.
+func (c *classifier) doubledArmed() bool {
+	for _, r := range c.retired {
+		if r.dbl != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // newRetired compiles the two patterns one retired spelling needs: its
 // environment variables, and the bare word.
 func newRetired(was, now string) retired {
-	return retired{
+	r := retired{
 		old:    was,
 		new:    now,
 		envVar: regexp.MustCompile(`\$?\b` + strings.ToUpper(was) + `_[A-Z0-9_]+\b`),
 		bare:   regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(was) + `\b`),
 	}
+	if d, ok := doubledForm(was, now); ok {
+		r.dblText = d
+		r.dbl = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(d))
+	}
+	return r
+}
+
+// doubledForm returns what `now` looks like when the rename ran in the wrong
+// order: its own added prefix in front of it a second time.
+//
+// It answers only when `now` IS `was` with something in front of it, because
+// that is the only case where the prefix can be read off the pair rather than
+// guessed. `pkgx`→`zpkgx` gives `zzpkgx`; `bk`→`zbk` gives `zzbk`; a rename to
+// an unrelated word gives nothing.
+func doubledForm(was, now string) (string, bool) {
+	if was == "" || now == "" || len(now) <= len(was) {
+		return "", false
+	}
+	if !strings.EqualFold(now[len(now)-len(was):], was) {
+		return "", false
+	}
+	prefix := now[:len(now)-len(was)]
+	if prefix == "" {
+		return "", false
+	}
+	d := prefix + now
+	// ⛔⛔ "NO ENGLISH WORD CONTAINS THE DOUBLED FORM" WAS TRUE OF ONE PAIR AND
+	// WRITTEN AS A GENERAL LAW — the failure recorded in
+	// `one-case-measured-general-law-written`, committed in the commit message
+	// that cited it. `--retired` is CALLER-SUPPLIED, and review measured the
+	// consequence: `--retired a=ca` reports `The yucca is a plant.` as drift.
+	//
+	// A one-letter retired spelling makes a doubled form that is a substring,
+	// not a name. The check arms only from two characters up, which keeps every
+	// pair this fleet has (`bk`→`zbk` gives `zzbk`).
+	//
+	// ⛔ THIS IS A THRESHOLD, NOT A PROOF, and the class survives it: review
+	// measured `--retired ll=all` reporting `for all intents aall the same`.
+	// `--allow` is the escape. Saying so is the point — the previous version
+	// of this comment asserted that no word contains a doubled form, which was
+	// true of one pair and written as a law.
+	//
+	// ⛔ A second condition here, `len(d) < 4`, was DEAD: d is prefix+prefix+was
+	// with a prefix of at least one character, so two characters of `was`
+	// already force four. Review found it. A condition that cannot fire reads
+	// as a guard and is not one.
+	if len(was) < 2 {
+		return "", false
+	}
+	return d, true
 }
 
 // classifyLine returns every finding on one line.
@@ -415,7 +528,285 @@ func (c *classifier) classifyLine(file string, n int, line string) []finding {
 				Text: strings.TrimSpace(trimAround(line, m[0], m[1]))})
 		}
 	}
+
+	// ⛔⛔ THE DOUBLED CHECK IS AN OVERLAY: IT NEITHER CHECKS `free` NOR
+	// `cover`s. Review measured both halves of why, 2026-11-12.
+	//
+	// Running it FIRST and covering its span stole another rule's verdict:
+	// `https://github.com/go-pkgx/zzpkgx` reported 1 DOUBLED and ZERO STALE,
+	// because the covered span failed orgPath's `free` check — so a stale
+	// organisation URL lost both its verdict and its rewrite suggestion. It
+	// also made this function's own "KEEP IS MATCHED FIRST OF ALL" comment
+	// false, and reported a `--keep` address that was deliberately exempt.
+	//
+	// Both facts are true of that line at once: the address is stale AND the
+	// name in it is doubled. They are different repairs, so they are different
+	// findings, and neither may hide the other. Not covering is safe for the
+	// bare-name rule by construction: `Zzpkgx` contains `pkgx` only with a word
+	// character in front of it, which `\b` already refuses.
+	// ⛔⛔ TWO PAIRS CAN MATCH THE SAME SPAN, AND THE FLEET'S REAL CONFIGURATION
+	// DOES. Review measured it: `--retired PkgX=ZPkgX --retired pkgx=zpkgx` —
+	// the very pair set whose ORDER causes this defect — reported
+	// `ZZPkgXBin` twice, suggesting `ZPkgX` and `Zpkgx`, two contradictory
+	// repairs for one occurrence; four findings for two names on a line.
+	//
+	// Removing `cover` is what allowed it (deliberately, so the address around
+	// a doubled name keeps its own verdict), so the de-duplication is local:
+	// one finding per span, first pair wins.
+	for _, h := range c.doubledHits(file, line) {
+		was := line[h.lo:h.hi]
+		out = append(out, finding{File: file, Line: n, Verdict: doubled,
+			Kind: fmt.Sprintf(
+				"%s doubled: the rename ran %s→%s over its own output — it COMPILES, and a search for %q cannot find it",
+				h.r.new, h.r.old, h.r.new, h.r.old),
+			Text:    strings.TrimSpace(trimAround(line, h.lo, h.hi)),
+			Suggest: matchCase(was, h.r.new)})
+	}
 	return out
+}
+
+// a dblHit is one doubled match, with the retired pair that found it.
+type dblHit struct {
+	lo, hi int
+	r      retired
+}
+
+// doubledHits returns the doubled matches to report on one line: at most one
+// per region of the line, with the pair that describes it best.
+//
+// ⛔⛤ DE-DUPLICATING BY EXACT SPAN WAS TOO LITERAL, and review measured it:
+// `--retired pkgx=zpkgx --retired pkg=zpkg` on `ZzpkgxBin` produced TWO
+// findings, `→ Zpkgx` and `→ Zpkg`, because the spans [20,26] and [20,25]
+// differ by one byte and a [2]int key sees two different things. Two
+// contradictory repairs for one name is worse than none: whichever a reader
+// pastes, one of them was wrong.
+//
+// ⛔⛔ AND "FIRST PAIR WINS" PICKED THE WRONG WINNER, in EITHER command-line
+// order. `newClassifier` puts the pair whose `was` equals the organisation's
+// stem at index 0, so `ZZPkgXBin` was always described by `pkgx=zpkgx` —
+// suggesting `Zpkgx` — while the pair that actually matched its capitals,
+// `PkgX=ZPkgX`, was the one suppressed. Reordering the command line could not
+// fix it, which is the tell that the rule was wrong rather than the input.
+//
+// The winner is the pair whose replacement matches the text CASE-SENSITIVELY,
+// because that is the one that knows how the name is really spelled; then the
+// longer match, which is the more specific pair; then the earlier one, so the
+// result does not depend on map order.
+func (c *classifier) doubledHits(file, line string) []dblHit {
+	var hits []dblHit
+	for _, r := range c.retired {
+		if r.dbl == nil {
+			continue
+		}
+		for _, m := range r.dbl.FindAllStringIndex(line, -1) {
+			hits = append(hits, dblHit{lo: m[0], hi: m[1], r: r})
+		}
+	}
+	if len(hits) == 0 {
+		return nil
+	}
+
+	// ⛔ --keep STILL WINS. A kept address is one somebody checked and declared
+	// live — `ghcr.io/go-pkgx/packages` is the measured case — so a
+	// doubled-looking name inside one is part of a real address, not damage.
+	// Reporting it would propose the rewrite that `--keep` exists to prevent,
+	// which is how an empty registry got published.
+	var kept [][2]int
+	if c.keepRE != nil {
+		kept = spansOf(c.keepRE.FindAllStringIndex(line, -1))
+	}
+	markup := markupExts[strings.ToLower(path.Ext(file))]
+
+	keep := hits[:0]
+	for _, h := range hits {
+		if inSpan(kept, h.lo) {
+			continue
+		}
+		if markup && quoted(line, h.lo, h.hi) {
+			continue
+		}
+		keep = append(keep, h)
+	}
+	hits = keep
+
+	sort.SliceStable(hits, func(i, j int) bool {
+		ei := line[hits[i].lo:hits[i].hi] == hits[i].r.dblText
+		ej := line[hits[j].lo:hits[j].hi] == hits[j].r.dblText
+		if ei != ej {
+			return ei
+		}
+		if li, lj := hits[i].hi-hits[i].lo, hits[j].hi-hits[j].lo; li != lj {
+			return li > lj
+		}
+		return hits[i].lo < hits[j].lo
+	})
+
+	var chosen []dblHit
+	for _, h := range hits {
+		if overlapsAny(chosen, h) {
+			continue
+		}
+		chosen = append(chosen, h)
+	}
+	sort.Slice(chosen, func(i, j int) bool { return chosen[i].lo < chosen[j].lo })
+	return chosen
+}
+
+// overlapsAny reports whether h shares any byte with a hit already chosen.
+// Equality is not enough: two pairs can match the same NAME over spans that
+// differ by a byte.
+func overlapsAny(chosen []dblHit, h dblHit) bool {
+	for _, c := range chosen {
+		if h.lo < c.hi && c.lo < h.hi {
+			return true
+		}
+	}
+	return false
+}
+
+// markupExts are the files where a backtick delimits a QUOTATION. Nowhere
+// else.
+//
+// ⛔⛔ A BACKTICK IN GO OPENS A RAW STRING LITERAL, AND THAT IS WHERE THIS
+// BUG LIVES. Skipping code spans in source blinded the check in precisely the
+// files --ext go exists to open — help text, usage blocks, flag defaults,
+// struct tags. Review measured it at 260a93f: three real occurrences, a usage
+// string, a path default and a json tag, all holding `ZzpkgxBin`, reported
+// 0 DOUBLED and exit 0 under the message "nothing stale and nothing unsure".
+//
+// The fix for a false positive had created a blind spot larger than the false
+// positive, in the one file type that matters most. A rule about PROSE must be
+// applied only to prose.
+var markupExts = map[string]bool{
+	".md": true, ".rst": true, ".txt": true, ".html": true,
+}
+
+// quoted reports whether the match at [lo,hi) is immediately delimited by
+// backticks, which is how a name is quoted in markup.
+//
+// ⛔⛔ PAIRING BACKTICKS ACROSS A LINE WAS THE WRONG MODEL, TWICE. The first
+// version paired them by position, and review measured
+//
+//	don`t use ZzpkgxBin yet, see `--help`
+//
+// where the first two paired ACROSS the name and hid it. The second version
+// refused to pair on an odd count — and review measured that too:
+//
+//	don`t use ZzpkgxBin, isn`t it odd
+//
+// has an EVEN count, two apostrophe typos, and pairs across the name again.
+// The parity rule narrowed the hole without closing it, and “ double
+// backticks “ stayed a false positive on top.
+//
+// Adjacency has no such hole, because it asks a question about the name
+// rather than about the line: a quoted identifier has a backtick against each
+// end of it. Nothing in between matters, so nothing in between can fool it.
+// A quoted phrase CONTAINING the name — `ZzpkgxBin [flags]` — is reported,
+// which is the safe direction: a page that quotes the damage in running text
+// is a page about the rename, and that is what --allow is for.
+// ⛔ IT ASKS ABOUT THE WHOLE NAME, NOT ABOUT THE MATCH. The doubled pattern
+// matches `Zzpkgx`, while what is quoted is the identifier `ZzpkgxBin` — so
+// the byte after the match is `B` and never a backtick. The first version of
+// this function tested the match's own edges and therefore fired on nothing;
+// its tests caught it immediately.
+func quoted(line string, lo, hi int) bool {
+	lo, hi = wordAround(line, lo, hi)
+	return lo > 0 && line[lo-1] == '`' && hi < len(line) && line[hi] == '`'
+}
+
+// wordAround widens a span to the identifier it sits inside.
+//
+// ⛔ IT WIDENS BY RUNE, NOT BY BYTE. The byte version was SAFE — a UTF-8
+// continuation byte is ≥ 0x80 so an ASCII test stops on a rune boundary, and
+// 0x60 cannot occur inside a multi-byte sequence, so the delimiter test could
+// not be fooled — but it stopped at the first non-ASCII letter, and review
+// measured the cost: `ZzpkgxBinÉtat` and `ZzpkgxBin設定`, both quoted, were
+// reported. Safe and wrong is still wrong, and this fleet's documentation is
+// written in French.
+func wordAround(line string, lo, hi int) (int, int) {
+	for lo > 0 {
+		r, size := utf8.DecodeLastRuneInString(line[:lo])
+		if !isWordRune(r) {
+			break
+		}
+		lo -= size
+	}
+	for hi < len(line) {
+		r, size := utf8.DecodeRuneInString(line[hi:])
+		if !isWordRune(r) {
+			break
+		}
+		hi += size
+	}
+	return lo, hi
+}
+
+func isWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// spansOf converts regexp index pairs into spans, widened by one on each side
+// so that inSpan's strict comparison includes the match's own first and last
+// byte: a code span's delimiters are outside it, a match's are not.
+func spansOf(ms [][]int) [][2]int {
+	out := make([][2]int, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, [2]int{m[0] - 1, m[1]})
+	}
+	return out
+}
+
+func inSpan(spans [][2]int, i int) bool {
+	for _, s := range spans {
+		if i > s[0] && i < s[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// matchCase returns s in the case SHAPE of src, so that the repair offered for
+// `ZzpkgxBin` reads `Zpkgx` and the one for `ZZBK_TARGET` reads `ZBK`.
+//
+// ⛔ The first letter is not enough, and that was the first version: an
+// environment variable is all capitals, so taking only the lead gave `Zbk` for
+// `ZZBK` — a suggestion is a string somebody pastes, so a wrongly-cased one
+// hands back a second defect in place of the first.
+// ⛔⛔ AND IT MUST NOT LOWER-CASE THE REPLACEMENT'S OWN CAPITALS. The version
+// above this one did `strings.ToLower(s)` first, so `--retired PkgX=ZPkgX` on
+// `ZZPkgXBin` suggested **`Zpkgx`** — committing, one layer down, the exact
+// failure the comment above warns about. Measured in review 2026-11-12.
+//
+// The replacement is the caller's string and is used VERBATIM. Only two things
+// are imposed on it: an all-capitals occurrence takes an all-capitals repair
+// (an environment variable), and a capitalised occurrence takes a capitalised
+// first letter (an identifier). Nothing else is touched.
+func matchCase(src, s string) string {
+	if src == "" || s == "" {
+		return s
+	}
+	if allUpper(src) {
+		return strings.ToUpper(s)
+	}
+	r := []rune(s)
+	if unicode.IsUpper([]rune(src)[0]) {
+		r[0] = unicode.ToUpper(r[0])
+	}
+	return string(r)
+}
+
+// allUpper reports whether src has letters and none of them is lower case.
+func allUpper(src string) bool {
+	letters := false
+	for _, r := range src {
+		if unicode.IsLower(r) {
+			return false
+		}
+		if unicode.IsUpper(r) {
+			letters = true
+		}
+	}
+	return letters
 }
 
 // trimAround returns the match with a little of its sentence, which is what
@@ -534,8 +925,24 @@ func scanTree(root string, c *classifier, allow *allowList, exts map[string]bool
 					// citation with its own kind, so that --show-citations
 					// still lists it: an exemption nobody can see is how the
 					// next person re-proposes the rewrite it exists to stop.
+					//
+					// ⛔⛔ A DOUBLED FINDING IS EXEMPTED HERE TOO, AND THAT IS
+					// WHY ITS COUNT HAD TO BE KEPT. Review measured the hole:
+					// `ZzpkgxBin` in an allowed CHANGELOG.md became a citation
+					// and the run reported 0 DOUBLED, exit 0 — while the
+					// filiation page is exactly the place a doubled name
+					// survives, since it is the page that talks about the
+					// rename. Exempting it is still right (a page explaining
+					// the defect must be able to spell it), but the exemption
+					// is now COUNTED and printed. A silent exemption of the one
+					// verdict nothing else can see is a gate that turns itself
+					// off on the page that needs it most.
+					f.Was = f.Verdict
 					f.Verdict, f.Suggest = citation, ""
 					f.Kind = "the old name is this page's subject (--allow)"
+					if f.Was == doubled {
+						f.Kind = "a DOUBLED name on a page whose subject is the rename (--allow)"
+					}
 				}
 				out = append(out, f)
 			}
@@ -560,15 +967,45 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 	sort.Strings(roots)
 
 	totals := map[verdict]int{}
+	// ⛔⛔ EVERY EXEMPTED VERDICT COUNTS, NOT JUST DOUBLED. Review measured the
+	// half-fix: `--allow FILIATION.md` on a page holding a stale ORG PATH gave
+	// exit 0 and "nothing stale and nothing unsure", with no not-clean line,
+	// because this counted only `f.Was == doubled`. I had fixed the sentence
+	// for the verdict I was thinking about and left it lying about the other
+	// four.
+	// ⛔⛔ AND THE TWO KINDS OF EXEMPTION ARE NOT THE SAME NEWS. Counting them
+	// together broke the DECLARED use of --allow: review measured a filiation
+	// page with two bare `pkgx` mentions — exactly what the help says the flag
+	// is for — reporting "this run is NOT a clean tree". Every healthy run
+	// with a filiation page would have said it, which drains the sentence of
+	// the signal it was added to carry, and a warning that is always on is one
+	// nobody reads.
+	//
+	// An exempted UNSURE is the narrow, intended case: a page about the rename
+	// says the old name in prose. An exempted STALE, DEBT or DOUBLED is the
+	// surprising one — a dead address, unmigrated code, or damage, on a page
+	// somebody declared. Those keep the warning; the intended case gets its
+	// own line and leaves the verdict alone.
+	exemptUnsure, exemptHard, exemptedDoubled := 0, 0, 0
 	clean := true
 	for _, root := range roots {
 		counts := map[verdict]int{}
 		for _, f := range byRoot[root] {
 			counts[f.Verdict]++
 			totals[f.Verdict]++
+			switch f.Was {
+			case "":
+			case unsure:
+				exemptUnsure++
+			default:
+				exemptHard++
+				if f.Was == doubled {
+					exemptedDoubled++
+				}
+			}
 		}
-		fmt.Fprintf(w, "%s: %d doc file(s), %d STALE, %d DEBT, %d UNSURE, %d CITATION\n",
-			root, files[root], counts[stale], counts[debt], counts[unsure], counts[citation])
+		fmt.Fprintf(w, "%s: %d doc file(s), %d DOUBLED, %d STALE, %d DEBT, %d UNSURE, %d CITATION\n",
+			root, files[root], counts[doubled], counts[stale], counts[debt], counts[unsure], counts[citation])
 		for _, f := range byRoot[root] {
 			if f.Verdict != citation {
 				clean = false
@@ -576,7 +1013,13 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 			// ⛔ A DEBT FINDING IS ALWAYS LISTED, even under --quiet. --quiet
 			// trades findings for counts, and the one finding that must not be
 			// reducible to a count is the one declaring a flag made disappear.
-			if f.Verdict != debt && (quiet || (f.Verdict == citation && !showCitations)) {
+			//
+			// A DOUBLED finding is always listed for the opposite reason: it is
+			// the one finding whose COUNT is uninformative. Nobody is looking
+			// for it, nothing else can see it, and it names a file that compiles
+			// and passes its tests — so it has to arrive as a location.
+			if f.Verdict != debt && f.Verdict != doubled &&
+				(quiet || (f.Verdict == citation && !showCitations)) {
 				continue
 			}
 			suffix := ""
@@ -587,12 +1030,38 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 				f.Verdict, f.File, f.Line, f.Kind, suffix, f.Text)
 		}
 	}
-	fmt.Fprintf(w, "\n%d STALE, %d DEBT, %d UNSURE, %d CITATION across %d tree(s)\n",
-		totals[stale], totals[debt], totals[unsure], totals[citation], len(roots))
+	fmt.Fprintf(w, "\n%d DOUBLED, %d STALE, %d DEBT, %d UNSURE, %d CITATION across %d tree(s)\n",
+		totals[doubled], totals[stale], totals[debt], totals[unsure], totals[citation], len(roots))
+	if totals[doubled] > 0 {
+		fmt.Fprintf(w, "staleref: %d name(s) carry their replacement's prefix twice — a rename that ran over its own output. It compiles, the tests pass, and looking for the RETIRED spelling cannot find it; re-run the rename with the lowercase pairs first\n", totals[doubled])
+	}
+	// ⛔ An exemption of the one verdict nothing else can see is never silent.
+	if exemptedDoubled > 0 {
+		fmt.Fprintf(w, "staleref: %d DOUBLED finding(s) were exempted by --allow — a page whose subject is the rename may spell the damage, but check that each one is QUOTED and not a doubled name the page itself still carries\n", exemptedDoubled)
+	}
 	if totals[debt] > 0 {
 		fmt.Fprintf(w, "staleref: %d name(s) the code reads and the rename retired — declaring them with --code-var does not make them correct, it records that the CODE has not been migrated\n", totals[debt])
 	}
-	if totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 {
+	// ⛔ AND IT MUST NOT CALL A TREE CLEAN IN THE LINE UNDER AN EXEMPTION.
+	// Review measured the two printed one after the other: "N DOUBLED findings
+	// were exempted by --allow" and then "nothing stale and nothing unsure".
+	// The second is true of the verdicts and false of the tree, which is the
+	// reading a lane takes from it.
+	if exemptUnsure > 0 {
+		fmt.Fprintf(w, "staleref: %d UNSURE finding(s) were exempted by --allow — the declared case, a page whose subject is the rename saying the old name in prose\n", exemptUnsure)
+	}
+	if exemptHard > 0 {
+		fmt.Fprintf(w, "staleref: this run is NOT a clean tree — %d STALE/DEBT/DOUBLED finding(s) were exempted by --allow, which is not what that flag is for, and the exit status cannot tell a lane about them\n", exemptHard)
+	}
+	// ⛔ AND THE CLEAN-TREE LINE IS SILENT WHENEVER ANYTHING WAS EXEMPTED, of
+	// either kind. Review caught the same contradiction I had rewritten one
+	// round earlier, reappearing for UNSURE: "1 UNSURE finding(s) were
+	// exempted" followed immediately by "nothing stale and nothing unsure".
+	// The second sentence is true of the VERDICTS and false of the tree, which
+	// is the reading it gets — and a declared exemption is still something
+	// rather than nothing.
+	if exemptHard == 0 && exemptUnsure == 0 &&
+		totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
 		// ⛔ A tree with no documentation files reports no findings, which is
 		// the same output as a clean one. The file count is what tells them
 		// apart, so it is always printed.
@@ -687,6 +1156,16 @@ func run(stdout, stderr io.Writer, o opts, dirs []string) int {
 		files[d] = n
 	}
 	clean := report(stdout, byRoot, files, o.showCitations, o.quiet)
+	// ⛔⛔ "0 DOUBLED" FROM A CHECK THAT WAS NEVER ARMED READS EXACTLY LIKE A
+	// CLEAN TREE — `a-corpus-row-green-because-the-subject-was-absent`. The
+	// doubled form exists only for a `--retired was=now` whose replacement is
+	// the retired spelling plus a prefix, and the organisation's own stem
+	// carries NO replacement unless one is stated (it is never guessed). So a
+	// run with no `--retired` at all scans every tree, prints 0 DOUBLED, and
+	// has not looked. Say so, where the count is.
+	if !c.doubledArmed() {
+		fmt.Fprintln(stderr, "staleref: the doubled check is NOT ARMED — no --retired was=now whose replacement is the retired spelling with a prefix, so 0 DOUBLED here means \"did not look\", not \"nothing found\"")
+	}
 	// After the report, so that the findings are on screen either way: an
 	// exemption that no longer names a file is a broken gate, not a clean run.
 	if u := allow.unused(); len(u) > 0 {

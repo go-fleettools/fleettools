@@ -141,8 +141,8 @@ func TestRenderAndRepeats(t *testing.T) {
 	out, frags := repeats(index)
 	for _, want := range []string{
 		`{{ partial "styles.html" . }}`, `{{ partial "fork-ribbon.html" "https://github.com/acme" }}`,
-		`<h1 class="head">acme</h1>`, `class="btn btn-primary" href="https://github.com/acme/thing"`,
-		`{{ partial "icons/github.html" . }}`, `{{ partial "hero-carousel.html" . }}`, `<main id="repos" class="legacy">`,
+		`<h1 class="head">acme</h1>`, `{{ partial "cta.html" . }}`,
+		`{{ partial "hero-carousel.html" . }}`, `<main id="repos" class="legacy">`,
 		ifOff + `<span class="pill">pure Go · CGO=0</span>` + end,
 		ifOff + `<span class="pill">BSD-3-Clause</span>` + end,
 		`<span class="pill">BSD-3 code · MIT artwork</span>`, // kept
@@ -252,7 +252,7 @@ func TestFooterShapes(t *testing.T) {
 	note := func(string, string, bool) {}
 	// a kit footer: spans
 	got := footerSegments(`<footer><div class="wrap"><span>© acme · BSD-3-Clause</span><span>Pure Go · CGO_ENABLED=0 · builds for js/wasm</span><span>BSD-3-Clause</span></div></footer>`, note)
-	for _, want := range []string{"<span>© acme" + ifOff + " · BSD-3-Clause" + end + "</span>", "<span>Pure Go · " + ifOff + "CGO_ENABLED=0 · " + end + "builds", ifOff + "<span>BSD-3-Clause</span>" + end} {
+	for _, want := range []string{"<span>© acme" + ifOff + " · BSD-3-Clause" + end + "</span>", "<span>" + ifOff + "Pure Go · " + end + ifOff + "CGO_ENABLED=0 · " + end + "builds", ifOff + "<span>BSD-3-Clause</span>" + end} {
 		if !strings.Contains(got, want) {
 			t.Errorf("lacks %q in %s", want, got)
 		}

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ .Site.Title }} — a complete Ruby, written in Go (bytecode VM, embedded front-end, single static binary, zero cgo)</title>
+<meta name="description" content="go-embedded-ruby (rbgo) — a from-scratch pure-Go Ruby: lexer, parser, compiler, bytecode VM and an AOT backend, embeddable in any Go program and cross-compiling to a single CGO-free binary. A digital common (commun numérique) under BSD-3-Clause.">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+{{ partial "styles.html" . }}
+</head>
+<body class="lm">
+  <header class="nav"><div class="wrap">
+    <a class="brand" href="/"><img class="glyph" src="/img/logo.svg" width="32" height="32" alt="go-embedded-ruby logo"> go-embedded-ruby</a>
+    <nav><a href="#features">Features</a><a href="/performance/">Performance</a><a href="#road">Roadmap</a><a href="#eco">Ecosystem</a></nav>
+    {{ partial "theme-toggle.html" . }}
+  </div></header>
+  {{ partial "fork-ribbon.html" "https://github.com/go-embedded-ruby/ruby" }}
+
+  <div class="hero"><div class="wrap">
+    <div>
+      <h1 class="head">A Ruby you can embed,<br><span class="accent">written in Go.</span></h1>
+      <p class="sub">go-embedded-ruby (<b>rbgo</b>) is a from-scratch Ruby — lexer, parser, compiler, bytecode VM and an AOT backend — that embeds in any Go program and cross-compiles to a single CGO-free binary. Built in the open as a <b>digital common</b> (<i>commun numérique</i>), free to use, study, modify and share under the BSD-3-Clause licence.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/go-embedded-ruby/ruby">{{ partial "icons/rocket.html" . }}Get started →</a>
+        <a class="btn btn-ghost" href="/performance/">{{ partial "icons/graph.html" . }}See the benchmarks</a>
+      </div>
+      <div class="trust"><span><b>23,672</b> ruby/spec <code>language/</code>+<code>core/</code> examples passing</span><span><b>~100%</b> of real Ruby parsed</span><span><b>6</b> 64-bit + <b>2</b> 32-bit arches</span></div>
+    </div>
+    <div class="term">
+      <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="t">rbgo — zsh</span></div>
+<pre><span class="c-com"># a real Ruby, no cgo, no Ruby installed</span>
+<span class="c-cmd">$ rbgo</span> -e <span class="c-str">'puts (1..20).reduce(:*)'</span>
+<span class="c-out">2432902008176640000</span>
+
+<span class="c-com"># AOT-compile the hot path and drop the front-end</span>
+<span class="c-cmd">$ rbgo</span> build --closed app.rb -o app
+<span class="c-out">rbgo build: app (1 method(s) AOT-compiled: Object#fib)</span>
+<span class="c-out">rbgo build: closed-world — front-end dropped</span>
+<span class="c-out">rbgo build: binary size 172.5 MiB</span>
+
+<span class="c-com"># the real Puppet CLI, end to end</span>
+<span class="c-cmd">$ rbgo</span> run puppet_apply.rb
+<span class="c-out">Notice: Compiled catalog for  in environment production in 0.00 seconds</span>
+<span class="c-out">Notice: hi from rbgo cli</span>
+<span class="c-out">Notice: /Stage[main]/Main/Notify[hello]/message: defined 'message'</span></pre>
+    </div>
+  </div></div>
+
+  <div class="strip"><div class="wrap">
+    <span class="lead-line">The <b>go-ruby-*</b> family — all CI-green, 100% coverage, 6-arch. <b>178</b> modules across <b>176</b> orgs are bound into rbgo today; a selection:</span>
+    <div class="mods"><a href="https://github.com/go-ruby-abbrev/abbrev">abbrev</a><a href="https://github.com/go-ruby-acme/acme">acme</a><a href="https://github.com/go-ruby-activerecord/activerecord">activerecord</a><a href="https://github.com/go-ruby-addressable/addressable">addressable</a><a href="https://github.com/go-ruby-age/age">age</a><a href="https://github.com/go-ruby-arrow/arrow">arrow</a><a href="https://github.com/go-ruby-base64/base64">base64</a><a href="https://github.com/go-ruby-bbolt/bbolt">bbolt</a><a href="https://github.com/go-ruby-bcrypt/bcrypt">bcrypt</a><a href="https://github.com/go-ruby-benchmark/benchmark">benchmark</a><a href="https://github.com/go-ruby-bigdecimal/bigdecimal">bigdecimal</a><a href="https://github.com/go-ruby-bleve/bleve">bleve</a><a href="https://github.com/go-ruby-builder/builder">builder</a><a href="https://github.com/go-ruby-bundler/bundler">bundler</a><a href="https://github.com/go-ruby-cgi/cgi">cgi</a><a href="https://github.com/go-ruby-chronic/chronic">chronic</a><a href="https://github.com/go-ruby-cmath/cmath">cmath</a><a href="https://github.com/go-commonmark/commonmark">commonmark</a><a href="https://github.com/go-ruby-complex/complex">complex</a><a href="https://github.com/go-ruby-csv/csv">csv</a><a href="https://github.com/go-ruby-date/date">date</a><a href="https://github.com/go-ruby-did-you-mean/did-you-mean">did-you-mean</a><a href="https://github.com/go-ruby-digest/digest">digest</a><a href="https://github.com/go-ruby-dotenv/dotenv">dotenv</a><a href="https://github.com/go-ruby-dry-struct/dry-struct">dry-struct</a><a href="https://github.com/go-ruby-dry-types/dry-types">dry-types</a><a href="https://github.com/go-ruby-dry-validation/dry-validation">dry-validation</a><a href="https://github.com/go-ruby-erb/erb">erb</a><a href="https://github.com/go-ruby-etcd/etcd">etcd</a><a href="https://github.com/go-ruby-faker/faker">faker</a><a href="https://github.com/go-ruby-faraday/faraday">faraday</a><a href="https://github.com/go-ruby-find/find">find</a><a href="https://github.com/go-ruby-format/format">format</a><a href="https://github.com/go-ruby-getoptlong/getoptlong">getoptlong</a><a href="https://github.com/go-ruby-grape/grape">grape</a><a href="https://github.com/go-ruby-graphql/graphql">graphql</a><a href="https://github.com/go-ruby-grpc/grpc">grpc</a><a href="https://github.com/go-ruby-haml/haml">haml</a><a href="https://github.com/go-ruby-hcl2/hcl2">hcl2</a><a href="https://github.com/go-ruby-i18n/i18n">i18n</a><a href="https://github.com/go-ruby-ipaddr/ipaddr">ipaddr</a><a href="https://github.com/go-ruby-irb/irb">irb</a><a href="https://github.com/go-ruby-jbuilder/jbuilder">jbuilder</a><a href="https://github.com/go-ruby-json/json">json</a><a href="https://github.com/go-ruby-jwt/jwt">jwt</a><a href="https://github.com/go-ruby-kafka/kafka">kafka</a><a href="https://github.com/go-kramdown/kramdown">kramdown</a><a href="https://github.com/go-liquid/liquid">liquid</a><a href="https://github.com/go-ruby-logger/logger">logger</a><a href="https://github.com/go-ruby-mail/mail">mail</a><a href="https://github.com/go-ruby-marshal/marshal">marshal</a><a href="https://github.com/go-ruby-matrix/matrix">matrix</a><a href="https://github.com/go-ruby-mime-types/mime-types">mime-types</a><a href="https://github.com/go-ruby-minitest/minitest">minitest</a><a href="https://github.com/go-ruby-money/money">money</a><a href="https://github.com/go-ruby-mongodb/mongodb">mongodb</a><a href="https://github.com/go-ruby-msgpack/msgpack">msgpack</a><a href="https://github.com/go-mustache/mustache">mustache</a><a href="https://github.com/go-ruby-mysql/mysql">mysql</a><a href="https://github.com/go-ruby-nats/nats">nats</a><a href="https://github.com/go-ruby-net-ftp/net-ftp">net-ftp</a><a href="https://github.com/go-ruby-net-http/net-http">net-http</a><a href="https://github.com/go-ruby-net-imap/net-imap">net-imap</a><a href="https://github.com/go-ruby-net-pop/net-pop">net-pop</a><a href="https://github.com/go-ruby-net-s3/net-s3">net-s3</a><a href="https://github.com/go-ruby-net-sftp/net-sftp">net-sftp</a><a href="https://github.com/go-ruby-net-smtp/net-smtp">net-smtp</a><a href="https://github.com/go-nokogiri/nokogiri">nokogiri</a><a href="https://github.com/go-ruby-oauth2/oauth2">oauth2</a><a href="https://github.com/go-ruby-observer/observer">observer</a><a href="https://github.com/go-ruby-oidc/oidc">oidc</a><a href="https://github.com/go-ruby-openssl/openssl">openssl</a><a href="https://github.com/go-ruby-opentelemetry/opentelemetry">opentelemetry</a><a href="https://github.com/go-ruby-optparse/optparse">optparse</a><a href="https://github.com/go-ruby-ostruct/ostruct">ostruct</a><a href="https://github.com/go-ruby-parquet/parquet">parquet</a><a href="https://github.com/go-ruby-parser/parser">parser</a><a href="https://github.com/go-ruby-pathname/pathname">pathname</a><a href="https://github.com/go-ruby-pg/pg">pg</a><a href="https://github.com/go-ruby-prawn/prawn">prawn</a><a href="https://github.com/go-ruby-prettyprint/prettyprint">prettyprint</a><a href="https://github.com/go-ruby-prime/prime">prime</a><a href="https://github.com/go-ruby-protobuf/protobuf">protobuf</a><a href="https://github.com/go-ruby-pstore/pstore">pstore</a><a href="https://github.com/go-ruby-public-suffix/public-suffix">public-suffix</a><a href="https://github.com/go-ruby-puma/puma">puma</a><a href="https://github.com/go-ruby-racc/racc">racc</a><a href="https://github.com/go-ruby-rack/rack">rack</a><a href="https://github.com/go-ruby-rake/rake">rake</a><a href="https://github.com/go-ruby-rational/rational">rational</a><a href="https://github.com/go-ruby-rdoc/rdoc">rdoc</a><a href="https://github.com/go-ruby-redis/redis">redis</a><a href="https://github.com/go-ruby-regexp/regexp">regexp</a><a href="https://github.com/go-ruby-reline/reline">reline</a><a href="https://github.com/go-ruby-resolv/resolv">resolv</a><a href="https://github.com/go-ruby-rexml/rexml">rexml</a><a href="https://github.com/go-rouge/rouge">rouge</a><a href="https://github.com/go-ruby-rqrcode/rqrcode">rqrcode</a><a href="https://github.com/go-ruby-rspec/rspec">rspec</a><a href="https://github.com/go-ruby-rss/rss">rss</a><a href="https://github.com/go-ruby-rubocop/rubocop">rubocop</a><a href="https://github.com/go-ruby-rubygems/rubygems">rubygems</a><a href="https://github.com/go-ruby-saml/saml">saml</a><a href="https://github.com/go-ruby-scanf/scanf">scanf</a><a href="https://github.com/go-ruby-securerandom/securerandom">securerandom</a><a href="https://github.com/go-ruby-sequel/sequel">sequel</a><a href="https://github.com/go-ruby-shellwords/shellwords">shellwords</a><a href="https://github.com/go-ruby-sinatra/sinatra">sinatra</a><a href="https://github.com/go-ruby-slim/slim">slim</a><a href="https://github.com/go-ruby-sodium/sodium">sodium</a><a href="https://github.com/go-ruby-sqlite3/sqlite3">sqlite3</a><a href="https://github.com/go-ruby-stringio/stringio">stringio</a><a href="https://github.com/go-ruby-strscan/strscan">strscan</a><a href="https://github.com/go-ruby-syslog/syslog">syslog</a><a href="https://github.com/go-ruby-thor/thor">thor</a><a href="https://github.com/go-ruby-time/time">time</a><a href="https://github.com/go-ruby-toml/toml">toml</a><a href="https://github.com/go-ruby-tsort/tsort">tsort</a><a href="https://github.com/go-ruby-tzinfo/tzinfo">tzinfo</a><a href="https://github.com/go-ruby-unicode-normalize/unicode-normalize">unicode-normalize</a><a href="https://github.com/go-ruby-uri/uri">uri</a><a href="https://github.com/go-ruby-webauthn/webauthn">webauthn</a><a href="https://github.com/go-ruby-webrick/webrick">webrick</a><a href="https://github.com/go-xslt/xslt">xslt</a><a href="https://github.com/go-ruby-yaml/yaml">yaml</a><a href="https://github.com/go-ruby-zlib/zlib">zlib</a></div>
+  </div></div>
+
+  <section id="features"><div class="wrap">
+    <span class="eyebrow">Why rbgo</span>
+    <h2>Everything a Ruby runtime gives you — as a Go library.</h2>
+    <p class="lead">No FFI, no libruby, no system Ruby. Drop a genuine, monkey-patchable Ruby object model into your Go binary and ship it anywhere.</p>
+    <div class="grid">
+      <div class="card"><div class="ico">🧩</div><h3>Embeddable</h3><p>A real object model — classes, mixins, <code>method_missing</code>, metaprogramming, Fiber. The Go API is deliberately small today: <code>ruby.Run(src, out)</code> runs a program on a fresh VM and writes its output to one writer. Calling a Ruby method from Go is not exposed yet.</p></div>
+      <div class="card"><div class="ico">📦</div><h3>One static binary</h3><p>CGO=0 by default. Tested on amd64, arm64, riscv64, loong64, ppc64le, s390x, 386 and arm; compiles for every GOOS/GOARCH Go supports — 47 targets, the BSDs, AIX, Solaris, mips and Plan 9 included (Plan 9 is vetted, not run).</p></div>
+      <div class="card"><div class="ico">⚡</div><h3>AOT for integer kernels</h3><p>Ahead-of-time compilation of integer-bound methods to unboxed Go. Measured on this project’s own micro-benchmarks (darwin/arm64, whole-process wall time): <b>8.7×</b> MRI+YJIT on the tight-loop case, <b>2.0×</b> on recursive <code>fib(35)</code>. Only methods the compiler can lower benefit.</p></div>
+      <div class="card"><div class="ico">✅</div><h3>Conformance, measured</h3><p><b>23,672</b> ruby/spec <code>language/</code> + <code>core/</code> examples pass, gated in CI <b>file by file</b>: no spec file may pass fewer examples than its recorded row, so a regression is named rather than absorbed in a total. <b>Only <code>language/</code> and <code>core/</code> are swept:</b> <code>library/</code>, <code>optional/</code>, <code>command_line/</code> and <code>security/</code> are not run, so this is not a percentage of Ruby. Those guards now resolve at Ruby <b>4.0.9</b> — the version this runtime reports, and the latest MRI release — so the examples behind a <code>ruby_version_is "4.0"</code> guard are counted, and those behind <code>ruby_version_is ""..."4.0"</code> are no longer asked for. The move was measured before it was made, both engines built from one commit minus the version string: <b>+144 passing</b>, and <b>27 examples that went red</b> — a figure no pass total shows, found by comparing the two runs' failure descriptions. Front-end: ~100% of valid Ruby parsed across Rails + Puppet (2026-06).</p></div>
+      <div class="card"><div class="ico">🔒</div><h3>Closed-world builds</h3><p><code>rbgo build --closed</code> bakes the program to bytecode and drops the front-end for a smaller binary.</p></div>
+      <div class="card"><div class="ico">🌿</div><h3>A real ecosystem</h3><p>Built from the <b>go-ruby-*</b> family — each a 100%-coverage, 6-arch stdlib module, bound natively.</p></div>
+    </div>
+  </div></section>
+
+  <section id="perf" style="padding-top:10px"><div class="wrap">
+    <div class="stats">
+      <div><div class="n">8.7×</div><div class="l">rbgo+AOT vs MRI+YJIT, tight-loop benchmark (2.0× on <code>fib(35)</code>)</div></div>
+      <div><div class="n">23,672</div><div class="l">ruby/spec <code>language/</code>+<code>core/</code> examples passing · gated per file, not by a total</div></div>
+      <div><div class="n">178</div><div class="l">go-ruby-* modules bound into rbgo</div></div>
+      <div><div class="n">CGO=0</div><div class="l">across 6 arches · 3 OSes</div></div>
+    </div>
+  </div></section>
+
+  <section id="road" style="padding-top:20px"><div class="wrap">
+    <span class="eyebrow">The road</span>
+    <h2>Lexer to AOT, in nine phases.</h2>
+    <div class="road">
+      {{ range .Site.Params.phases }}
+      {{ $tag := cond (eq .status "ready") "ready" "active" }}
+      {{/* Card shows a trimmed blurb: the first sentence, or a word-boundary truncation if that sentence runs long. */}}
+      {{/* Strip markdown emphasis/code markers so a truncation can never leave a half-open span. */}}
+      {{/* ⛔ And REDUCE [text](url) TO ITS TEXT FIRST. The sentence split below ends at the
+           first ".", and a URL is full of them: Phase 8's blurb begins "measured against
+           [ruby/spec](https://github.com/ruby/spec)'s …", so the card rendered the literal
+           fragment "[ruby/spec](https://github." — a malformed link whose href resolved to
+           nothing. `landingkit links` found it as the one dead URL of 129 on the built site.
+           The card shows prose, never a link, so reducing the markdown is also what it wants. */}}
+      {{ $plain := replaceRE "\\[([^]]*)\\]\\([^)]*\\)" "$1" .blurb }}
+      {{ $plain = replaceRE "[`*]" "" $plain }}
+      {{ $first := index (findRE "^[^.]+\\.?" $plain 1) 0 }}
+      {{ $short := $first }}
+      {{ if gt (len $first) 150 }}{{ $short = printf "%s…" (index (findRE "^.{0,140}\\b" $first 1) 0) }}{{ end }}
+      <div class="ph">
+        <div class="top"><h4>{{ .name }}</h4><span class="tag {{ $tag }}">{{ .status }}</span></div>
+        <p>{{ $short }}</p>
+      </div>
+      {{ end }}
+    </div>
+  </div></section>
+
+  <section id="eco" style="padding-top:6px"><div class="wrap">
+    <div class="band">
+      <h2>Ruby that ships like Go.</h2>
+      <p>One binary. Six architectures. No cgo, no runtime to install. Embed a real Ruby — or compile it away. Open infrastructure, governed as a commons.</p>
+      <a class="btn btn-ghost" href="https://github.com/go-embedded-ruby/ruby">{{ partial "icons/github.html" . }}Read the source on GitHub →</a>
+    </div>
+  </div></section>
+
+  <footer><div class="wrap"><span>🌐 A digital common (<i>commun numérique</i>) · © the go-embedded-ruby authors · BSD-3-Clause</span><span>Pure Go · CGO=0 · MRI-compatible</span></div></footer>
+</body>
+</html>

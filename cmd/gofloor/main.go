@@ -27,7 +27,28 @@
 // found (vulngate exists for that), `|| true` and `continue-on-error: true`
 // do the same, and `-mode binary` or `extract` does not scan the source. A job
 // with any of them is "present" and gates nothing, so it is reported as such,
-// not as clean. A step that runs `vulngate` is the judge and counts.
+// not as clean. A step that runs `vulngate` is the judge and counts — in the
+// SAME run: block, because a step is judged on its own text.
+//
+// # A LANE CAN BE IN ANOTHER REPOSITORY
+//
+// ⛔ A job can be a `uses:` instead of steps, and then the lane is a reusable
+// workflow somewhere else. Walking steps sees nothing there, so a repository
+// calling a shared lane used to read exactly like one that scans nothing —
+// measured on go-richdoc, where extracting one inline lane into an org-wide
+// `workflow_call` turned all ELEVEN rows from `gates` to `none` while every
+// lane kept running green. The failure is not only the missing row: `none` on
+// a repository that already calls a shared lane argues for pasting an inline
+// copy back into each caller, which is the duplication the shared definition
+// removes.
+//
+// So a `uses:` job is followed ONE level: that file is read and audited, and
+// its verdict is attributed to the caller (`ci.yml -> org/.github/...@main`).
+// The result is cached per called file, because an organisation usually has
+// one shared lane that every module calls. A call that cannot be read, or
+// cannot be parsed into owner/repo/path@ref, is UNREADABLE — never clean. A
+// called workflow that calls another in turn is reported rather than followed:
+// an unbounded follow is a sweep nobody asked for.
 //
 // # ERRORS ARE VALUES
 //
@@ -65,9 +86,18 @@ every workflow of each repository of the given organisations, and reports:
         hard-coded version / a channel such as stable (a finding)
   VULN  whether a govulncheck step exists AND can fail the build on a finding
         (-format json|sarif|openvex, ||true, continue-on-error, -mode binary
-        make it a step that gates nothing; vulngate counts as the judge)
+        make it a step that gates nothing; vulngate counts as the judge, in
+        the same run: block)
 
-A repository it could not read is UNREADABLE and is never counted clean.
+A job that is a "uses:" rather than steps is a lane in ANOTHER repository, and
+it is followed one level: that workflow is read and its verdict attributed to
+the caller. Without this, a repository calling an organisation's shared lane
+read exactly like one that scans nothing — and the obvious way to satisfy the
+tool was to paste an inline copy back into every caller.
+
+A repository it could not read is UNREADABLE and is never counted clean. So is
+a called workflow that could not be read or parsed; one that calls another in
+turn is reported rather than followed.
 
 Exit status: 0 clean, 1 findings, 2 something could not be read.`
 
@@ -287,19 +317,83 @@ func Check(gh ghFunc, r fleet.Repo, floor string) *Report {
 	if len(flows) == 0 {
 		rep.Findings = append(rep.Findings, "no workflow: nothing builds or scans it")
 	}
+	var calls []Called
 	for _, p := range flows {
 		src, ok := read(p)
 		if !ok {
 			continue
 		}
 		rep.Workflows++
-		setups, vulns, err := Audit(p, []byte(src))
+		setups, vulns, called, err := Audit(p, []byte(src))
 		if err != nil {
 			rep.Unreadable = append(rep.Unreadable, p+": "+err.Error())
 			continue
 		}
 		rep.Setups = append(rep.Setups, setups...)
 		rep.Vulns = append(rep.Vulns, vulns...)
+		calls = append(calls, called...)
+	}
+
+	// ⛔ A CALLED WORKFLOW IS READ, OR THE REPOSITORY IS NOT CLEAN. The verdict
+	// is in the called file, so this follows the call one level. Reading one
+	// more file is the same kind of call this function already makes, and the
+	// cache matters in practice: an organisation usually has ONE shared lane
+	// that every module calls, so N modules would otherwise fetch it N times.
+	//
+	// What is NOT done here, deliberately: a called workflow that itself calls
+	// another is not followed further. Going deeper needs a visited set and a
+	// depth bound, and an unbounded follow is a sweep nobody asked for; the
+	// second level is reported UNREAD instead, which is never clean.
+	seen := map[string][]Vuln{}
+	for _, c := range calls {
+		slug, cpath, rev, ok := calledWorkflow(c.Ref)
+		if !ok {
+			rep.Unreadable = append(rep.Unreadable, fmt.Sprintf(
+				"%s job %s: cannot read the called workflow %q", c.File, c.Job, c.Ref))
+			continue
+		}
+		key := slug + "/" + cpath + "@" + rev
+		vs, done := seen[key]
+		if !done {
+			var src string
+			var got bool
+			if slug == "" { // a local call: this repository, the branch read above
+				src, got = read(cpath)
+			} else {
+				b, err := gh("api", "-H", "Accept: application/vnd.github.raw+json",
+					"repos/"+slug+"/contents/"+cpath+"?ref="+rev)
+				if err != nil {
+					rep.Unreadable = append(rep.Unreadable, fmt.Sprintf(
+						"%s job %s calls %s, which could not be read: %v", c.File, c.Job, c.Ref, err))
+					seen[key] = nil
+					continue
+				}
+				src, got = string(b), true
+			}
+			if !got {
+				seen[key] = nil
+				continue
+			}
+			_, cv, deeper, err := Audit(key, []byte(src))
+			if err != nil {
+				rep.Unreadable = append(rep.Unreadable, fmt.Sprintf(
+					"%s job %s calls %s, which is not YAML: %v", c.File, c.Job, c.Ref, err))
+				seen[key] = nil
+				continue
+			}
+			for _, d := range deeper {
+				rep.Unreadable = append(rep.Unreadable, fmt.Sprintf(
+					"%s calls %s, which calls %s in turn; the second level is not followed", c.Ref, key, d.Ref))
+			}
+			seen[key], vs = cv, cv
+		}
+		for _, v := range vs {
+			// Named by the CALLER, so a reader of the row knows which
+			// repository is gated, with the called file kept for the trail.
+			v.File = c.File + " -> " + v.File
+			v.Job = c.Job + " -> " + v.Job
+			rep.Vulns = append(rep.Vulns, v)
+		}
 	}
 	for _, s := range rep.Setups {
 		if s.Bad {
@@ -374,18 +468,30 @@ type step struct {
 type job struct {
 	ContinueOnError any    `yaml:"continue-on-error"`
 	Steps           []step `yaml:"steps"`
+	// ⛔ A JOB CAN BE A `uses:` TOO, and that is the whole of #203. A job that
+	// calls a reusable workflow has NO steps, so every rule below that walks
+	// Steps sees nothing and the repository reads as if it ran no lane at all.
+	Uses string `yaml:"uses"`
+}
+
+// A Called is a job that delegates to a reusable workflow. Whether that
+// workflow gates is not in this file and cannot be guessed from it.
+type Called struct {
+	File, Job string // where the call is
+	Ref       string // owner/repo/.github/workflows/x.yml@ref, verbatim
 }
 
 // Audit reads one workflow file.
-func Audit(file string, src []byte) ([]Setup, []Vuln, error) {
+func Audit(file string, src []byte) ([]Setup, []Vuln, []Called, error) {
 	var wf struct {
 		Jobs map[string]job `yaml:"jobs"`
 	}
 	if err := yaml.Unmarshal(src, &wf); err != nil {
-		return nil, nil, fmt.Errorf("not YAML: %w", err)
+		return nil, nil, nil, fmt.Errorf("not YAML: %w", err)
 	}
 	var setups []Setup
 	var vulns []Vuln
+	var called []Called
 	names := make([]string, 0, len(wf.Jobs))
 	for n := range wf.Jobs {
 		names = append(names, n)
@@ -393,6 +499,9 @@ func Audit(file string, src []byte) ([]Setup, []Vuln, error) {
 	sort.Strings(names)
 	for _, jn := range names {
 		j := wf.Jobs[jn]
+		if r := strings.TrimSpace(j.Uses); r != "" && len(j.Steps) == 0 {
+			called = append(called, Called{File: file, Job: jn, Ref: r})
+		}
 		for _, s := range j.Steps {
 			if strings.HasPrefix(s.Uses, "actions/setup-go") {
 				setups = append(setups, classify(file, jn, s))
@@ -402,7 +511,31 @@ func Audit(file string, src []byte) ([]Setup, []Vuln, error) {
 			}
 		}
 	}
-	return setups, vulns, nil
+	return setups, vulns, called, nil
+}
+
+// calledWorkflow splits `owner/repo/.github/workflows/x.yml@ref` into the
+// pieces needed to read that file. A local call (`./.github/workflows/x.yml`)
+// has no owner and is read from the repository being audited.
+func calledWorkflow(ref string) (slug, path, rev string, ok bool) {
+	at := strings.LastIndex(ref, "@")
+	if at < 0 {
+		// A local call carries no @ref: it is this repository, this commit.
+		if p := strings.TrimPrefix(ref, "./"); strings.HasPrefix(p, ".github/workflows/") {
+			return "", p, "", true
+		}
+		return "", "", "", false
+	}
+	left, rev := ref[:at], ref[at+1:]
+	if rev == "" {
+		return "", "", "", false
+	}
+	parts := strings.SplitN(left, "/", 3)
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" ||
+		!strings.HasPrefix(parts[2], ".github/workflows/") {
+		return "", "", "", false
+	}
+	return parts[0] + "/" + parts[1], parts[2], rev, true
 }
 
 func classify(file, jn string, s step) Setup {
