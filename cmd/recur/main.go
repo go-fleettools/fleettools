@@ -920,7 +920,7 @@ func scan(dir string) ([]recorded, error) {
 			// refuses rather than reporting a corpus it could not finish.
 			return nil, fmt.Errorf("reading %s: %w", name, err)
 		}
-		if mark, ok := fingerprint(b); ok {
+		if mark, ok := fingerprint(b, dir, name); ok {
 			found = append(found, recorded{lesson: strings.TrimSuffix(name, ".md"), mark: mark})
 		}
 	}
@@ -940,12 +940,24 @@ func scan(dir string) ([]recorded, error) {
 // ⚠ What it costs, said rather than discovered later: REWORDING a recurrence
 // sentence fires too, and that is a false positive. It costs one --accept, and
 // the alternative is the silence above.
-func fingerprint(b []byte) (string, bool) {
+//
+// ⛔ A POINTER LINE IS NOT A RECURRENCE OF THE MEMORY THAT HOLDS IT (#303). An
+// index hub is one line per child — "[title](child.md): ⛔⛔ récidive …" — quoting
+// the child's own sentence. The child is judged under its own name; counting the
+// quotation as well made every fold into the hub change the hub's fingerprint,
+// and refused gitpush, ghmerge and ghrelease for every session although the
+// child was accounted for. So a line that is only a pointer to a memory that
+// EXISTS in dir is not read. A recurrence sentence of the hub's OWN still is,
+// and so is a "pointer" whose target is not there: it points at nothing, so it
+// is prose.
+func fingerprint(b []byte, dir, self string) (string, bool) {
 	var hit []string
 	for _, line := range strings.Split(string(b), "\n") {
 		for _, re := range markers {
 			if re.MatchString(line) {
-				hit = append(hit, strings.TrimSpace(line))
+				if !pointer(line, dir, self) {
+					hit = append(hit, strings.TrimSpace(line))
+				}
 				break
 			}
 		}
@@ -955,6 +967,94 @@ func fingerprint(b []byte) (string, bool) {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(hit, "\n")))
 	return hex.EncodeToString(sum[:6]), true
+}
+
+// pointerRe finds a line that OPENS, at column 0, with a link to another memory
+// — after an optional list bullet or quote mark, "[t](x.md)" or "[[x]]" — and
+// that the link is followed by ':' or ';', the way an index quotes its child.
+// ⛔ Both constraints are measured, not guessed: a prose sentence that merely
+// begins with a wikilink ("[[x]] — c'est la deuxième fois", indented or not) is
+// the memory's OWN recurrence, and an earlier, looser form of this pattern
+// dropped it from a-sweep-that-cannot-see-dot-github and from two others.
+var pointerRe = regexp.MustCompile(`^(?:[-*+>]\s+)?(?:\[[^\]]*\]\(([^)\s]+)\)|\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\])\s*[:;]`)
+
+// pointer reports whether line opens with a link to a memory that exists in
+// dir. A URL, a link to a file that is not there, or a line that does not open
+// with a link is not a pointer.
+func pointer(line, dir, self string) bool {
+	m := pointerRe.FindStringSubmatch(line)
+	if m == nil {
+		return false
+	}
+	target := m[1]
+	if target == "" {
+		target = m[2] + ".md"
+	}
+	if strings.Contains(target, "://") {
+		return false
+	}
+	if i := strings.IndexByte(target, '#'); i >= 0 {
+		target = target[:i]
+	}
+	if target == "" || target != filepath.Base(target) || !strings.HasSuffix(target, ".md") {
+		return false
+	}
+	// ⛔ A link is not a quotation. The target must be ANOTHER memory that scan
+	// fingerprints (never this file, never the ledger or MEMORY.md), and what
+	// follows the separator must QUOTE it; "- [[sibling]]: récidive ×3 ici" is
+	// the memory's own sentence about its sibling, and dropping it would let a
+	// lesson gain occurrences in silence.
+	if target == self || target == ledgerName || target == "MEMORY.md" {
+		return false
+	}
+	tb, err := os.ReadFile(filepath.Join(dir, target))
+	if err != nil {
+		return false
+	}
+	return quotes(line[len(m[0]):], tb)
+}
+
+// norm collapses whitespace and strips the quotation marks a description is
+// wrapped in, so a quotation and its source compare equal.
+func norm(s string) string {
+	return strings.Trim(strings.Join(strings.Fields(s), " "), "\"'`«»“”")
+}
+
+// quotes reports whether text is a quotation of the memory body: the whole of
+// its frontmatter description (what mem-add writes into an index), or the whole
+// of one of its recurrence lines. ⛔ A memory with no recurrence line has
+// nothing a hub could be quoting, so the words are the hub's own.
+// Equality, not prefix: measured on the real hub, no pointer line is a prefix of
+// its target's description or recurrence lines either, and a prefix rule would
+// let any short stub like "3e fois" through.
+func quotes(text string, body []byte) bool {
+	want := norm(text)
+	if want == "" {
+		return false
+	}
+	var cands []string
+	recurs := false
+	for _, l := range strings.Split(string(body), "\n") {
+		if v, ok := strings.CutPrefix(l, "description:"); ok {
+			cands = append(cands, norm(v))
+		}
+		for _, re := range markers {
+			if re.MatchString(l) {
+				recurs = true
+				cands = append(cands, norm(strings.TrimLeft(strings.TrimSpace(l), "-*+># ")))
+				break
+			}
+		}
+	}
+	if !recurs {
+		return false
+	}
+	for _, c := range cands {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 func readLedger(path string) (map[string]entry, error) {

@@ -671,3 +671,180 @@ func TestOneAcceptDoesNotEraseAnotherEntrysInstant(t *testing.T) {
 		t.Errorf("second got no instant: %q", after)
 	}
 }
+
+// ⛔ #303: an index hub quotes each child's recurrence sentence one per line.
+// The child is judged under its own name; the quotation must not make the hub a
+// lesson, or every fold into the hub refuses every publish.
+func TestAHubOfPointerLinesIsNotALesson(t *testing.T) {
+	code, out, _ := drive(t, "--memory", "testdata/hub")
+	if code != 1 {
+		t.Fatalf("code %d, want 1 (the child still recorded one)\n%s", code, out)
+	}
+	if !strings.Contains(out, "child recorded a recurrence") {
+		t.Errorf("the child must still be judged under its own name; got %q", out)
+	}
+	if strings.Contains(out, "hub recorded a recurrence") {
+		t.Errorf("a hub of pointer lines is not a lesson; got %q", out)
+	}
+}
+
+// The required control: a hub with a recurrence sentence of its OWN, which is
+// not a pointer line, must still fire.
+func TestAHubWithASentenceOfItsOwnStillFires(t *testing.T) {
+	code, out, _ := drive(t, "--memory", "testdata/hub-own")
+	if code != 1 {
+		t.Fatalf("code %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "hub recorded a recurrence") {
+		t.Errorf("the hub's own sentence must count; got %q", out)
+	}
+}
+
+// A pointer to nothing is prose: a missing target, a URL, a path outside the
+// directory, a non-memory file, an empty target, and a line that merely
+// contains a link all count.
+func TestALinkThatPointsAtNothingIsNotAPointer(t *testing.T) {
+	code, out, _ := drive(t, "--memory", "testdata/hub-dangling")
+	if code != 1 || !strings.Contains(out, "hub recorded a recurrence") {
+		t.Fatalf("code %d; a dangling hub must fire\n%s", code, out)
+	}
+}
+
+// Each shape on its own, so a mutation of one guard is caught by name.
+func TestPointerShapes(t *testing.T) {
+	const q = "Troisième récidive de x."
+	body := "---\ndescription: \"récidive ×3 de x\"\n---\n" + q + "\n"
+	dir := mem(t, map[string]string{
+		"x.md":      body,
+		"y.md":      "---\ndescription: hello\n---\nnothing repeated here\n",
+		ledgerName:  body,
+		"MEMORY.md": body,
+	})
+	if err := os.Mkdir(filepath.Join(dir, "d.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		line string
+		self string
+		want bool
+	}{
+		{"- [t](x.md): " + q, "z.md", true},
+		{"[t](x.md) : " + q, "z.md", true},
+		{"* [t](x.md#top); " + q, "z.md", true},
+		{"> [[x]]: " + q, "z.md", true},
+		{"[[x|alias]]: " + q, "z.md", true},
+		{"[[x#h]]: " + q, "z.md", true},
+		{"- [t](x.md):  “Troisième   récidive de x.” ", "z.md", true},
+		{"- [t](x.md): récidive ×3 de x", "z.md", true}, // the description
+		// ⛔ A prose sentence that merely OPENS with a link is the memory's own
+		// recurrence, not a pointer: measured on the real corpus, a-sweep-that-
+		// cannot-see-dot-github says "[[x]] — c'est la deuxième fois" at column 0.
+		{"[[x]] — c'est la deuxième fois", "z.md", false},
+		{"   [[x]] — récidive le même jour.", "z.md", false},
+		// ⛔ A link is not a quotation (review of #322): a lesson's own sentence
+		// about a sibling, a self-link, and an empty or absent quotation fire.
+		{"- [[x]]: récidive ×3 ici, même erreur que là-bas.", "z.md", false},
+		{"- [o](x.md): 3e fois, encore, ici même.", "z.md", false},
+		{"- [[x]]: " + q, "x.md", false},
+		{"- [t](x.md):", "z.md", false},
+		{"- [t](x.md): " + q + "; ET 3e fois aujourd'hui sur gitsafe", "z.md", false},
+		{"- [t](x.md): récidive", "z.md", false}, // a stub inside the description, not a quotation
+		{"- [t](x.md): Troisième récidive", "z.md", false},
+		{"- [t](y.md): hello", "z.md", false},
+		{"- [t](" + ledgerName + "): " + q, "z.md", false},
+		{"- [t](MEMORY.md): " + q, "z.md", false},
+		{"- [t](missing.md): " + q, "z.md", false},
+		{"- [[missing]]: " + q, "z.md", false},
+		{"- [t](d.md): " + q, "z.md", false},
+		{"- [t](https://e.org/x.md): " + q, "z.md", false},
+		{"- [t](../x.md): " + q, "z.md", false},
+		{"- [t](sub/x.md): " + q, "z.md", false},
+		{"- [t](x.txt): " + q, "z.md", false},
+		{"- [t](#): " + q, "z.md", false},
+		{"see [t](x.md): " + q, "z.md", false},
+		{"récidive", "z.md", false},
+	} {
+		if got := pointer(tc.line, dir, tc.self); got != tc.want {
+			t.Errorf("pointer(%q, self %s) = %v, want %v", tc.line, tc.self, got, tc.want)
+		}
+	}
+}
+
+// The three cases the review of #322 found, end to end: each must FIRE, and the
+// third must change the fingerprint of an accounted lesson.
+func TestALinkToASiblingIsNotAQuotation(t *testing.T) {
+	sibling := "Troisième récidive de x.\n"
+	for _, tc := range []struct{ name, lesson string }{
+		{"sibling", "- [[sibling]]: récidive ×3 ici, même erreur que là-bas.\n"},
+		{"self", "- [[lesson]]: deuxième fois aujourd'hui.\n"},
+		// ⛔ Hole 1 (review of 0a1c81e): a row that quotes the target and then
+		// carries a NEW recurrence of its own is not a quotation.
+		{"quote-plus-new", "- [sibling](sibling.md): Troisième récidive de x.; ET 3e fois aujourd'hui sur gitsafe\n"},
+		// ⛔ Hole 2: there is no marker, so declaring a file an index silences nothing.
+		{"declared-index", "---\nmetadata:\n  node_type: index\n---\n- [[sibling]]: récidive ×3 ici, même erreur.\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := mem(t, map[string]string{"lesson.md": tc.lesson, "sibling.md": sibling})
+			_, out, _ := drive(t, "--memory", dir)
+			if !strings.Contains(out, "lesson recorded a recurrence") {
+				t.Errorf("a lesson's own sentence must fire; got %q", out)
+			}
+		})
+	}
+	t.Run("fingerprint", func(t *testing.T) {
+		before := "Deuxième fois, déjà.\n"
+		after := before + "- [o](other.md): 3e fois, encore, ici même.\n"
+		dir := mem(t, map[string]string{"lesson.md": before, "other.md": sibling})
+		if code, _, e := drive(t, "--memory", dir, "--accept", "lesson", "--no-gate", "because"); code != 0 {
+			t.Fatalf("accept: %d %s", code, e)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "lesson.md"), []byte(after), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, out, _ := drive(t, "--memory", dir)
+		if code != 1 || !strings.Contains(out, "lesson recorded a NEW recurrence") {
+			t.Errorf("an appended related-lesson line must re-fire the gate; code %d, %q", code, out)
+		}
+	})
+}
+
+// ⛔ #303, the shape agentsync's mem-add writes with no explicit line:
+// "- [name](file.md): <description>". Once the child is accounted for, that row
+// is a quotation of it and is not read as a recurrence of the index; a fold of
+// another such row leaves the index accounted.
+func TestAMemAddRowQuotingTheDescriptionIsNotRead(t *testing.T) {
+	child := func(desc string) string {
+		return "---\nname: c\ndescription: \"" + desc + "\"\n---\nbody\n"
+	}
+	d1, d2 := "Troisième récidive, la note était sous la main", "Deuxième fois, même défaut ailleurs"
+	dir := mem(t, map[string]string{
+		"hub.md": "# idx\nSeconde fois que je classe ce hub.\n- [c1](c1.md): " + d1 + "\n",
+		"c1.md":  child(d1), "c2.md": child(d2),
+	})
+	account(t, dir, "c1")
+	account(t, dir, "c2")
+	account(t, dir, "hub")
+	if code, out, _ := drive(t, "--memory", dir); code != 0 {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "hub.md"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("- [c2](c2.md): " + d2 + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, _ := drive(t, "--memory", dir); code != 0 {
+		t.Fatalf("a mem-add row for an accounted lesson re-fired the index: code %d\n%s", code, out)
+	}
+}
+
+func account(t *testing.T, dir, lesson string) {
+	t.Helper()
+	if code, _, e := drive(t, "--memory", dir, "--accept", lesson, "--no-gate", "because"); code != 0 {
+		t.Fatalf("accepting %s: %d %s", lesson, code, e)
+	}
+}
