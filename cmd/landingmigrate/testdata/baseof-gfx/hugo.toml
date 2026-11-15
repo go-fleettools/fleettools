@@ -1,0 +1,55 @@
+baseURL = 'https://go-gfx.github.io/'
+locale  = 'en-us'
+title   = 'go-gfx'
+# No theme — layouts live in ./layouts
+
+disableKinds = ['taxonomy', 'term', 'rss', 'sitemap']
+
+[params]
+  description = "go-gfx is a pure-Go (CGO=0) 2D graphics foundation — geometry, colour science, pixel-buffer rasters, high-quality resampling, image codecs and a vector rasterizer — the shared substrate under go-images, go-widgets/painter, go-webengine and the desktop stack."
+  brand       = "go-gfx"
+  github      = "go-gfx"
+  heroAccent  = "go-gfx"
+  heroTagline = "The pure-Go 2D graphics foundation. One substrate, many renderers."
+
+  heroIntro = [
+    "<strong>go-gfx</strong> is the pure-Go, <strong>cgo-free</strong> layer that sits <em>below</em> the fleet's image-processing and rendering libraries — the Go answer to what Skia, Cairo and <code>image/draw</code> provide elsewhere. Pixel buffers, colour science, high-quality resampling, image codecs and a vector rasterizer, each usable on its own, with <strong>no third-party dependencies</strong>.",
+    "It is <strong>not</strong> an image-processing library (that is <a href=\"https://github.com/go-images/images\">go-images</a>, the scikit-image analogue) and <strong>not</strong> a widget toolkit (that is <a href=\"https://github.com/go-widgets\">go-widgets</a>). It is the common layer both stand on, so colour blending, resampling, codecs and path rasterization are written and tested <strong>once</strong> and shared across the whole ecosystem."
+  ]
+
+[menu]
+  [[menu.main]]
+    identifier = "why"
+    name       = "Why"
+    url        = "#why"
+    weight     = 10
+  [[menu.main]]
+    identifier = "packages"
+    name       = "Packages"
+    url        = "#packages"
+    weight     = 20
+  [[menu.main]]
+    identifier = "webgpu"
+    name       = "WebGPU"
+    url        = "#webgpu"
+    weight     = 25
+  [[menu.main]]
+    identifier = "gpu2d"
+    name       = "GPU 2D"
+    url        = "#gpu2d"
+    weight     = 27
+  [[menu.main]]
+    identifier = "vulkan"
+    name       = "Vulkan"
+    url        = "#vulkan"
+    weight     = 28
+  [[menu.main]]
+    identifier = "quality"
+    name       = "Quality"
+    url        = "#quality"
+    weight     = 30
+  [[menu.main]]
+    identifier = "docs"
+    name       = "Docs"
+    url        = "https://go-gfx.github.io/docs/"
+    weight     = 40

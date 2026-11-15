@@ -1,0 +1,5 @@
+Real landings, verbatim (the files a migration reads), 2026-11-15:
+- baseof-gfx: github.com/go-gfx/go-gfx.github.io at 906d804d7c511549edb9204eb511f35f01562ba3
+- baseof-typeset: github.com/go-typeset/go-typeset.github.io at 3d23c03dbafc5687b5c81ef86c144d40ed55779c
+The baseof shape: layouts/_default/baseof.html + nav/footer partials + static/css/main.css,
+and an index.html that is only `{{ define "main" }}`. They refused "no <head> or no <body>".

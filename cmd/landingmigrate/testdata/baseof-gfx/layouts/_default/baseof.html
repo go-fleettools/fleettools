@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {{/* Dark Reader repaints pages that already draw their own dark theme, as this one does: ask it to stand aside. */}}
+  <meta name="darkreader-lock">
+  <title>{{ .Site.Title }} &mdash; pure-Go 2D graphics foundation</title>
+  <meta name="description" content="{{ .Site.Params.description }}">
+  <meta name="generator" content="Hugo">
+  <link rel="icon" type="image/svg+xml" href="{{ "favicon.svg" | relURL }}">
+  <link rel="stylesheet" href="{{ "css/main.css" | relURL }}">
+  <script>
+    // Apply the persisted theme before first paint to avoid a flash.
+    // "system" = no data-theme attribute (falls back to prefers-color-scheme).
+    (function () {
+      try {
+        var t = localStorage.getItem("theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body>
+  {{ partial "nav.html" . }}
+
+  <main class="container">
+    {{ block "main" . }}{{ end }}
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  <script>
+    // Three-way theme toggle: light -> dark -> system -> light.
+    (function () {
+      var btn = document.getElementById("theme-toggle");
+      if (!btn) return;
+      var order = ["light", "dark", "system"];
+      var label = { light: "Light", dark: "Dark", system: "System" };
+      var icon  = { light: "☀️", dark: "\u{1F319}", system: "\u{1F5A5}️" };
+      function current() {
+        var t = document.documentElement.dataset.theme;
+        return t === "light" || t === "dark" ? t : "system";
+      }
+      function render() {
+        var c = current();
+        btn.textContent = icon[c] + " " + label[c];
+        btn.setAttribute("aria-label", "Theme: " + label[c] + ". Click to change.");
+      }
+      btn.addEventListener("click", function () {
+        var next = order[(order.indexOf(current()) + 1) % order.length];
+        if (next === "system") {
+          delete document.documentElement.dataset.theme;
+          try { localStorage.removeItem("theme"); } catch (e) {}
+        } else {
+          document.documentElement.dataset.theme = next;
+          try { localStorage.setItem("theme", next); } catch (e) {}
+        }
+        render();
+      });
+      render();
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+<nav>
+  <div class="container">
+    <div class="brand"><img class="brand-logo" src="{{ "img/logo.svg" | relURL }}" alt="" width="28" height="28">{{ .Site.Params.brand }}</div>
+    <div class="nav-links">
+      {{ range .Site.Menus.main }}<a href="{{ .URL }}">{{ .Name }}</a>{{ end }}
+      <a href="https://github.com/{{ .Site.Params.github }}">GitHub</a>
+      <button id="theme-toggle" type="button" class="theme-toggle" aria-label="Toggle theme">System</button>
+    </div>
+  </div>
+</nav>
