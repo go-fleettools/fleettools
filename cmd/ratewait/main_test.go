@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -285,28 +286,158 @@ func TestTheThresholdIsAtLeastAndTheBoundaryIsPinned(t *testing.T) {
 	}
 }
 
-// ⛔ The help has always said "exit 1 ... or the reset stopped advancing", and
-// until this test the code did not do it: a window that resets while the
-// resource stays short left the loop with a distance of zero to sleep, which is
-// the tight poll this command exists to avoid.
-func TestAResetThatDidNotAdvanceIsAFindingAndNotAnotherSleep(t *testing.T) {
-	slept, reads := fake(t,
-		answer(0, 5000, 300, 4745, 5000, 900),
-		answer(0, 5000, 300, 4745, 5000, 900), // the same reset, still short
-	)
-	code, out, _ := drive("--rest", "50")
-	if code != 1 {
-		t.Fatalf("exit %d when the reset did not advance, want 1", code)
+// fakeGen is fake() for a seam whose answer depends on the clock, which is the
+// only way to express a reset that MOVES. Its absence is why three successive
+// bounds over the reset's movement were each written, mutated, and believed.
+func fakeGen(t *testing.T, gen func(at time.Time) string) (slept *[]time.Duration, reads *int) {
+	t.Helper()
+	clock := start
+	var durations []time.Duration
+	var n int
+
+	oldNow, oldSleep, oldRun := now, sleep, runGH
+	t.Cleanup(func() { now, sleep, runGH = oldNow, oldSleep, oldRun })
+
+	now = func() time.Time { return clock }
+	sleep = func(d time.Duration) {
+		durations = append(durations, d)
+		clock = clock.Add(d)
+		if len(durations) > 50 {
+			t.Fatalf("the loop slept %d times: it is not bounded at all", len(durations))
+		}
 	}
-	if !strings.HasPrefix(out, "STALLED core 0/50") {
-		t.Errorf("stdout does not carry the stall as an answer: %q", out)
+	runGH = func(_ context.Context, _ ...string) ([]byte, error) {
+		n++
+		return []byte(gen(clock)), nil
 	}
-	if len(*slept) != 1 {
-		t.Errorf("slept %d time(s), want exactly 1: a second sleep to the same reset is a poll", len(*slept))
+	return &durations, &n
+}
+
+// ⛔⛔ THE BOUND IS A COUNT OF READINGS, and this table is the witness three
+// earlier rules did not have. Each of them was a predicate over the reset --
+// "strictly later", "later by a margin", "strictly in the future" -- and each
+// was defeated by a reset that MOVES, the last one measured at 5 readings in
+// 12s, about 1300 under the default deadline. A count cannot be defeated by
+// what the answer says.
+func TestTheLoopIsBoundedByACountOfReadings(t *testing.T) {
+	limit := maxRounds(maxWait)
+	if limit != 4 {
+		t.Fatalf("maxRounds(%s)=%d, and this table is written for 4", maxWait, limit)
 	}
-	if *reads != 2 {
-		t.Errorf("read %d time(s), want 2", *reads)
+	for _, tc := range []struct {
+		name string
+		gen  func(at time.Time) string
+	}{
+		{"a reset that never moves", func(time.Time) string {
+			return core(0, 5000, start.Add(300*time.Second).Unix())
+		}},
+		{"a reset creeping behind the clock", func(at time.Time) string {
+			return core(0, 5000, at.Add(-time.Second).Unix())
+		}},
+		{"a reset that keeps itself ahead of the clock", func(at time.Time) string {
+			return core(0, 5000, at.Add(time.Second).Unix())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slept, reads := fakeGen(t, tc.gen)
+			code, out, _ := drive("--rest", "50")
+			if code != 1 {
+				t.Fatalf("exit %d, want 1", code)
+			}
+			if !strings.HasPrefix(out, "STALLED core 0/50") {
+				t.Errorf("stdout does not carry the stall as an answer: %q", out)
+			}
+			if *reads != limit {
+				t.Errorf("read %d time(s), want exactly the %d allowed", *reads, limit)
+			}
+			if len(*slept) != limit-1 {
+				t.Errorf("slept %d time(s), want %d: %v", len(*slept), limit-1, *slept)
+			}
+		})
 	}
+}
+
+// The allowance grows with the deadline, because a longer wait may legitimately
+// cover more than one window, and shrinks to the floor for a short one.
+func TestTheAllowanceFollowsTheDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		timeout time.Duration
+		want    int
+	}{
+		{30 * time.Second, 3},
+		{65 * time.Minute, 4},
+		{3 * time.Hour, 6},
+	} {
+		if got := maxRounds(tc.timeout); got != tc.want {
+			t.Errorf("maxRounds(%s)=%d, want %d", tc.timeout, got, tc.want)
+		}
+	}
+}
+
+// ⛔ WHICH BOUND WAS SET, NOT WHAT THE CLOCK SAYS. Review mutated the old
+// discriminator to `if true` and the suite survived: with --timeout 31s a 30s
+// cap expiring plus the latency of killing a child also lands past the
+// deadline, and the run would be told its time was up when the seam had simply
+// not answered.
+func TestWhichBoundWasSetDecidesTheStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout string
+		want    int
+		says    string
+	}{
+		{"the run's deadline was the bound", "1s", 1, "while gh was running"},
+		{"the per-call cap was the bound", "30m", 2, "did not answer rate_limit within 30s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldRun := runGH
+			t.Cleanup(func() { runGH = oldRun })
+			runGH = func(context.Context, ...string) ([]byte, error) {
+				return nil, context.DeadlineExceeded
+			}
+			code, out, errOut := drive("--rest", "50", "--timeout", tc.timeout)
+			if code != tc.want {
+				t.Fatalf("exit %d, want %d; stdout=%q stderr=%q", code, tc.want, out, errOut)
+			}
+			if !strings.Contains(out+errOut, tc.says) {
+				t.Errorf("nothing says %q: stdout=%q stderr=%q", tc.says, out, errOut)
+			}
+		})
+	}
+}
+
+// ⛔ BOTH BRANCHES SURVIVED A MUTATION until this existed, because reaching
+// them needs a child that writes a megabyte to stderr and then fails, which no
+// stock program does. The behaviour did not change; it became answerable.
+func TestGhErrorDeclaresATruncationAndClipsIt(t *testing.T) {
+	t.Run("no stderr leaves the exec error standing", func(t *testing.T) {
+		base := errors.New("exit status 1")
+		if got := ghError(base, &capped{}); got != base {
+			t.Errorf("got %v, want the exec error itself", got)
+		}
+	})
+	t.Run("a long stderr is clipped", func(t *testing.T) {
+		var c capped
+		c.Write([]byte(strings.Repeat("x", 500)))
+		got := ghError(errors.New("exit status 1"), &c).Error()
+		if r := []rune(got); len(r) != 121 {
+			t.Errorf("the reason is %d runes, want 121 (120 plus the ellipsis)", len(r))
+		}
+		if strings.Contains(got, "truncated") {
+			t.Error("a message under the cap must not claim truncation")
+		}
+	})
+	t.Run("a truncated stderr says so", func(t *testing.T) {
+		c := capped{over: true}
+		c.Write([]byte("403 Forbidden, and a megabyte of somebody else's HTML"))
+		got := ghError(errors.New("exit status 1"), &c).Error()
+		if !strings.Contains(got, "[truncated at") {
+			t.Errorf("an unannounced cut reads as the whole message: %q", got)
+		}
+		if !strings.Contains(got, "403 Forbidden") {
+			t.Errorf("the reason itself was lost: %q", got)
+		}
+	})
 }
 
 // ⛔ A reset instant already behind us -- a stale reading, or a clock that
@@ -471,41 +602,6 @@ func TestALimitIsOnlyNeededWhenTheResourceIsShort(t *testing.T) {
 			t.Errorf("stdout=%q, slept=%v", out, *slept)
 		}
 	})
-}
-
-// ⛔⛔ A reset creeping one second per reading is LEGAL by every bound above --
-// at or after 2020, inside the horizon, and strictly greater than the last --
-// and it polled on the floor for the whole deadline: six calls in ten seconds
-// measured by review, about 1950 under the default. The rule is progress.
-func TestAResetThatCreepsIsNotProgress(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		first  int64
-		second int64
-	}{
-		{"creeping behind the clock", -100, -99},
-		{"creeping ahead of it by less than the margin", 120, 121},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			slept, reads := fake(t,
-				core(0, 5000, start.Add(time.Duration(tc.first)*time.Second).Unix()),
-				core(0, 5000, start.Add(time.Duration(tc.second)*time.Second).Unix()),
-			)
-			code, out, _ := drive("--rest", "50")
-			if code != 1 {
-				t.Fatalf("exit %d for a reset that crept, want 1", code)
-			}
-			if !strings.HasPrefix(out, "STALLED core 0/50") {
-				t.Errorf("stdout does not carry the stall: %q", out)
-			}
-			if len(*slept) != 1 {
-				t.Errorf("slept %d time(s), want exactly 1: more than one is the poll", len(*slept))
-			}
-			if *reads != 2 {
-				t.Errorf("read %d time(s), want 2", *reads)
-			}
-		})
-	}
 }
 
 // ⛔ TWO DIFFERENT FACTS, AND ONE MESSAGE FOR BOTH WAS FALSE: the single line

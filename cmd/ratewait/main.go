@@ -83,8 +83,8 @@ const resetMargin = 2 * time.Second
 //
 // ⛔ A CHOSEN number, and the choice is forced: the primary budget resets at
 // most one hour away, so a wait that outlives this is not patience, it is a
-// reset instant that stopped advancing -- a fault to report rather than to sit
-// through.
+// budget that is not refilling -- a fault to report rather than to sit through,
+// and [maxRounds] is what reports it.
 const maxWait = 65 * time.Minute
 
 // A resource is one line of rate_limit's answer.
@@ -126,6 +126,11 @@ passed, and so is a threshold no limit could ever satisfy.
 success says so, because "the budget is fine" would otherwise read as "safe to
 call".
 
+The number of readings a run may take is bounded, at three plus one per hour the
+deadline allows: the window is an hour, so a longer run is a reset that keeps
+moving rather than a budget that is refilling. Three earlier rules about the
+reset's own movement were each defeated by a reset that moves with the clock.
+
 A reset is only believed if it is an instant to wait for: at or after 2020 and
 no more than 24 hours out. The largest int64, which JSON accepts, overflows into
 a time before year 1 and loses every comparison it is in, which made the loop
@@ -143,10 +148,11 @@ fleet.WarnIfStale first, which spends ONE request asking whether the binary is
 current. The budget reading itself is free; the process is not.
 
 exit 0 every named resource is at or above its threshold
-exit 1 the deadline passed in elapsed time, or the reset stopped advancing
+exit 1 the deadline passed in elapsed time, or the readings allowed were spent
+       with the resource still short
 exit 2 the question could not be put: nothing named, an impossible threshold, a
-       short resource with no limit, a reset that is not an instant, an
-       unreadable or empty answer`)
+       short resource with no limit, a reset that is not an instant, a seam that
+       will not answer within 30s, an unreadable or empty answer`)
 
 	rest := c.Flags().Int("rest", 0, "wait until the REST (core) budget has at least this many calls left")
 	graphql := c.Flags().Int("graphql", 0, "wait until the GraphQL budget has at least this many calls left")
@@ -172,31 +178,39 @@ exit 2 the question could not be put: nothing named, an impossible threshold, a
 		if *timeout <= 0 {
 			return cli.Unanswerable("--timeout %s is not a wait", *timeout)
 		}
-		return waitFor(c, wants, now().Add(*timeout))
+		return waitFor(c, wants, now().Add(*timeout), maxRounds(*timeout))
 	}
 	return c
 }
 
-// waitFor is the whole command: read, answer or sleep to the reset, read again.
+// maxRounds is how many readings a run may take, derived from its deadline.
 //
-// ⛔ EVERY ROUND MUST SLEEP TO A STRICTLY LATER RESET THAN THE LAST ONE, and
-// that is what bounds this loop. Two readings can leave it with nothing to wait
-// for: a reset instant already in the past (a stale reading, or a clock that
-// disagrees with GitHub's), and a window that reset while the resource stayed
-// short. In both, the distance to the reset is zero or negative, sleep returns
-// at once, and the loop becomes the tight poll this command exists to avoid --
-// spending the budget it is waiting for, a thousand calls inside one deadline.
-// A reset that did not advance is therefore a FINDING, which is what this
-// command's own help has always said ("the reset stopped advancing") and what
-// its code did not do until a review of that sentence.
-func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
-	// reread says the one short re-read allowed for a first stale reading is
-	// spent. ⛔ There is no "the reset this loop waited past" variable any
-	// more: the compiler reported it unused the moment the unreachable second
-	// guard went, which is a better witness for a removal being complete than
-	// a green suite is.
-	var reread bool
-	for {
+// ⛔⛔ THE LOOP IS BOUNDED BY A COUNT, because THREE successive attempts to bound
+// it by the reset's own movement were each defeated in review, and the third
+// time made the reason plain: the reset is GitHub's to report, so no predicate
+// over it is a bound this command controls.
+//
+//  1. "strictly later than the last"  -- defeated by a reset creeping +1s per
+//     reading, which is strictly later every time.
+//  2. "later by at least the margin"  -- defeated the same way once the sleep
+//     itself advances the clock by more than the margin.
+//  3. "strictly in the future"        -- defeated by a reset that keeps itself
+//     one second AHEAD of the clock: 5 readings in 12s, about 1300 under the
+//     default deadline. Measured, like the two before it.
+//
+// A count cannot be defeated by what the answer says. The derivation: the
+// primary window is one hour -- a real rate_limit body's farthest reset among
+// its fifteen resources is 59m59s -- so a run may legitimately wait out at most
+// one window per hour its deadline allows, plus a first reading, plus one short
+// re-read for a reset a second behind the clock, plus one to confirm the refill.
+func maxRounds(timeout time.Duration) int {
+	return 3 + int(timeout/time.Hour)
+}
+
+// waitFor is the whole command: read, answer or sleep to the reset, read again,
+// at most limit times.
+func waitFor(c *cobra.Command, wants []want, deadline time.Time, limit int) error {
+	for round := 1; ; round++ {
 		res, err := readBudget(deadline)
 		if errors.Is(err, errRunDeadline) {
 			fmt.Fprintf(cli.Out(c), "TIMEOUT waited for %s, the deadline passed at %s while gh was running\n",
@@ -219,22 +233,11 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
 			return nil
 		}
 
-		// ⛔⛔ THE RULE IS PROGRESS, NOT DIFFERENCE, and review measured both
-		// ways the older "did it advance at all" test was not one. A reset
-		// creeping forward one second per reading is perfectly legal (at or
-		// after 2020, within the horizon) and passed that test every round: six
-		// calls in ten seconds under --timeout 10s, about 1950 under the
-		// default deadline -- the thousand calls inside one deadline this very
-		// check claims to prevent. A reset must therefore be strictly in the
-		// FUTURE to be worth sleeping to, and must have moved by at least the
-		// margin since the one already waited out. One short re-read is allowed
-		// for a stale reading, because a reset just behind the clock is what a
-		// cache or a second of skew looks like, and re-reading settles it.
 		// ⛔ THE CALLER'S BOUND IS JUDGED FIRST, and the order is a decision
-		// rather than an accident: when the time is spent AND the reset has
-		// stopped moving, both are true and only one can be printed. "Your
-		// deadline passed" is the fact the caller acts on; "the reset stalled"
-		// is about GitHub and would send them looking the wrong way.
+		// rather than an accident: when the time is spent AND the readings are
+		// used up, both are true and only one can be printed. "Your deadline
+		// passed" is the fact the caller acts on; the other is about GitHub and
+		// would send them looking the wrong way.
 		if now().After(deadline) {
 			fmt.Fprintf(cli.Out(c), "TIMEOUT %s, waited for %s, the deadline passed at %s, next reset %s\n",
 				strings.Join(short, ", "), describeWants(wants),
@@ -242,23 +245,14 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
 			return cli.Found("the deadline passed before %s", describeWants(wants))
 		}
 
-		// ⛔ ONE TEST DOES ALL OF IT, and a second one written beside it was
-		// UNREACHABLE. The first draft of this rule also refused a reset that
-		// had advanced by less than the margin, which reads like the other half
-		// of the creep -- and a mutation turning that clause back into "did it
-		// advance at all" was never caught, which is how the redundancy showed.
-		// The reason is the sleep: a round that waits leaves now() at or past
-		// sleptTo+margin, so any reset within a margin of sleptTo is already
-		// BEHIND the clock and arrives here as stale. A creep forwards and a
-		// creep backwards are therefore the same case, and this is the second
-		// guard in this file removed for being unable to fire rather than
-		// dressed in a test that could not fail.
-		stale := !latest.After(now())
-		if stale && reread {
-			fmt.Fprintf(cli.Out(c), "STALLED %s, the reset at %s is not in the future and the budget did not refill\n",
-				strings.Join(short, ", "), latest.Local().Format("2006-01-02 15:04:05 MST"))
-			return cli.Found("the reset is not in the future: %s still short of %s",
-				strings.Join(short, ", "), describeWants(wants))
+		// ⛔ THE COUNT IS THE BOUND. See [maxRounds] for why it is a count and
+		// not a predicate over the reset: three such predicates were written
+		// here and all three were defeated by a reset that moves.
+		if round >= limit {
+			fmt.Fprintf(cli.Out(c), "STALLED %s after %d reading(s), the last reset at %s did not refill it\n",
+				strings.Join(short, ", "), round, latest.Local().Format("2006-01-02 15:04:05 MST"))
+			return cli.Found("%d reading(s) and %s still short of %s",
+				round, strings.Join(short, ", "), describeWants(wants))
 		}
 
 		wake := latest.Add(resetMargin)
@@ -283,9 +277,9 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
 		}
 		left := wake.Sub(now())
 		// ⛔ A reset already behind us gives a negative distance, and sleep
-		// would return instantly. The floor is what keeps one stale reading
-		// from becoming a poll; the stall check above is what keeps it from
-		// becoming an hour of them.
+		// would return instantly. The floor keeps one stale reading from
+		// becoming a spin inside a round; the round count above is what keeps
+		// the rounds themselves from becoming an hour of polling.
 		if left < resetMargin {
 			left = resetMargin
 		}
@@ -296,10 +290,6 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
 			strings.Join(short, ", "), left.Round(time.Second), latest.Local().Format("2006-01-02 15:04:05 MST"))
 		sleep(left)
 		// ⛔ THE RE-READ IS SPENT BY ANY SLEEP, not only by a stale one: its
-		// purpose is to settle a FIRST reading whose reset is a second behind
-		// the clock, so after any wait a stale reset means the budget did not
-		// refill rather than that the reading was early.
-		reread = true
 	}
 }
 
@@ -430,8 +420,15 @@ func readBudget(deadline time.Time) (map[string]resource, error) {
 	if err != nil {
 		// ⛔ WHICH BOUND EXPIRED CHANGES THE STATUS, so the caller can tell "I
 		// ran out of time" from "this seam does not answer".
-		if ctx.Err() != nil {
-			if !deadline.After(now()) {
+		//
+		// ⛔ AND IT IS ASKED OF THE BOUND THAT WAS SET, not of the clock. An
+		// earlier version re-read now() and compared it to the deadline, which
+		// a mutation to `if true` survived: under --timeout 31s a 30s cap plus
+		// the latency of killing a child lands after the deadline too, and the
+		// run would be told it had run out of time when the seam had simply not
+		// answered. `until` already holds the answer, decided above.
+		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+			if until.Equal(deadline) {
 				return nil, errRunDeadline
 			}
 			return nil, cli.Unanswerable("gh did not answer rate_limit within %s", callCap)
@@ -513,18 +510,31 @@ func execGH(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("gh answered more than %d bytes for rate_limit, which is not that answer", maxAnswer)
 	}
 	if err != nil {
-		if msg := strings.TrimSpace(errOut.buf.String()); msg != "" {
-			// ⚠ The error is clipped and its truncation declared: an
-			// unannounced cut reads as the whole message, and a megabyte of
-			// somebody else's HTML is not a reason.
-			if errOut.over {
-				return nil, fmt.Errorf("%s [truncated at %d bytes]", clip([]byte(msg)), maxAnswer)
-			}
-			return nil, errors.New(clip([]byte(msg)))
-		}
-		return nil, err
+		return nil, ghError(err, &errOut)
 	}
 	return out.buf.Bytes(), nil
+}
+
+// ghError turns a failed child into the reason a reader gets.
+//
+// ⛔ IT IS A FUNCTION OF ITS OWN BECAUSE IT WAS UNTESTABLE INSIDE execGH:
+// review mutated both of its branches -- dropping the truncation note, and
+// dropping the clip -- and BOTH SURVIVED, since reaching them needs a child
+// that writes a megabyte to stderr and then fails, which no stock program
+// does. The behaviour is the same; what changed is that it can now be put a
+// question directly.
+//
+// ⚠ The cut is declared: an unannounced truncation reads as the whole message,
+// and a megabyte of somebody else's HTML is not a reason.
+func ghError(err error, errOut *capped) error {
+	msg := strings.TrimSpace(errOut.buf.String())
+	if msg == "" {
+		return err
+	}
+	if errOut.over {
+		return fmt.Errorf("%s [truncated at %d bytes]", clip([]byte(msg)), maxAnswer)
+	}
+	return errors.New(clip([]byte(msg)))
 }
 
 // clip shortens an answer for a message, counting RUNES: slicing bytes at 120
