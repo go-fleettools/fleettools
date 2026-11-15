@@ -99,20 +99,49 @@ func TestANameThatResolvesToNothingIsRefusedNotPassed(t *testing.T) {
 }
 
 // Neither flag has a default, so a run without them has no rule to enforce.
+//
+// ⛔ The bare run's refusal CHANGED when the exit-point rule was added, and the
+// want is written per case rather than as one shared substring: with no flag at
+// all there are now two rules to choose between, and a message naming only
+// --wraps/--via would tell a caller the other one does not exist. Half-spelling
+// one rule still says "both required" about THAT rule.
 func TestWithoutBothDeclarationsItRefuses(t *testing.T) {
 	dir := pkg(t, map[string]string{"p.go": wrapped})
-	for _, args := range [][]string{
-		{dir},
-		{"--wraps", "await", dir},
-		{"--via", "(*Peer).awaited", dir},
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{dir}, "give a rule"},
+		{[]string{"--wraps", "await", dir}, "--wraps and --via are both required"},
+		{[]string{"--via", "(*Peer).awaited", dir}, "--wraps and --via are both required"},
+		{[]string{"--asks", "gathered", dir}, "--asks and --in are both required"},
+		{[]string{"--in", "(*Peer).Offer", dir}, "--asks and --in are both required"},
 	} {
-		code, _, errOut := drive(t, args...)
+		code, _, errOut := drive(t, c.args...)
 		if code != 2 {
-			t.Errorf("%v: code %d, want 2", args, code)
+			t.Errorf("%v: code %d, want 2", c.args, code)
 		}
-		if !strings.Contains(errOut, "both required") {
-			t.Errorf("%v: it should say both are required; it said %q", args, errOut)
+		if !strings.Contains(errOut, c.want) {
+			t.Errorf("%v: want %q in the refusal; it said %q", c.args, c.want, errOut)
 		}
+	}
+}
+
+// ⛔ Two rules cannot share one exit status. A run given both used to be
+// decided by whichever block came first in the source, which is the tool
+// guessing what the caller meant.
+func TestTheTwoRulesCannotBeGivenTogether(t *testing.T) {
+	dir := pkg(t, map[string]string{"p.go": wrapped})
+	code, out, errOut := drive(t, "--wraps", "await", "--via", "(*Peer).awaited",
+		"--asks", "gathered", "--in", "(*Peer).Offer", dir)
+	if code != 2 {
+		t.Errorf("code %d, want 2", code)
+	}
+	if !strings.Contains(errOut, "one rule at a time") {
+		t.Errorf("it should say one rule at a time; it said %q", errOut)
+	}
+	if strings.Contains(out, "goes through") || strings.Contains(out, "asks") {
+		t.Errorf("a refusal must not also report on either rule: %q", out)
 	}
 }
 
