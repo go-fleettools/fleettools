@@ -920,7 +920,7 @@ func scan(dir string) ([]recorded, error) {
 			// refuses rather than reporting a corpus it could not finish.
 			return nil, fmt.Errorf("reading %s: %w", name, err)
 		}
-		if mark, ok := fingerprint(b, dir); ok {
+		if mark, ok := fingerprint(b, dir, name); ok {
 			found = append(found, recorded{lesson: strings.TrimSuffix(name, ".md"), mark: mark})
 		}
 	}
@@ -950,12 +950,12 @@ func scan(dir string) ([]recorded, error) {
 // EXISTS in dir is not read. A recurrence sentence of the hub's OWN still is,
 // and so is a "pointer" whose target is not there: it points at nothing, so it
 // is prose.
-func fingerprint(b []byte, dir string) (string, bool) {
+func fingerprint(b []byte, dir, self string) (string, bool) {
 	var hit []string
 	for _, line := range strings.Split(string(b), "\n") {
 		for _, re := range markers {
 			if re.MatchString(line) {
-				if !pointer(line, dir) {
+				if !pointer(line, dir, self) {
 					hit = append(hit, strings.TrimSpace(line))
 				}
 				break
@@ -981,7 +981,7 @@ var pointerRe = regexp.MustCompile(`^(?:[-*+>]\s+)?(?:\[[^\]]*\]\(([^)\s]+)\)|\[
 // pointer reports whether line opens with a link to a memory that exists in
 // dir. A URL, a link to a file that is not there, or a line that does not open
 // with a link is not a pointer.
-func pointer(line, dir string) bool {
+func pointer(line, dir, self string) bool {
 	m := pointerRe.FindStringSubmatch(line)
 	if m == nil {
 		return false
@@ -999,8 +999,62 @@ func pointer(line, dir string) bool {
 	if target == "" || target != filepath.Base(target) || !strings.HasSuffix(target, ".md") {
 		return false
 	}
-	st, err := os.Stat(filepath.Join(dir, target))
-	return err == nil && st.Mode().IsRegular()
+	// ⛔ A link is not a quotation. The target must be ANOTHER memory that scan
+	// fingerprints (never this file, never the ledger or MEMORY.md), and what
+	// follows the separator must QUOTE it; "- [[sibling]]: récidive ×3 ici" is
+	// the memory's own sentence about its sibling, and dropping it would let a
+	// lesson gain occurrences in silence.
+	if target == self || target == ledgerName || target == "MEMORY.md" {
+		return false
+	}
+	tb, err := os.ReadFile(filepath.Join(dir, target))
+	if err != nil {
+		return false
+	}
+	return quotes(line[len(m[0]):], tb)
+}
+
+// norm collapses whitespace and strips the quotation marks a description is
+// wrapped in, so a quotation and its source compare equal.
+func norm(s string) string {
+	return strings.Trim(strings.Join(strings.Fields(s), " "), "\"'`«»“”")
+}
+
+// quotes reports whether text is a quotation of the memory body: the whole of
+// its frontmatter description (what mem-add writes into an index), or the whole
+// of one of its recurrence lines. ⛔ A memory with no recurrence line has
+// nothing a hub could be quoting, so the words are the hub's own.
+// Equality, not prefix: measured on the real hub, no pointer line is a prefix of
+// its target's description or recurrence lines either, and a prefix rule would
+// let any short stub like "3e fois" through.
+func quotes(text string, body []byte) bool {
+	want := norm(text)
+	if want == "" {
+		return false
+	}
+	var cands []string
+	recurs := false
+	for _, l := range strings.Split(string(body), "\n") {
+		if v, ok := strings.CutPrefix(l, "description:"); ok {
+			cands = append(cands, norm(v))
+		}
+		for _, re := range markers {
+			if re.MatchString(l) {
+				recurs = true
+				cands = append(cands, norm(strings.TrimLeft(strings.TrimSpace(l), "-*+># ")))
+				break
+			}
+		}
+	}
+	if !recurs {
+		return false
+	}
+	for _, c := range cands {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 func readLedger(path string) (map[string]entry, error) {
