@@ -581,6 +581,50 @@ func (p *Peer) Close() {` + c.body + `
 	}
 }
 
+// ⛔⛔ "EVERY exit is wrong" is the report most likely to be a rule aimed at the
+// wrong function, and it is the one that reads as the gravest finding. Measured
+// on go-crdt/collab: (*Peer).Offer answers 6 of 6 against the usability
+// primitives and is clean, because it DELEGATES to gatherICE.
+func TestWhenNotOneExitAsksTheRunSaysItCannotTellWhy(t *testing.T) {
+	dir := pkg(t, map[string]string{"p.go": asksFixture + `
+func (p *Peer) delegate() error { return gathered(p) }
+
+func (p *Peer) Offer() error {
+	if p.ready {
+		return nil
+	}
+	return p.delegate()
+}
+`})
+	code, out, _ := drive(t, "--asks", "gathered", "--in", "(*Peer).Offer", dir)
+	if code != 1 {
+		t.Fatalf("code %d, want 1 (a finding, not a refusal)\nout: %s", code, out)
+	}
+	if !strings.Contains(out, "NOT ONE exit asked") {
+		t.Errorf("it must say it cannot tell delegation from a missing rule; it said %q", out)
+	}
+	// And the warning must NOT appear when some exits do ask: that is the case
+	// where the count means what it says.
+	dir2 := pkg(t, map[string]string{"p.go": asksFixture + `
+func (p *Peer) Offer() error {
+	if p.ready {
+		return nil
+	}
+	if gathered(p) != nil {
+		return nil
+	}
+	return nil
+}
+`})
+	code, out, _ = drive(t, "--asks", "gathered", "--in", "(*Peer).Offer", dir2)
+	if code != 1 {
+		t.Fatalf("code %d, want 1\nout: %s", code, out)
+	}
+	if strings.Contains(out, "NOT ONE exit asked") {
+		t.Errorf("one exit did ask, so the warning is wrong: %q", out)
+	}
+}
+
 // ⛔ A malformed --asks gets its OWN refusal, not the absent-name one. Both exit
 // 2, which is why a mutation that deleted this check survived until the message
 // was asserted: an exit status alone cannot tell a caller which mistake they

@@ -172,6 +172,21 @@ func checkExits(out, errOut io.Writer, fset *token.FileSet, files []*ast.File, o
 	}
 	if bad > 0 {
 		fmt.Fprintf(out, "%d of %d exit(s) of %s do not ask %s\n", bad, len(found), o.in, asksName)
+		// ⛔⛔ NOT ONE EXIT ASKED, and that reads as the strongest possible
+		// finding when it is usually the weakest: a rule aimed at the wrong
+		// function. Measured on go-crdt/collab, the repository this command was
+		// written for — (*Peer).Offer answers "6 of 6" against the primitive set,
+		// and it is clean: it DELEGATES the question to gatherICE, so the
+		// predicate to declare there is gatherICE itself. A report that is true
+		// and useless is how a gate loses its reader, so the run says which of
+		// the two it cannot tell apart.
+		//
+		// ⚠ It stays exit 1 rather than 2: if the rule IS aimed right, a function
+		// that never asks is the real thing this command looks for, and
+		// downgrading a finding to "refused to decide" would hide it.
+		if bad == len(found) {
+			fmt.Fprintf(out, "⚠ NOT ONE exit asked: either %s delegates the question (declare the delegate instead) or the rule is wholly unimplemented there. This command cannot tell those apart\n", o.in)
+		}
 		return 1
 	}
 	if len(stale) > 0 {
