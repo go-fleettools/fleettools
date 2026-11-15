@@ -275,3 +275,193 @@ func TestLookalikePrefixInAPlainLogInventsNoFailure(t *testing.T) {
 		t.Errorf("status %d; a failure was invented:\n%s", code, out)
 	}
 }
+
+// skipLogReal is a `go test -v` log in the shape the real one has: the skip
+// message sits under its `--- SKIP` line, indented. TestWasm is a guard behind an
+// unset variable (the rbgo#682 case).
+const skipLogReal = `=== RUN   TestWasm
+--- SKIP: TestWasm (0.00s)
+    wasm_test.go:7: RBGO_BUILD_IT not set
+=== RUN   TestOK
+--- PASS: TestOK (0.00s)
+PASS
+ok  	example/pkg	1.012s
+`
+
+// ⛔ A SKIP NO ALLOWANCE ACCEPTS IS THE FINDING: exit 1, and it is named.
+func TestAnUndeclaredSkipIsNamedAndExitsOne(t *testing.T) {
+	code, out := drive(t, "-log", write(t, skipLogReal), "-skipped")
+	if code != 1 {
+		t.Errorf("status = %d, want 1; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "undeclared skip: TestWasm") ||
+		!strings.Contains(out, "skips=1 allowed=0 undeclared=1") {
+		t.Errorf("the skip was not named:\n%s", out)
+	}
+	// An allowance that matches ANOTHER message does not accept it.
+	code, out = drive(t, "-log", write(t, skipLogReal), "-skipped", "-allow-skip", "font=no system fonts")
+	if code != 1 || !strings.Contains(out, "undeclared skip: TestWasm") {
+		t.Errorf("a non-matching allowance accepted the skip: status %d\n%s", code, out)
+	}
+}
+
+// A declared skip is accounted for: exit 0 and counted under its name.
+func TestADeclaredSkipIsAccountedFor(t *testing.T) {
+	code, out := drive(t, "-log", write(t, skipLogReal), "-skipped", "-allow-skip", "wasm=RBGO_BUILD_IT")
+	if code != 0 {
+		t.Errorf("status = %d, want 0; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "skips=1 allowed=1 undeclared=0") || !strings.Contains(out, "allowed wasm: 1") ||
+		strings.Contains(out, "undeclared skip") {
+		t.Errorf("the allowed skip was not counted:\n%s", out)
+	}
+	_, out = drive(t, "-log", write(t, skipLogReal), "-skipped", "-allow-skip", "wasm=RBGO_BUILD_IT", "-all")
+	if !strings.Contains(out, "skip wasm: TestWasm") {
+		t.Errorf("-all did not name the allowed skip:\n%s", out)
+	}
+}
+
+// Without -skipped the skip is not judged: the check is opt-in.
+func TestSkipsAreIgnoredWithoutTheFlag(t *testing.T) {
+	code, out := drive(t, "-log", write(t, skipLogReal))
+	if code != 0 || strings.Contains(out, "skips=") {
+		t.Errorf("status %d; skips judged without -skipped:\n%s", code, out)
+	}
+}
+
+// ⛔ AN ALLOWANCE MATCHING THE EMPTY STRING ACCEPTS EVERY SKIP: refused, as -cause is.
+func TestAnEmptyAllowSkipIsRefusedRatherThanAccepted(t *testing.T) {
+	for _, bad := range []string{"wasm=", "=RBGO_BUILD_IT", "wasm"} {
+		code, out := drive(t, "-log", write(t, skipLogReal), "-skipped", "-allow-skip", bad)
+		if code != 2 {
+			t.Errorf("-allow-skip %q: status = %d, want 2; output:\n%s", bad, code, out)
+		}
+		if !strings.Contains(out, "-allow-skip") {
+			t.Errorf("-allow-skip %q: the refusal does not name the flag:\n%s", bad, out)
+		}
+	}
+}
+
+// An allowance with the check off is a declaration nothing reads: refused.
+func TestAllowSkipWithoutSkippedIsRefused(t *testing.T) {
+	code, out := drive(t, "-log", write(t, skipLogReal), "-allow-skip", "wasm=RBGO_BUILD_IT")
+	if code != 2 {
+		t.Errorf("status = %d, want 2; output:\n%s", code, out)
+	}
+}
+
+// ⛔ WITHOUT -v A SKIP IS NOT PRINTED. A log that cannot show one must not be
+// answered "no undeclared skips".
+func TestSkippedOnALogWithoutVerboseOutputIsRefused(t *testing.T) {
+	code, out := drive(t, "-log", write(t, "ok  \texample/pkg\t0.012s\n"), "-skipped")
+	if code != 2 {
+		t.Errorf("status = %d, want 2; output:\n%s", code, out)
+	}
+	if strings.Contains(out, "skips=0") {
+		t.Errorf("reported a count for a log that cannot show skips:\n%s", out)
+	}
+}
+
+// ⛔ A PARENT CARRIES NO MESSAGE OF ITS OWN, for a skip as for a failure: it is
+// attributed when it HAS subtests and EVERY one of them is.
+const subtestSkips = `=== RUN   TestParent
+--- SKIP: TestParent (0.00s)
+    --- SKIP: TestParent/a (0.00s)
+        p_test.go:3: no GPU
+    --- SKIP: TestParent/b (0.00s)
+        p_test.go:3: no GPU
+ok  	example/pkg	0.5s
+`
+
+func TestAParentSkipIsAttributedWhenEverySubtestIs(t *testing.T) {
+	code, out := drive(t, "-log", write(t, subtestSkips), "-skipped", "-allow-skip", "gpu=no GPU")
+	if code != 0 {
+		t.Errorf("status = %d, want 0; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "skips=3 allowed=3 undeclared=0") || strings.Contains(out, "undeclared skip") {
+		t.Errorf("the parent was not attributed from its subtests:\n%s", out)
+	}
+}
+
+// …and ONE subtest skipped for another reason keeps the parent undeclared,
+// because that subtest is the real finding.
+func TestOneUndeclaredSubtestSkipKeepsItsParentUndeclared(t *testing.T) {
+	log := strings.Replace(subtestSkips, "p_test.go:3: no GPU\nok", "p_test.go:9: RBGO_BUILD_IT unset\nok", 1)
+	code, out := drive(t, "-log", write(t, log), "-skipped", "-allow-skip", "gpu=no GPU")
+	if code != 1 {
+		t.Errorf("status = %d, want 1; output:\n%s", code, out)
+	}
+	for _, want := range []string{"undeclared skip: TestParent\n", "undeclared skip: TestParent/b\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "undeclared skip: TestParent/a") {
+		t.Errorf("the allowed subtest was reported:\n%s", out)
+	}
+}
+
+// A skip body ends at the next test boundary: the NEXT test's output must not be
+// read as this skip's reason, or a declared substring in it would accept it.
+func TestASkipBodyEndsAtTheNextBoundary(t *testing.T) {
+	const log = `=== RUN   TestA
+--- SKIP: TestA (0.00s)
+    a_test.go:1: some reason
+=== RUN   TestB
+    b_test.go:1: RBGO_BUILD_IT mentioned by another test
+--- PASS: TestB (0.00s)
+ok  	example/pkg	0.5s
+`
+	code, out := drive(t, "-log", write(t, log), "-skipped", "-allow-skip", "wasm=RBGO_BUILD_IT")
+	if code != 1 || !strings.Contains(out, "undeclared skip: TestA") {
+		t.Errorf("status %d; another test's output accepted the skip:\n%s", code, out)
+	}
+}
+
+// The same test name skipped for two reasons in two packages: the accepted one
+// must not hide the other (skips are not deduplicated by name).
+func TestTheSameSkippedNameInTwoPackagesIsJudgedTwice(t *testing.T) {
+	const log = `--- SKIP: TestRun (0.00s)
+    a_test.go:1: no GPU
+ok  	example/a	0.5s
+--- SKIP: TestRun (0.00s)
+    b_test.go:1: RBGO_BUILD_IT unset
+ok  	example/b	0.5s
+`
+	code, out := drive(t, "-log", write(t, log), "-skipped", "-allow-skip", "gpu=no GPU")
+	if code != 1 || !strings.Contains(out, "skips=2 allowed=1 undeclared=1") {
+		t.Errorf("status %d; the second package's skip was hidden:\n%s", code, out)
+	}
+}
+
+// ⛔ THE TWO CHECKS SHARE ONE EXIT STATUS, so a single return could let the
+// satisfied one speak for the broken one. Both directions.
+const failAndSkip = `=== RUN   TestBrowser
+--- FAIL: TestBrowser (0.01s)
+    y_test.go:3: dyld: Library not loaded: libsimdjson.34.dylib
+=== RUN   TestWasm
+--- SKIP: TestWasm (0.00s)
+    wasm_test.go:7: RBGO_BUILD_IT not set
+FAIL	example/pkg	0.5s
+`
+
+func TestAnExplainedFailureDoesNotExcuseAnUndeclaredSkip(t *testing.T) {
+	code, out := drive(t, "-log", write(t, failAndSkip), "-cause", "node=libsimdjson", "-skipped")
+	if code != 1 || !strings.Contains(out, "undeclared skip: TestWasm") ||
+		!strings.Contains(out, "failures=1 attributed=1 unexplained=0") {
+		t.Errorf("status %d; the explained failure spoke for the skip:\n%s", code, out)
+	}
+}
+
+func TestADeclaredSkipDoesNotExcuseAnUnexplainedFailure(t *testing.T) {
+	code, out := drive(t, "-log", write(t, failAndSkip), "-skipped", "-allow-skip", "wasm=RBGO_BUILD_IT")
+	if code != 1 || !strings.Contains(out, "unexplained: TestBrowser") ||
+		!strings.Contains(out, "skips=1 allowed=1 undeclared=0") {
+		t.Errorf("status %d; the declared skip spoke for the failure:\n%s", code, out)
+	}
+	// and with both satisfied it is clean
+	code, out = drive(t, "-log", write(t, failAndSkip), "-cause", "node=libsimdjson", "-skipped", "-allow-skip", "wasm=RBGO_BUILD_IT")
+	if code != 0 {
+		t.Errorf("both satisfied: status %d, want 0:\n%s", code, out)
+	}
+}
