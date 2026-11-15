@@ -383,6 +383,16 @@ func TestAParentSkipIsAttributedWhenEverySubtestIs(t *testing.T) {
 	}
 }
 
+// A log cut before its package line (a partial `gh run view --log-failed`) still
+// attributes the parent: the last package's skips are not left unjudged.
+func TestAParentSkipIsAttributedInALogCutBeforeItsPackageLine(t *testing.T) {
+	log := strings.Replace(subtestSkips, "ok  \texample/pkg\t0.5s\n", "", 1)
+	code, out := drive(t, "-log", write(t, log), "-skipped", "-allow-skip", "gpu=no GPU")
+	if code != 0 || !strings.Contains(out, "skips=3 allowed=3 undeclared=0") {
+		t.Errorf("status %d; the parent was left unattributed:\n%s", code, out)
+	}
+}
+
 // …and ONE subtest skipped for another reason keeps the parent undeclared,
 // because that subtest is the real finding.
 func TestOneUndeclaredSubtestSkipKeepsItsParentUndeclared(t *testing.T) {
@@ -415,6 +425,12 @@ ok  	example/pkg	0.5s
 	code, out := drive(t, "-log", write(t, log), "-skipped", "-allow-skip", "wasm=RBGO_BUILD_IT")
 	if code != 1 || !strings.Contains(out, "undeclared skip: TestA") {
 		t.Errorf("status %d; another test's output accepted the skip:\n%s", code, out)
+	}
+	// Parallel tests are announced with `=== NAME`, which also ends the body.
+	named := strings.Replace(log, "=== RUN   TestB", "=== NAME  TestB", 1)
+	code, out = drive(t, "-log", write(t, named), "-skipped", "-allow-skip", "wasm=RBGO_BUILD_IT")
+	if code != 1 || !strings.Contains(out, "undeclared skip: TestA") {
+		t.Errorf("=== NAME: status %d; another test's output accepted the skip:\n%s", code, out)
 	}
 }
 
