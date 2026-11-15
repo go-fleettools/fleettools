@@ -802,6 +802,76 @@ func (t *T) Offer() (int, error) {
 	}
 }
 
+// ⛔⛔ WHAT FOLLOWS AN `if` IS THE JOIN OF EVERY PATH THAT REACHES IT, not its
+// false branch — and getting that wrong is how the polarity refinement
+// introduced a defect WORSE than the phantom it removed. A body that does not
+// exit falls through, so the continuation cannot assume the condition was
+// false.
+//
+// The last row is the control, and it is also the fix's condition: when the
+// body TERMINATES, the continuation really is the false path and keeps its
+// credit. Without that row a fix could simply refuse to credit anything and
+// look correct.
+func TestTheContinuationOfAnIfIsAJoin(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		body  string
+		clean bool // is the exit after the if credited?
+	}{
+		{"a body that falls through reaches the exit without asking", `
+	if t.fast || !t.ready() {
+		t.n++
+	}
+	return nil`, false},
+		{"with an else, both bodies fall through", `
+	if t.fast || !t.ready() {
+		t.n++
+	} else {
+		t.n--
+	}
+	return nil`, false},
+		{"a loop left by break never evaluated a false condition", `
+	for t.fast || !t.ready() {
+		if t.n > 0 {
+			break
+		}
+		t.n++
+	}
+	return nil`, false},
+		{"CONTROL: a body that returns cannot fall through, so the false path holds", `
+	if t.fast || !t.ready() {
+		return errBad
+	}
+	return nil`, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := pkg(t, map[string]string{"p.go": shortFixture + `
+var errBad error
+
+func (t *T) Offer() error {` + c.body + `
+}
+`})
+			code, out, errOut := drive(t, "--asks", "(*T).ready", "--in", "(*T).Offer", dir)
+			if c.clean {
+				// The body's own exit is still a finding; the one after it is not.
+				if code != 1 {
+					t.Fatalf("code %d, want 1\nout: %s\nerr: %s", code, out, errOut)
+				}
+				if n := strings.Count(out, "without asking ready"); n != 1 {
+					t.Errorf("only the body's exit should be named, %d were:\n%s", n, out)
+				}
+				return
+			}
+			if code != 1 {
+				t.Fatalf("code %d, want 1 (the continuation is reachable without asking)\nout: %s\nerr: %s", code, out, errOut)
+			}
+			if !strings.Contains(out, "without asking ready") {
+				t.Errorf("the exit after the statement must be named; it said %q", out)
+			}
+		})
+	}
+}
+
 // ⛔⛔ A goto MAKES SOURCE ORDER A LIE, and source order is all this pass has.
 // `if t.fast { goto done }` jumps over the ask and reaches an exit that was
 // credited because the ask sits above it in the text.

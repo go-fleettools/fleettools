@@ -461,13 +461,35 @@ func walkStmt(s ast.Stmt, asked bool, asks map[string]bool, add func(token.Pos, 
 		// phantom is the safe direction, but a gate that cries wolf is a gate
 		// somebody turns off, so each side is credited with what it actually
 		// knows. See asksWhen.
+		// ⛔⛔ WHAT FOLLOWS AN `if` IS NOT ITS FALSE BRANCH, it is the JOIN of
+		// every path that gets there — and getting that wrong is how the
+		// refinement above introduced a worse defect than the phantom it
+		// removed. Measured:
+		//
+		//	if t.fast || !t.ready() { t.n++ }
+		//	return nil   -> "every one of the 1 exit(s) asks ready", exit 0
+		//
+		// On the t.fast path ready() is never called and the body FALLS
+		// THROUGH to that return. An if whose body does not exit is the common
+		// case, so this was more reachable than the shape it replaced. The
+		// continuation may assume only what EVERY path reaching it knows.
 		init := asked || asksIn(asks, st.Init)
-		walkStmts(st.Body.List, init || asksWhen(asks, st.Cond, true), asks, add)
-		cont := init || asksWhen(asks, st.Cond, false)
+		bodyEnd := walkStmts(st.Body.List, init || asksWhen(asks, st.Cond, true), asks, add)
+		elseIn := init || asksWhen(asks, st.Cond, false)
+		elseEnd := elseIn
 		if st.Else != nil {
-			walkStmt(st.Else, cont, asks, add)
+			elseEnd = walkStmt(st.Else, elseIn, asks, add)
 		}
-		return cont
+		switch {
+		case endsTerminating(st.Body.List, false):
+			// The body cannot fall through, so the continuation IS the false
+			// path — which is the case the refinement was right about.
+			return elseEnd
+		case st.Else != nil && terminating(st.Else, false):
+			return bodyEnd
+		default:
+			return bodyEnd && elseEnd
+		}
 	case *ast.ForStmt:
 		// Init and Cond are evaluated before the first iteration; Post is NOT
 		// evaluated at all when the body never runs, so it counts for nothing.
@@ -475,6 +497,14 @@ func walkStmt(s ast.Stmt, asked bool, asks map[string]bool, add func(token.Pos, 
 		// are reached on a false one — the same two answers as an if.
 		init := asked || asksIn(asks, st.Init)
 		walkStmts(st.Body.List, init || asksWhen(asks, st.Cond, true), asks, add)
+		// ⛔ A `break` LEAVES THE LOOP WITH THE CONDITION TRUE, so the
+		// statements after it cannot assume the condition evaluated false.
+		// Measured: `for t.fast || !t.ready() { if t.n > 0 { break } … }`
+		// credited the following return as if the loop had ended normally.
+		// hasBreak is label-blind, which over-detects — phantoms only.
+		if hasBreak(st.Body) {
+			return init || asksIn(asks, st.Cond)
+		}
 		return init || asksWhen(asks, st.Cond, false)
 	case *ast.RangeStmt:
 		head := asked || asksIn(asks, st.X) // the range expression is evaluated once
