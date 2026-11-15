@@ -203,8 +203,25 @@ exit 2 the question could not be put: nothing named, an impossible threshold, a
 // its fifteen resources is 59m59s -- so a run may legitimately wait out at most
 // one window per hour its deadline allows, plus a first reading, plus one short
 // re-read for a reset a second behind the clock, plus one to confirm the refill.
+//
+// ⛔ THE WINDOWS ARE ROUNDED UP, AND ROUNDING DOWN REFUSED A LEGITIMATE RUN.
+// The sentence above says "per hour its deadline ALLOWS", and a 59-minute
+// deadline plainly allows one window -- integer division paid zero. Measured by
+// review on one non-hostile sequence, every reset a real instant: exit 1 under
+// --timeout 59m and exit 0 under --timeout 60m, with the refused run's STALLED
+// line naming a reset THREE SECONDS in the future it would not wait three
+// seconds for. ⛔ And the suite had pinned the undercount as the specification
+// -- a case asserting 3 for a 30-second deadline -- which is why a mutation
+// raising the count was "caught": the test moved with the defect instead of
+// against it. The deadline is the other bound and is the one that stops a short
+// run; this count exists to stop a RECEDING reset, so it must not also refuse a
+// patient one.
 func maxRounds(timeout time.Duration) int {
-	return 3 + int(timeout/time.Hour)
+	windows := int((timeout + time.Hour - 1) / time.Hour) // ceil
+	if windows < 1 {
+		windows = 1
+	}
+	return 3 + windows
 }
 
 // waitFor is the whole command: read, answer or sleep to the reset, read again,
@@ -245,16 +262,6 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time, limit int) erro
 			return cli.Found("the deadline passed before %s", describeWants(wants))
 		}
 
-		// ⛔ THE COUNT IS THE BOUND. See [maxRounds] for why it is a count and
-		// not a predicate over the reset: three such predicates were written
-		// here and all three were defeated by a reset that moves.
-		if round >= limit {
-			fmt.Fprintf(cli.Out(c), "STALLED %s after %d reading(s), the last reset at %s did not refill it\n",
-				strings.Join(short, ", "), round, latest.Local().Format("2006-01-02 15:04:05 MST"))
-			return cli.Found("%d reading(s) and %s still short of %s",
-				round, strings.Join(short, ", "), describeWants(wants))
-		}
-
 		wake := latest.Add(resetMargin)
 		// ⛔ THE DEADLINE IS ELAPSED TIME, AND COMPARING IT ONLY TO wake WAS A
 		// SENTENCE WITH NO CODE: the help promised "exit 1 the deadline passed
@@ -275,6 +282,24 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time, limit int) erro
 				latest.Local().Format("2006-01-02 15:04:05 MST"), deadline.Local().Format("15:04:05 MST"))
 			return cli.Found("the next reset is past the deadline for %s", describeWants(wants))
 		}
+
+		// ⛔ THE COUNT IS THE BOUND. See [maxRounds] for why it is a count and
+		// not a predicate over the reset: three such predicates were written
+		// here and all three were defeated by a reset that moves.
+		//
+		// ⛔ IT IS JUDGED AFTER BOTH DEADLINE TESTS, which is the third ordering
+		// decision in this loop and the same principle as the first two: when
+		// the readings are spent AND the next reset lies past the deadline, both
+		// are true and the caller acts on the deadline. Printing STALLED there
+		// would describe GitHub's budget when the answer is about their own
+		// patience.
+		if round >= limit {
+			fmt.Fprintf(cli.Out(c), "STALLED %s after %d reading(s), the last reset at %s did not refill it\n",
+				strings.Join(short, ", "), round, latest.Local().Format("2006-01-02 15:04:05 MST"))
+			return cli.Found("%d reading(s) and %s still short of %s",
+				round, strings.Join(short, ", "), describeWants(wants))
+		}
+
 		left := wake.Sub(now())
 		// ⛔ A reset already behind us gives a negative distance, and sleep
 		// would return instantly. The floor keeps one stale reading from
@@ -289,7 +314,6 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time, limit int) erro
 		fmt.Fprintf(cli.Err(c), "%s -- sleeping %s, to the reset at %s\n",
 			strings.Join(short, ", "), left.Round(time.Second), latest.Local().Format("2006-01-02 15:04:05 MST"))
 		sleep(left)
-		// ⛔ THE RE-READ IS SPENT BY ANY SLEEP, not only by a stale one: its
 	}
 }
 

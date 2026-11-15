@@ -321,8 +321,8 @@ func fakeGen(t *testing.T, gen func(at time.Time) string) (slept *[]time.Duratio
 // what the answer says.
 func TestTheLoopIsBoundedByACountOfReadings(t *testing.T) {
 	limit := maxRounds(maxWait)
-	if limit != 4 {
-		t.Fatalf("maxRounds(%s)=%d, and this table is written for 4", maxWait, limit)
+	if limit != 5 {
+		t.Fatalf("maxRounds(%s)=%d, and this table is written for 5", maxWait, limit)
 	}
 	for _, tc := range []struct {
 		name string
@@ -358,19 +358,86 @@ func TestTheLoopIsBoundedByACountOfReadings(t *testing.T) {
 }
 
 // The allowance grows with the deadline, because a longer wait may legitimately
-// cover more than one window, and shrinks to the floor for a short one.
+// cover more than one window.
+//
+// ⛔ THE WINDOWS ARE ROUNDED UP, and the 59-minute row is the one that matters:
+// an earlier version of this table asserted 3 for a 30-second deadline, which
+// PINNED THE UNDERCOUNT AS THE SPECIFICATION -- a mutation raising the count was
+// "caught" by a test that had moved with the defect rather than against it. A
+// 59-minute deadline allows a window; integer division paid none.
 func TestTheAllowanceFollowsTheDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		timeout time.Duration
 		want    int
 	}{
-		{30 * time.Second, 3},
-		{65 * time.Minute, 4},
+		// ⛔ A non-positive deadline cannot reach this through the command --
+		// RunE refuses it first -- but a mutation of the minimum-window guard
+		// SURVIVED, and the honest reading of that was the third one: not dead
+		// code, a corpus with no witness. maxRounds is a package function its
+		// own tests already call directly, so it must stay total: deleting the
+		// guard would hand a future caller a bound of 3 instead of 4.
+		{0, 4},
+		{-5 * time.Second, 4},
+		{30 * time.Second, 4},
+		{59 * time.Minute, 4},
+		{60 * time.Minute, 4},
+		{65 * time.Minute, 5},
 		{3 * time.Hour, 6},
 	} {
 		if got := maxRounds(tc.timeout); got != tc.want {
 			t.Errorf("maxRounds(%s)=%d, want %d", tc.timeout, got, tc.want)
 		}
+	}
+}
+
+// ⛔⛔ THE COUNT MUST NOT REFUSE A PATIENT RUN, and under the floored arithmetic
+// it did: this sequence is the derivation's own story -- a first reading a
+// second behind the clock, a window waited out, a refill that lands one reading
+// later -- and it exited 1 under --timeout 59m while passing under 60m. The
+// STALLED line it printed named a reset three seconds in the future.
+func TestAPatientRunOfFourReadingsIsNotRefused(t *testing.T) {
+	slept, reads := fake(t,
+		core(0, 5000, start.Add(-time.Second).Unix()),    // skew: a second behind
+		core(0, 5000, start.Add(600*time.Second).Unix()), // a real window
+		core(0, 5000, start.Add(605*time.Second).Unix()), // still short, just ahead
+		answer(5000, 5000, 4200, 4745, 5000, 4800),       // refilled
+	)
+	code, out, errOut := drive("--rest", "50", "--timeout", "59m")
+	if code != 0 {
+		t.Fatalf("exit %d for a run that refills on its fourth reading under a 59m deadline, want 0.\nstdout=%q\nstderr=%q",
+			code, out, errOut)
+	}
+	if *reads != 4 {
+		t.Errorf("read %d time(s), want 4", *reads)
+	}
+	if len(*slept) != 3 {
+		t.Errorf("slept %d time(s), want 3: %v", len(*slept), *slept)
+	}
+	if !strings.Contains(out, "PASS core 5000/50") {
+		t.Errorf("stdout: %q", out)
+	}
+}
+
+// ⛔ The third ordering decision in the loop: with the readings spent AND the
+// next reset past the deadline, the caller acts on their own deadline.
+func TestWhenBothTheReadingsAndTheTimeAreGoneTheDeadlineIsTheAnswer(t *testing.T) {
+	// Four readings under a 30s deadline (limit 4), the last one short with a
+	// reset an hour out: the count and the reset are both exhausted at once.
+	slept, _ := fake(t,
+		core(0, 5000, start.Add(3*time.Second).Unix()),
+		core(0, 5000, start.Add(8*time.Second).Unix()),
+		core(0, 5000, start.Add(13*time.Second).Unix()),
+		core(0, 5000, start.Add(3600*time.Second).Unix()),
+	)
+	code, out, _ := drive("--rest", "50", "--timeout", "30s")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if !strings.Contains(out, "TIMEOUT") || strings.Contains(out, "STALLED") {
+		t.Errorf("the answer should be the deadline, not the stall: %q", out)
+	}
+	if len(*slept) != 3 {
+		t.Errorf("slept %d time(s), want 3: %v", len(*slept), *slept)
 	}
 }
 
