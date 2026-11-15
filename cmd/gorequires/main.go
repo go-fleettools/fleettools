@@ -52,6 +52,15 @@ repositories created after the inventory was taken, nested modules, and
 non-default branches. A count that does not say what it could not read is a
 count somebody will quote as a total.
 
+⛔ The default (remote) mode reads ROOT go.mod files only. go-numerics.github.io
+pinned go-notebook/playground v0.7.1 in notebooks/go.mod for weeks and a root
+read answered "does not require it". --clone-dir DIR shallow-clones each
+repository (git, not the REST API) under DIR/<org>/<repo> and reads EVERY
+go.mod in it, nested modules included (vendor/, testdata/ and dot or underscore
+directories are skipped, as modtidy and the go command skip them). --name GLOB
+narrows it to some repositories, e.g. --name '*.github.io' for the landings.
+An existing clone is fetched to the default branch's tip, not trusted.
+
 Exit status: 0 every repository was read, 2 some could not be — an unread
 repository makes the count a floor and not a total.`
 
@@ -62,6 +71,7 @@ func main() {
 
 type options struct {
 	module, version, inventory string
+	cloneDir, name             string
 	jobs                       int
 	archived                   bool
 }
@@ -73,6 +83,9 @@ func RootCmd() *cobra.Command {
 	c.RunE = func(cmd *cobra.Command, args []string) error {
 		if err := validate(&o, args); err != nil {
 			return err
+		}
+		if o.cloneDir != "" {
+			return cli.FromStatus(runClones(o, cli.Out(cmd), cli.Err(cmd), gitClone))
 		}
 		return cli.FromStatus(run(o, cli.Out(cmd), cli.Err(cmd), fetchGoMod))
 	}
@@ -90,13 +103,17 @@ func command(o *options) *cobra.Command {
 	// --jobs keeps the old -j as its shorthand, so existing call sites reach it.
 	f.IntVarP(&o.jobs, "jobs", "j", 8, "go.mod files fetched at once")
 	f.BoolVar(&o.archived, "archived", false, "include archived repositories")
+	f.StringVar(&o.cloneDir, "clone-dir", "",
+		"shallow-clone each repository under DIR/<org>/<repo> (git, no REST) and read EVERY go.mod in it, nested modules included")
+	f.StringVar(&o.name, "name", "",
+		"with --clone-dir: only repositories whose name matches this glob, e.g. '*.github.io'")
 	return c
 }
 
 func validate(o *options, args []string) error {
-	if o.module == "" || len(args) > 0 || o.jobs < 1 {
+	if o.module == "" || len(args) > 0 || o.jobs < 1 || (o.name != "" && o.cloneDir == "") {
 		return cli.Unanswerable("usage: gorequires --module PATH [--version vX.Y.Z] " +
-			"[--inventory FILE] [-j N] [--archived]")
+			"[--inventory FILE] [-j N] [--archived] [--clone-dir DIR [--name GLOB]]")
 	}
 	return nil
 }
@@ -137,6 +154,7 @@ var errNoGoMod = errors.New("404: no root go.mod, or a private repository")
 // Hit is one go.mod that requires the module.
 type Hit struct {
 	Repo, Module, Version string
+	Path                  string // clone mode: the directory of the go.mod below the repository root
 	Indirect              bool
 }
 
@@ -158,15 +176,23 @@ func Requires(gomod []byte, mod string) (Hit, bool, error) {
 	return Hit{}, false, nil
 }
 
-func run(o options, stdout, stderr io.Writer, fetch func(org, repo string) ([]byte, error)) int {
-	b, err := os.ReadFile(o.inventory)
+func readInventory(path string, stderr io.Writer) (inventory, bool) {
+	var inv inventory
+	b, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintln(stderr, "gorequires: no inventory:", err, "-- run `fleetfind -refresh` first")
-		return 2
+		return inv, false
 	}
-	var inv inventory
 	if err := json.Unmarshal(b, &inv); err != nil || len(inv.Repos) == 0 {
 		fmt.Fprintln(stderr, "gorequires: the inventory is empty or unreadable")
+		return inv, false
+	}
+	return inv, true
+}
+
+func run(o options, stdout, stderr io.Writer, fetch func(org, repo string) ([]byte, error)) int {
+	inv, ok := readInventory(o.inventory, stderr)
+	if !ok {
 		return 2
 	}
 
