@@ -32,6 +32,10 @@ import (
 // is: a waiver is a statement made in public, not a switch flicked in private.
 // The gate cannot prove the list was READ; it makes the run come first, and
 // makes "I read it, and here is why this is new" something written down.
+//
+// The public meant is the fleet's: on a repository the token cannot push to,
+// someone else's project, the gate still runs but the stamp is printed for the
+// caller instead of published (withPriorArtStamp in main.go, yaml/go-yaml#513).
 
 // priorWindow is how recent a priorart run must be.
 const priorWindow = 2 * time.Hour
@@ -73,7 +77,7 @@ func priorArtStamp(repo, checked, waiver string) (string, error) {
 			"      priorart --repo %s \"<subject>\"\n"+
 			"  (a priorart run in the same command as --new cannot stop it: that is how\n"+
 			"  go-gitsafe/gitsafe#99 duplicated go-gitsafe/gitsafe#90.) To file without it, say why:\n"+
-			"      --prior-art-waiver \"<reason>\"   (stamped into the issue)",
+			"      --prior-art-waiver \"<reason>\"   (stamped into the issue if the repository is ours)",
 			repo, priorWindow, repo)
 	}
 	if err != nil {
@@ -95,7 +99,7 @@ func priorArtStamp(repo, checked, waiver string) (string, error) {
 		if checked == "" {
 			return "", fmt.Errorf("priorart %q at %s %s for %s.\n"+
 				"  READ that list, then say what you read and why this issue is not a duplicate:\n"+
-				"      --prior-art \"<e.g. #82 covers pak only; this is the lmp parser>\"   (stamped into the issue)",
+				"      --prior-art \"<e.g. #82 covers pak only; this is the lmp parser>\"   (stamped into the issue if the repository is ours)",
 				rec.Subject, when, what, repo)
 		}
 		return fmt.Sprintf("Prior art: `priorart` %q at %s %s; checked: %s", rec.Subject, when, what, checked), nil
