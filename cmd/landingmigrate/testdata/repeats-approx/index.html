@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ .Site.Title }} — interpolation and polynomials in pure Go</title>
+<meta name="description" content="{{ .Site.Params.description }}">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+{{ partial "styles.html" . }}
+</head>
+<body class="lm">
+  <header class="nav"><div class="wrap">
+    <a class="brand" href="/"><img class="glyph" src="/img/logo.svg" width="32" height="32" alt="go-approx logo"> {{ .Site.Title }}</a>
+    <nav><a href="#features">Why</a><a href="#exact">Checks</a><a href="#repos">Repositories</a></nav>
+    {{ partial "theme-toggle.html" . }}
+  </div></header>
+  {{ partial "fork-ribbon.html" "https://github.com/go-approx" }}
+
+  <div class="hero"><div class="wrap">
+    <div>
+      <h1 class="head">Interpolation and polynomials, in pure Go.<br><span class="accent">Measured against SciPy and NumPy.</span></h1>
+      <p class="sub">go-approx is the approximation layer of the Go scientific stack: <b>interpolation and splines</b> with the semantics of <code>scipy.interpolate</code>, and <b>polynomials</b> with those of <code>numpy.polyfit</code>, <code>numpy.roots</code> and <code>numpy.polynomial</code>. Both libraries run SciPy and NumPy as oracles from their tests and record where they differ. No cgo.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://go-approx.github.io/docs/">{{ partial "icons/book.html" . }}Read the documentation →</a>
+      </div>
+      <div class="trust"><span><b>3434/3434</b> polynomial values bit-identical to NumPy</span><span><b>100%</b> statement coverage in poly</span><span><b>CGO=0</b> pure Go</span></div>
+    </div>
+    <div class="term">
+      <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="t">main.go</span></div>
+<pre style="white-space:pre;overflow-x:auto;tab-size:4">s, _ := interp.NewCubicSpline(x, y, "not-a-knot") // scipy CubicSpline
+v := s.At(2.5)
+d := s.Derivative(1).At(2.5)
+area := s.Integrate(0, 4)
+
+fit, _ := poly.Polyfit(x, y, 3, nil) // np.polyfit
+r, _ := poly.Roots(fit.Coef)         // np.roots</pre>
+    </div>
+  </div></div>
+
+  <div class="strip"><div class="wrap">
+    <span class="lead-line">{{ len .Site.Params.repos }} repositories — <b>two libraries</b>: <code>go get github.com/go-approx/{interp,poly}</code></span>
+    <div class="mods">{{ range .Site.Params.repos }}<a href="{{ .href }}">{{ .name }}</a>{{ end }}</div>
+  </div></div>
+
+  <section id="features"><div class="wrap">
+    <span class="eyebrow">Why go-approx</span>
+    <h2>Approximation, <i>with the reference named</i>.</h2>
+    <p class="lead">Each Go function names the SciPy, NumPy or MATLAB call it corresponds to, and the deliberate differences are listed in each library's README.</p>
+    <div class="grid">
+      <div class="card"><div class="ico">📈</div><h3>Interpolators</h3><p><code>interp1d</code> kinds, cubic splines with not-a-knot, natural, clamped and periodic conditions, Hermite, PCHIP, Akima and makima.</p></div>
+      <div class="card"><div class="ico">〰️</div><h3>B-splines</h3><p><code>make_interp_spline</code> of any degree, <code>make_lsq_spline</code>, FITPACK smoothing splines, design matrices, derivatives, antiderivatives and integrals.</p></div>
+      <div class="card"><div class="ico">▦</div><h3>Grids</h3><p>Regular-grid interpolation (<code>linear</code> to <code>quintic</code>), tensor-product splines and bicubic interpolation.</p></div>
+      <div class="card"><div class="ico">x²</div><h3>Polynomials</h3><p>Evaluation by Horner or compensated Horner, arithmetic, derivatives, integrals, companion-matrix roots.</p></div>
+      <div class="card"><div class="ico">📉</div><h3>Fits</h3><p><code>Polyfit</code> with weights, rcond and covariance, and fits in the Chebyshev, Legendre, Hermite, HermiteE and Laguerre bases.</p></div>
+      <div class="card"><div class="ico">📦</div><h3>Pure Go, CGO=0</h3><p>No cgo. <code>poly</code>'s CI runs Linux, macOS, Windows, arm64, and qemu riscv64, loong64, ppc64le, s390x and arm.</p></div>
+      <div class="card"><div class="ico">🧭</div><h3>Planned</h3><p>Chebyshev approximation and AAA rational approximation are not written yet.</p></div>
+      <div class="card"><div class="ico">⚖️</div><h3>BSD-3-Clause</h3><p>Every repository of the organization. Ported code keeps its attribution in place.</p></div>
+    </div>
+  </div></section>
+
+  <section id="exact" style="padding-top:10px"><div class="wrap">
+    <span class="eyebrow">What is checked</span>
+    <h2>{{ len .Site.Params.checks }} kinds of check, each <i>against a recorded answer</i>.</h2>
+    <p class="lead">The fixtures are written by tests that call the reference — SciPy 1.18.1 and NumPy 2.5.4 — committed, and compared in the ordinary tests. What differs, and why, is in each library's documentation.</p>
+    <div class="grid">
+      {{ range .Site.Params.checks }}
+      <div class="card"><h3>{{ .name }}</h3><p>{{ .what | markdownify }}</p></div>
+      {{ end }}
+    </div>
+  </div></section>
+
+  <section id="repos" style="padding-top:20px"><div class="wrap">
+    <span class="eyebrow">Repositories</span>
+    <h2>What is here.</h2>
+    <div class="road">
+      {{ range .Site.Params.repos }}
+      <div class="ph">
+        <div class="top"><h4><a href="{{ .href }}">{{ .name }}</a></h4><span class="tag active">{{ .kind }}{{ with .status }} · {{ . }}{{ end }}</span></div>
+        <p>{{ .blurb | safeHTML }}</p>
+      </div>
+      {{ end }}
+    </div>
+  </div></section>
+
+  <section id="eco" style="padding-top:6px"><div class="wrap">
+    <div class="band">
+      <h2>Approximation for the Go scientific stack.</h2>
+      <p>go-approx belongs to the family of <a href="https://github.com/go-numerics"><u>go-numerics</u></a> (optimisation, quadrature, special functions) and <a href="https://github.com/go-statistics"><u>go-statistics</u></a>. What is not there yet — scattered-data interpolation, periodic and parametric smoothing splines, Chebyshev and AAA approximation — is listed in the <a href="https://go-approx.github.io/docs/"><u>documentation</u></a>.</p>
+      <a class="btn btn-ghost" href="https://github.com/go-approx">{{ partial "icons/github.html" . }}Read the source on GitHub →</a>
+    </div>
+  </div></section>
+
+  <footer><div class="wrap"><span>go-approx · <a href="https://github.com/go-approx">go-approx on GitHub</a> · BSD-3-Clause</span><span>points in · curves out</span></div></footer>
+</body>
+</html>
