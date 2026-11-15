@@ -29,6 +29,14 @@ var mantraWords = regexp.MustCompile(`(?i)BSD[- ]?3(?:[- ]clause)?|\bBSD\b|CGO_E
 // filler is what a sentence made only of the mantra is built with.
 var filler = regexp.MustCompile(`(?i)\b(is|are|it|its|it's|everything|all|and|the|a|an|under|with|in|of|written|code|whole|stack|entirely|fully|everywhere|throughout|disabled|enabled|zero|no|only|by|default|100|%|itself)\b`)
 
+// mentionsStrip: the licence, cgo or "pure Go". Sentences, pills and badges
+// still start from `mention` (a bare "pure Go" is the fleet's subject there);
+// a FOOTER segment that is only "Pure Go" repeats the strip, which
+// `landingkit check` refuses (go-ansible's footer).
+func mentionsStrip(t string) bool { return mentionsStripRe.MatchString(t) }
+
+var mentionsStripRe = regexp.MustCompile(`(?i)\bBSD\b|\bBSD[- ]?3|\bcgo\b|CGO_ENABLED|\bCGO\s*=|\bpure[- ]go\b`)
+
 // repeat says whether text (HTML allowed) says nothing but the mantra.
 func repeat(text string) bool {
 	// a fragment with a Hugo action renders content this cannot read (a
@@ -36,8 +44,21 @@ func repeat(text string) bool {
 	if strings.Contains(text, "{{") {
 		return false
 	}
+	return repeatWith(text, mention)
+}
+
+// repeatFooter is repeat for a footer segment, where a bare "pure Go" repeats
+// the strip too.
+func repeatFooter(text string) bool {
+	return repeatWith(text, mentionsStripRe)
+}
+
+func repeatWith(text string, gate *regexp.Regexp) bool {
+	if strings.Contains(text, "{{") {
+		return false
+	}
 	t := plain(text)
-	if !mention.MatchString(t) {
+	if !gate.MatchString(t) {
 		return false
 	}
 	t = mantraWords.ReplaceAllString(t, " ")
@@ -119,7 +140,63 @@ func repeats(body string) (string, []fragment) {
 			return sentences(whole, tag, note)
 		})
 	}
+	// feature cards whose subject is the strip's own: "Pure Go, CGO=0",
+	// "BSD-3-Clause". Hidden whole while the strip shows (`landingkit check`
+	// fails a card that repeats it). A card that is about something more is kept.
+	body = hideCards(body, note)
 	return body, frags
+}
+
+// hideCards wraps each feature card whose heading is the strip's own subject.
+// A card already wrapped is left alone (a second pass changes nothing); what
+// is inside it was wrapped by the sentence pass above, which is harmless: the
+// outer wrapper hides it all.
+func hideCards(body string, note func(string, string, bool)) string {
+	var out strings.Builder
+	i := 0
+	for {
+		j := indexOpen(body, `<div class="card"`, i)
+		if j < 0 {
+			out.WriteString(body[i:])
+			return out.String()
+		}
+		k := closeOf(body, j, "div")
+		if k < 0 {
+			out.WriteString(body[i:])
+			return out.String()
+		}
+		out.WriteString(body[i:j])
+		whole := body[j:k]
+		m := h3Re.FindStringSubmatch(whole)
+		switch {
+		case m == nil || strings.Contains(m[1], "{{") || !subjectIsTheStrip(plain(m[1])):
+			out.WriteString(whole)
+		case strings.HasSuffix(out.String(), ifOff):
+			out.WriteString(whole) // already hidden
+		default:
+			note("card", whole, true)
+			out.WriteString(hide(whole))
+		}
+		i = k
+	}
+}
+
+var h3Re = regexp.MustCompile(`(?s)<h3[^>]*>(.*?)</h3>`)
+
+// subjectIsTheStrip: a heading that says only what the strip says (pure Go,
+// no cgo, CGO=0, the licence) and nothing else.
+func subjectIsTheStrip(t string) bool {
+	if !mention.MatchString(t) && !pureGo.MatchString(t) {
+		return false
+	}
+	t = mantraWords.ReplaceAllString(t, " ")
+	t = filler.ReplaceAllString(t, " ")
+	for _, r := range t {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r > 0x7f && r != '·' && r != '—' && r != '–' && r != ' ' && r != '’' {
+			return false
+		}
+	}
+	return true
 }
 
 var licenceBadges = regexp.MustCompile(`(?is)(<a\b[^>]*>\s*)?<img\b[^>]*(?:alt="licen[cs]e"|/badge/licen[cs]e)[^>]*>(\s*</a>)?`)
@@ -201,8 +278,8 @@ func footerSegments(whole string, note func(string, string, bool)) string {
 		// split on middle dots that are outside tags and actions
 		idx := middot.FindAllStringIndex(s, -1)
 		if len(idx) == 0 {
-			if mention.MatchString(plain(s)) && strings.TrimSpace(plain(s)) != "" && !strings.Contains(s, "<span") && !strings.Contains(s, "<div") {
-				if repeat(s) {
+			if mentionsStrip(plain(s)) && strings.TrimSpace(plain(s)) != "" && !strings.Contains(s, "<span") && !strings.Contains(s, "<div") {
+				if repeatFooter(s) {
 					note("footer", s, true)
 					return hide(s)
 				}
@@ -220,12 +297,12 @@ func footerSegments(whole string, note func(string, string, bool)) string {
 		segs = append(segs, s[last:])
 		var b strings.Builder
 		for i, seg := range segs {
-			r := mention.MatchString(plain(seg)) && repeat(seg)
+			r := mentionsStrip(plain(seg)) && repeatFooter(seg)
 			// what is hidden is noted as hidden, separator included, so
 			// verify takes out of the page exactly what the page lost
 			switch {
 			case !r:
-				if mention.MatchString(plain(seg)) {
+				if mentionsStrip(plain(seg)) {
 					note("footer", seg, false)
 				}
 				b.WriteString(seg)
@@ -258,7 +335,7 @@ func footerSegments(whole string, note func(string, string, bool)) string {
 		return eachElement(whole, "<span", "span", func(sp string) string {
 			gt := strings.Index(sp, ">")
 			inner := sp[gt+1 : len(sp)-len("</span>")]
-			if strings.TrimSpace(plain(inner)) != "" && repeat(inner) {
+			if strings.TrimSpace(plain(inner)) != "" && repeatFooter(inner) {
 				note("footer", inner, true)
 				return hide(sp)
 			}
