@@ -671,3 +671,79 @@ func TestOneAcceptDoesNotEraseAnotherEntrysInstant(t *testing.T) {
 		t.Errorf("second got no instant: %q", after)
 	}
 }
+
+// ⛔ #303: an index hub quotes each child's recurrence sentence one per line.
+// The child is judged under its own name; the quotation must not make the hub a
+// lesson, or every fold into the hub refuses every publish.
+func TestAHubOfPointerLinesIsNotALesson(t *testing.T) {
+	code, out, _ := drive(t, "--memory", "testdata/hub")
+	if code != 1 {
+		t.Fatalf("code %d, want 1 (the child still recorded one)\n%s", code, out)
+	}
+	if !strings.Contains(out, "child recorded a recurrence") {
+		t.Errorf("the child must still be judged under its own name; got %q", out)
+	}
+	if strings.Contains(out, "hub recorded a recurrence") {
+		t.Errorf("a hub of pointer lines is not a lesson; got %q", out)
+	}
+}
+
+// The required control: a hub with a recurrence sentence of its OWN, which is
+// not a pointer line, must still fire.
+func TestAHubWithASentenceOfItsOwnStillFires(t *testing.T) {
+	code, out, _ := drive(t, "--memory", "testdata/hub-own")
+	if code != 1 {
+		t.Fatalf("code %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "hub recorded a recurrence") {
+		t.Errorf("the hub's own sentence must count; got %q", out)
+	}
+}
+
+// A pointer to nothing is prose: a missing target, a URL, a path outside the
+// directory, a non-memory file, an empty target, and a line that merely
+// contains a link all count.
+func TestALinkThatPointsAtNothingIsNotAPointer(t *testing.T) {
+	code, out, _ := drive(t, "--memory", "testdata/hub-dangling")
+	if code != 1 || !strings.Contains(out, "hub recorded a recurrence") {
+		t.Fatalf("code %d; a dangling hub must fire\n%s", code, out)
+	}
+}
+
+// Each shape on its own, so a mutation of one guard is caught by name.
+func TestPointerShapes(t *testing.T) {
+	dir := mem(t, map[string]string{"x.md": "x"})
+	if err := os.Mkdir(filepath.Join(dir, "d.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{
+		{"- [t](x.md): récidive", true},
+		{"[t](x.md) : récidive", true},
+		{"* [t](x.md#top); récidive", true},
+		{"> [[x]]: récidive", true},
+		{"[[x|alias]]: récidive", true},
+		{"[[x#h]]: récidive", true},
+		// ⛔ A prose sentence that merely OPENS with a link is the memory's own
+		// recurrence, not a pointer: measured on the real corpus, a-sweep-that-
+		// cannot-see-dot-github says "[[x]] — c'est la deuxième fois" at column 0.
+		{"[[x]] — c'est la deuxième fois", false},
+		{"   [[x]] — récidive le même jour.", false},
+		{"- [t](missing.md): récidive", false},
+		{"- [[missing]]: récidive", false},
+		{"- [t](d.md): récidive", false},
+		{"- [t](https://e.org/x.md): récidive", false},
+		{"- [t](../x.md): récidive", false},
+		{"- [t](sub/x.md): récidive", false},
+		{"- [t](x.txt): récidive", false},
+		{"- [t](#): récidive", false},
+		{"see [t](x.md): récidive", false},
+		{"récidive", false},
+	} {
+		if got := pointer(tc.line, dir); got != tc.want {
+			t.Errorf("pointer(%q) = %v, want %v", tc.line, got, tc.want)
+		}
+	}
+}
