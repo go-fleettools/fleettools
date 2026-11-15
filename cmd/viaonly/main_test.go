@@ -303,16 +303,29 @@ func init() { register(await) }
 // ⛔ The control for the test above: the identifier that IS the call, and the
 // one that IS the declaration, must not be counted as values. Both are visited
 // by the same walk.
+//
+// ⛔⛔ THIS CONTROL WAS VACUOUS AS FIRST WRITTEN, which a review measured.
+// Its fixture's only call to await sat INSIDE the wrapper, so what kept that
+// identifier out of the value list was the "inside via" check — the
+// `called[id]` exclusion was never reached at all, and deleting it left this
+// test green. The call has to be OUTSIDE the wrapper for the exclusion to be
+// the only thing standing between one call and two reports; the real collab
+// case printed both lines for one call, and that is the case being pinned.
 func TestACallAndADeclarationAreNotValueUses(t *testing.T) {
 	dir := pkg(t, map[string]string{"p.go": wrapped + `
-func (p *Peer) ok(x int) int { return p.awaited(x) }
+func (p *Peer) direct(x int) int { return await(x) }
 `})
 	code, out, _ := drive(t, "--wraps", "await", "--via", "(*Peer).awaited", dir)
-	if code != 0 {
-		t.Fatalf("code %d, want 0\nout: %s", code, out)
+	if code != 1 {
+		t.Fatalf("code %d, want 1: the direct call is a bypass\nout: %s", code, out)
 	}
 	if strings.Contains(out, "as a VALUE") {
 		t.Errorf("neither the call nor the declaration is a value use; it said %q", out)
+	}
+	// One call, ONE report. The count is asserted so that the value list
+	// growing silently cannot be mistaken for the bypass list.
+	if !strings.Contains(out, "0 use(s) take it as a value") {
+		t.Errorf("the value count must be zero; it said %q", out)
 	}
 }
 
