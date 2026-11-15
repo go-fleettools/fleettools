@@ -334,6 +334,143 @@ func TestAResetAlreadyInThePastCannotBecomeATightPoll(t *testing.T) {
 	}
 }
 
+// core builds one body with an exact reset, for the readings answer() cannot
+// express: a reset that is not an instant, or a resource with no limit at all.
+func core(remaining, limit int, reset int64) string {
+	return fmt.Sprintf(`{"resources":{"core":{"limit":%d,"remaining":%d,"reset":%d}}}`, limit, remaining, reset)
+}
+
+// ⛔⛔ THE BLOCKER REVIEW FOUND. An int64 JSON accepts overflows time.Unix into
+// an instant before year 1 -- before the zero Time -- so it loses the deadline
+// test, the stall test and the comparison that picks the latest reset, and the
+// loop polls on the floor without end. Seven calls in thirteen seconds under
+// --timeout 3s, measured with a fake gh on PATH.
+func TestAResetThatIsNotAnInstantIsRefusedRatherThanSleptOn(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reset int64
+	}{
+		{"the largest int64", 9223372036854775807},
+		{"zero", 0},
+		{"before the unix epoch", -62135596801},
+		{"two days out, past the horizon", start.Add(48 * time.Hour).Unix()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slept, _ := fake(t, core(0, 5000, tc.reset))
+			code, out, errOut := drive("--rest", "50")
+			if code != 2 {
+				t.Errorf("exit %d for a reset of %d, want 2", code, tc.reset)
+			}
+			if len(*slept) != 0 {
+				t.Errorf("it slept %v on a value that is not an instant", *slept)
+			}
+			if out != "" {
+				t.Errorf("it printed a verdict: %q", out)
+			}
+			if !strings.Contains(errOut, "not an instant to wait for") {
+				t.Errorf("the refusal does not say what was wrong: %q", errOut)
+			}
+		})
+	}
+}
+
+// ⛔ --timeout bounds the RUN, not merely the next sleep. The deadline used to
+// be compared only to the wake instant, so a run could spend its whole budget
+// of time on earlier rounds and still start another wait.
+func TestTheDeadlineIsElapsedTimeAndNotOnlyTheNextSleep(t *testing.T) {
+	slept, reads := fake(t,
+		core(0, 5000, start.Add(-100*time.Second).Unix()), // stale reset, sleeps the floor
+		core(0, 5000, start.Add(-50*time.Second).Unix()),  // advanced, so not a stall
+	)
+	code, out, _ := drive("--rest", "50", "--timeout", "1s")
+	if code != 1 {
+		t.Fatalf("exit %d after the deadline had passed in elapsed time, want 1", code)
+	}
+	if len(*slept) != 1 {
+		t.Errorf("slept %d time(s), want 1: the second round must not start a wait past the deadline", len(*slept))
+	}
+	if *reads != 2 {
+		t.Errorf("read %d time(s), want 2", *reads)
+	}
+	if !strings.HasPrefix(out, "TIMEOUT core 0/50") {
+		t.Errorf("stdout does not carry the timeout: %q", out)
+	}
+}
+
+// ⛔ A mutation of `>` to `>=` survived the first suite: a threshold EQUAL to
+// the limit is a legitimate wait -- "leave me the whole budget" -- and
+// refusing it would contradict the README's own claim that the boundary is
+// pinned.
+func TestAThresholdEqualToTheLimitIsAWaitAndNotARefusal(t *testing.T) {
+	slept, _ := fake(t,
+		answer(10, 5000, 300, 4745, 5000, 900),
+		answer(5000, 5000, 3900, 4745, 5000, 4500),
+	)
+	code, out, errOut := drive("--rest", "5000")
+	if code != 0 {
+		t.Fatalf("exit %d for a threshold equal to the limit, want 0 after the reset; stderr=%q", code, errOut)
+	}
+	if len(*slept) != 1 {
+		t.Errorf("slept %d time(s), want 1", len(*slept))
+	}
+	if !strings.Contains(out, "PASS core 5000/5000 of 5000") {
+		t.Errorf("stdout: %q", out)
+	}
+}
+
+// ⛔ A mutation of the floor to `left < 0` survived the first suite: only its
+// SIGN was pinned, not its size. A reset one second behind the clock leaves a
+// positive distance smaller than the margin, which is the case that tells them
+// apart.
+func TestTheFloorIsTheMarginItselfAndNotMerelyAPositiveNumber(t *testing.T) {
+	slept, _ := fake(t,
+		core(0, 5000, start.Add(-1*time.Second).Unix()),
+		answer(5000, 5000, 3900, 4745, 5000, 4500),
+	)
+	code, _, _ := drive("--rest", "50")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+	if len(*slept) != 1 {
+		t.Fatalf("slept %d time(s), want 1: %v", len(*slept), *slept)
+	}
+	if (*slept)[0] != resetMargin {
+		t.Errorf("slept %s on a reset 1s behind the clock, want exactly the %s floor", (*slept)[0], resetMargin)
+	}
+}
+
+// ⛔ THE ORDER OF TWO CHECKS, AND THE PAIR IS THE WITNESS. With the limit
+// consulted before satisfaction, a body carrying no "limit" was refused as
+// "above core's limit of 0" although its remaining plainly met the threshold.
+func TestALimitIsOnlyNeededWhenTheResourceIsShort(t *testing.T) {
+	t.Run("satisfied without a limit passes", func(t *testing.T) {
+		slept, _ := fake(t, `{"resources":{"core":{"remaining":5000}}}`)
+		code, out, errOut := drive("--rest", "50")
+		if code != 0 {
+			t.Errorf("exit %d although 5000 remaining meets a threshold of 50; stderr=%q", code, errOut)
+		}
+		if !strings.Contains(out, "PASS core 5000/50") {
+			t.Errorf("stdout: %q", out)
+		}
+		if len(*slept) != 0 {
+			t.Errorf("slept %v", *slept)
+		}
+	})
+	t.Run("short without a limit is unanswerable", func(t *testing.T) {
+		slept, _ := fake(t, `{"resources":{"core":{"remaining":10}}}`)
+		code, out, errOut := drive("--rest", "50")
+		if code != 2 {
+			t.Errorf("exit %d, want 2: a short resource with no limit cannot be judged", code)
+		}
+		if !strings.Contains(errOut, "no limit for core") {
+			t.Errorf("the refusal does not name what was missing: %q", errOut)
+		}
+		if out != "" || len(*slept) != 0 {
+			t.Errorf("stdout=%q, slept=%v", out, *slept)
+		}
+	})
+}
+
 // A timeout of zero or less is not a wait, and must not pass by being instant.
 func TestATimeoutThatCannotWaitIsRefused(t *testing.T) {
 	slept, reads := fake(t)
