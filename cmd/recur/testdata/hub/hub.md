@@ -1,11 +1,6 @@
----
-name: hub
-metadata:
-  node_type: index
-  type: reference
----
 # Index
 
-- [the child](child.md): 3e fois; résumé en mes mots
-- [[child]]: récidive again
-[anchored](child.md#top); the 3rd time
+- [the child](child.md): Troisième récidive, et la note était sous la main.
+- [[child]]: "Troisième   récidive, et la note était sous la main."
+[anchored](child.md#top); Troisième récidive, et la note était sous la main.
+- [d](desc.md): récidive ×3 sur le même défaut
