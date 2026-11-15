@@ -100,7 +100,8 @@ func TestAGateAccountsForALesson(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code %d, want 0 once accounted for\n%s", code, out)
 	}
-	if !strings.Contains(ledger(t, dir), "lesson — gate: cmd/viaonly") {
+	// The state carries the fingerprint of the sentences it was decided about.
+	if !strings.Contains(ledger(t, dir), "lesson — gate@") || !strings.Contains(ledger(t, dir), ": cmd/viaonly") {
 		t.Errorf("the ledger should carry it; it says %q", ledger(t, dir))
 	}
 }
@@ -111,7 +112,7 @@ func TestAWaiverCarriesItsReasonIntoTheLedger(t *testing.T) {
 	dir := mem(t, map[string]string{"lesson.md": "Deuxième fois."})
 
 	code, _, errOut := drive(t, "--memory", dir, "--accept", "lesson")
-	if code != 2 || !strings.Contains(errOut, "exactly one of --gate or --no-gate") {
+	if code != 2 || !strings.Contains(errOut, "exactly one of --gate, --gate-pending or --no-gate") {
 		t.Errorf("neither flag must be refused, got %d %q", code, errOut)
 	}
 	code, _, errOut = drive(t, "--memory", dir, "--accept", "lesson",
@@ -231,6 +232,152 @@ func TestTheHookDeniesOnlyADefiniteFinding(t *testing.T) {
 			}
 			if tc.warns != "" && !strings.Contains(errOut.String(), tc.warns) {
 				t.Errorf("it should warn on stderr; it said %q", errOut.String())
+			}
+		})
+	}
+}
+
+// ⛔⛔ THE DEFECT THIS FINGERPRINT IS FOR, measured on the real corpus.
+//
+// ubuntu-latest-moved-and-moved-back was seeded as backlog on 2026-11-11. On
+// 2026-11-12 it gained two further occurrences, written into the memory in so
+// many words — and `recur` said nothing, because the lesson's NAME was already
+// in the ledger. A gate that can fire once per memory and never again is a gate
+// that goes quiet exactly as a lesson gets worse.
+func TestALessonThatRecursAGAINFiresAgainThoughItWasAccountedFor(t *testing.T) {
+	dir := mem(t, map[string]string{"came-back.md": "Deuxième fois, et la note était là."})
+	if code, out, _ := drive(t, "--memory", dir, "--accept", "came-back", "--gate", "cmd/x"); code != 0 {
+		t.Fatalf("accepting: %d %s", code, out)
+	}
+	if code, _, _ := drive(t, "--memory", dir); code != 0 {
+		t.Fatalf("it should be settled, got %d", code)
+	}
+
+	// The same memory, one more occurrence recorded in it.
+	path := filepath.Join(dir, "came-back.md")
+	if err := os.WriteFile(path, []byte(
+		"Deuxième fois, et la note était là.\n\n## RÉCURRENCE 2026-11-12\n\nTroisième fois.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := drive(t, "--memory", dir)
+	if code != 1 {
+		t.Fatalf("a NEW recurrence must fire although the lesson was accounted for; got %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "came-back recorded a NEW recurrence since it was accounted for") {
+		t.Errorf("it should say why it is back; it said %q", out)
+	}
+	// And the decision already taken is named, so the reader knows what failed.
+	if !strings.Contains(out, "cmd/x") {
+		t.Errorf("it should name the gate that did not hold; it said %q", out)
+	}
+}
+
+// ⛔ The control for the test above: a gate that fires on ANY edit is a gate
+// somebody turns off. Only the sentences that record the recurrence count.
+func TestAnEditThatRecordsNoNewRecurrenceIsSilent(t *testing.T) {
+	dir := mem(t, map[string]string{"came-back.md": "Deuxième fois.\n\nWhy: the note was there.\n"})
+	if code, _, _ := drive(t, "--memory", dir, "--accept", "came-back", "--gate", "cmd/x"); code != 0 {
+		t.Fatal("accepting")
+	}
+	path := filepath.Join(dir, "came-back.md")
+	if err := os.WriteFile(path, []byte(
+		"Deuxième fois.\n\nWhy: the note was there, and here is a paragraph added today\nthat says nothing about it happening again.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, _ := drive(t, "--memory", dir); code != 0 {
+		t.Fatalf("an unrelated edit must not fire; got %d\n%s", code, out)
+	}
+}
+
+// ⛔⛔ THE DEADLOCK, reported by a peer session on 2026-11-12: the only gate for
+// a lesson was written and MERGEABLE, and landing it needed ghmerge — which
+// this gate refuses. The gate blocked the merge that would have satisfied it.
+// --gate-pending is the honest third answer: the gate is named, where it is
+// waiting is published, and nobody has to write a false "--gate <thing>" for a
+// binary that is not installed.
+func TestAGateThatIsWrittenButHasNotLandedIsRecordedAsPending(t *testing.T) {
+	dir := mem(t, map[string]string{"locked.md": "Troisième récidive."})
+	why := "gitsafe#91 (literaltick), MERGEABLE and not merged; landing it needs ghmerge, which this gate refuses"
+	code, out, _ := drive(t, "--memory", dir, "--accept", "locked", "--gate-pending", why)
+	if code != 0 {
+		t.Fatalf("a pending gate must be accepted, got %d\n%s", code, out)
+	}
+	if !strings.Contains(ledger(t, dir), "pending") || !strings.Contains(ledger(t, dir), why) {
+		t.Errorf("the ledger must carry the state and where it waits; it says %q", ledger(t, dir))
+	}
+	if code, _, _ := drive(t, "--memory", dir); code != 0 {
+		t.Errorf("a pending gate accounts for the lesson, got %d", code)
+	}
+	// And it is one answer, never two.
+	if code, _, errOut := drive(t, "--memory", dir, "--accept", "locked",
+		"--gate-pending", why, "--no-gate", "also this"); code != 2 {
+		t.Errorf("two answers must be refused, got %d %q", code, errOut)
+	}
+}
+
+// ⛔ A name nothing recorded is a typo, and a typo accounts for a lesson that
+// does not exist while the real one keeps firing — with the ledger showing that
+// a decision was taken.
+func TestAcceptingALessonThatRecordsNothingIsRefused(t *testing.T) {
+	dir := mem(t, map[string]string{"came-back.md": "Deuxième fois."})
+	code, out, errOut := drive(t, "--memory", dir, "--accept", "came-bak", "--gate", "cmd/x")
+	if code != 2 {
+		t.Fatalf("code %d, want 2\n%s", code, out)
+	}
+	if !strings.Contains(errOut, "no memory named came-bak records a recurrence") {
+		t.Errorf("it should name what it could not find; it said %q", errOut)
+	}
+}
+
+// An entry written before fingerprints existed is counted and named, never
+// assumed current; and --seed records its fingerprint WITHOUT undoing the
+// decision somebody already took about it.
+func TestAnEntryWithNoFingerprintIsNamedAndThenRecorded(t *testing.T) {
+	dir := mem(t, map[string]string{
+		"came-back.md": "Deuxième fois.",
+		ledgerName:     "- came-back — no-gate: measured, nothing can refuse it\n",
+	})
+	code, out, _ := drive(t, "--memory", dir)
+	if code != 0 {
+		t.Fatalf("an old entry is not a finding, got %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "1 accounted entr(ies) carry no fingerprint") {
+		t.Errorf("it must say so every run; it said %q", out)
+	}
+	if code, out, _ = drive(t, "--memory", dir, "--seed"); code != 0 {
+		t.Fatalf("seeding: %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "recorded the fingerprint of 1 entr(ies)") {
+		t.Errorf("it should say what it recorded; it said %q", out)
+	}
+	if got := ledger(t, dir); !strings.Contains(got, "no-gate@") || !strings.Contains(got, "nothing can refuse it") {
+		t.Errorf("the decision must survive re-seeding; the ledger says %q", got)
+	}
+}
+
+// ⛔⛔ THE GATE REFUSED THE COMMAND THAT CLEARS IT. Measured 2026-11-13: the
+// word match fired on `recur --accept … --gate-pending "<reason naming
+// ghmerge>"`, because the reason said what the gate would be. A guard that
+// fires on prose about itself cannot be satisfied, only removed.
+func TestOnlyAProgramInCommandPositionCounts(t *testing.T) {
+	for _, tc := range []struct {
+		name, cmd string
+		want      bool
+	}{
+		{"a bare publish", "gitpush -u origin topic", true},
+		{"by path", "~/.local/bin/gitpush -u origin topic", true},
+		{"after cd", "cd /x && ghmerge go-crdt/collab 271", true},
+		{"behind an environment assignment", "GIT_TRACE=1 ghrelease go-crdt/collab 271 v0.1.0", true},
+		{"after a semicolon", "echo hi; ghrelease o/r 1 v0.1.0", true},
+		// ⛔ The case that provoked this: the remedy names the gate in prose.
+		{"recur accounting for a lesson whose gate is ghmerge", `recur --accept l --gate-pending "lands when ghmerge stops refusing"`, false},
+		{"a commit message naming a publisher", `git commit -m "note: gitpush carries the scope"`, false},
+		{"a pipeline whose program is grep", "cat log | grep ghrelease", false},
+		{"nothing at all", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := publishes(tc.cmd); got != tc.want {
+				t.Errorf("publishes(%q) = %v, want %v", tc.cmd, got, tc.want)
 			}
 		})
 	}
