@@ -96,10 +96,24 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 	kitCopy := statErr == nil
 	var l landing
 	brandCSS := "" // brand.css of an external-stylesheet landing, to check the logo against
+	var removeAfter []string
 	if kitCopy {
 		r.Shape = "kit-copy"
 	} else {
-		if isExternal(src) {
+		if isBaseof(dir, src) {
+			if l, err = parseBaseof(dir, src); err != nil {
+				return r, fmt.Errorf("not migrated, a person should look: %v", err)
+			}
+			r.Shape = "baseof"
+			// main.css's colours are not --from/--to: the palette is the logo's, as
+			// for --follow-logo, and the report says so
+			r.Notes = append(r.Notes, "the page's own colours (static/css/main.css) are replaced by the palette derived from the logo")
+			for _, f := range baseofFiles {
+				if _, serr := os.Stat(filepath.Join(dir, f)); serr == nil {
+					removeAfter = append(removeAfter, f)
+				}
+			}
+		} else if isExternal(src) {
 			css, cerr := read("static/css/brand.css")
 			if cerr != nil {
 				return r, fmt.Errorf("not migrated, a person should look: %v", cerr)
@@ -151,6 +165,19 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 	conf, err := read("hugo.toml")
 	if err != nil {
 		return r, err
+	}
+	if r.Shape == "baseof" {
+		// the landing's own param `brand` (its display name) is a string; the kit's
+		// [params.brand] is a table: the string is renamed, and what read it too
+		var renamed bool
+		if conf, renamed = renameBrandParam(conf); renamed {
+			l.Footer = strings.ReplaceAll(l.Footer, ".Site.Params.brand ", ".Site.Params.brandName ")
+			l.Footer = strings.ReplaceAll(l.Footer, ".Site.Params.brand}", ".Site.Params.brandName}")
+			l.Main = strings.ReplaceAll(l.Main, ".Site.Params.brand ", ".Site.Params.brandName ")
+			l.HeroExtra = strings.ReplaceAll(l.HeroExtra, ".Site.Params.brand ", ".Site.Params.brandName ")
+			l.H1 = strings.ReplaceAll(l.H1, ".Site.Params.brand ", ".Site.Params.brandName ")
+			r.Notes = append(r.Notes, "the param `brand` (a string) is renamed `brandName`: [params.brand] is the kit's table")
+		}
 	}
 	conf = addModule(conf)
 	if !strings.Contains(conf, "[params.brand]") {
@@ -213,6 +240,11 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 			if err := os.Remove(filepath.Join(dir, p)); err == nil {
 				r.Removed = append(r.Removed, p)
 			}
+		}
+	}
+	for _, p := range removeAfter {
+		if err := os.Remove(filepath.Join(dir, p)); err == nil {
+			r.Removed = append(r.Removed, p)
 		}
 	}
 	// the Octicons licence goes with the last Octicon

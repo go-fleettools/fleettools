@@ -16,6 +16,7 @@ import (
 type landing struct {
 	Title, Description, Favicon string
 	HeadExtra                   string
+	HeroExtra                   string // the hero's other markup (baseof shape): kept as written
 	Style                       string
 	Logo                        string
 	H1, Tagline                 string
@@ -316,6 +317,11 @@ func render(l landing, org string) (index, terminal string) {
       <h1 class="head">`, renameIcons(l.H1), "</h1>\n")
 	if l.Tagline != "" {
 		w(`      <p class="sub">`, wrapTagline(renameIcons(l.Tagline)), "</p>\n")
+	}
+	if l.HeroExtra != "" {
+		// what the hero said besides its title, buttons and pills (a tagline, an
+		// intro): kept as written, as data of the landing
+		w(`      <div class="legacy">`, renameIcons(l.HeroExtra), "</div>\n")
 	}
 	if len(l.CTAs) > 0 {
 		// the kit renders the row, from [[params.cta]] in hugo.toml (ctaToml)

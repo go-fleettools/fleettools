@@ -1,0 +1,205 @@
+{{ define "main" }}
+<section class="hero">
+  <img class="hero-logo" src="{{ "img/logo.svg" | relURL }}" alt="go-gfx logo" width="96" height="96">
+  <h1>
+    <span class="accent">{{ .Site.Params.heroAccent }}</span>
+  </h1>
+  {{ with .Site.Params.heroTagline }}<p class="tag">{{ . }}</p>{{ end }}
+  <div class="intro">
+    {{ range .Site.Params.heroIntro }}<p>{{ . | safeHTML }}</p>{{ end }}
+  </div>
+  <div class="cta">
+    <a class="btn btn-primary" href="https://go-gfx.github.io/docs/">{{ partial "icons/book.html" . }}Documentation</a>
+    <a class="btn btn-ghost" href="https://github.com/go-gfx/gfx">{{ partial "icons/mark-github.html" . }}GitHub</a>
+  </div>
+  <p class="pills">
+    <span class="pill">Pure Go</span>
+    <span class="pill">CGO=0</span>
+    <span class="pill">Zero dependencies</span>
+    <span class="pill">6 architectures</span>
+    <span class="pill">BSD-3-Clause</span>
+  </p>
+</section>
+
+<section id="why">
+  <h2>Why go-gfx</h2>
+  <p>
+    2D graphics in most languages means binding a C engine &mdash; Skia, Cairo, Pixman.
+    Across the Go fleet, several libraries had each grown their <em>own</em> copy of the
+    same primitives: an image processor resampling pixels, a widget toolkit rasterizing
+    vector paths, a web engine decoding image codecs, a desktop stack rendering icons.
+    <strong>go-gfx</strong> extracts that shared substrate into one pure-Go, cgo-free
+    module so colour blending, resampling, codecs and path rasterization are written and
+    tested <strong>once</strong>. It follows the Skia / Cairo / <code>image/draw</code>
+    layering: a foundation below, many renderers on top. It depends on nothing fleet-side
+    except <a href="https://github.com/go-asmgen">go-asmgen</a> for optional SIMD, and it
+    cross-compiles to a static binary on every 64-bit target.
+  </p>
+</section>
+
+<section id="packages">
+  <h2>Packages</h2>
+  <p class="section-lead">
+    A single Go module, <code>github.com/go-gfx/gfx</code>, split into focused packages —
+    import only what you need.
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gfx/tree/main/geometry">geometry</a></h4>
+      <p>Points, rectangles and affine transforms — the coordinate math shared by every layer: translate, scale, rotate, shear, compose and invert.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gfx/tree/main/color">color</a></h4>
+      <p>Colour science: RGB / XYZ / Lab, sRGB&harr;linear conversion, premultiplied alpha, and Porter-Duff / separable blend modes done correctly in linear light.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gfx/tree/main/raster">raster</a></h4>
+      <p>The shared pixel-buffer and pixel-format substrate — the common image surface every consumer reads and writes, with format conversions between them.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gfx/tree/main/resample">resample</a></h4>
+      <p>High-quality resizing: box / area averaging, bicubic (Catmull-Rom) and Lanczos, separable and weight-precomputed, validated against reference implementations.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gfx/tree/main/codec">codec</a></h4>
+      <p>Image decoders and encoders &mdash; PNG, JPEG, WebP, ICO, ICNS, GIF, TIFF &mdash; one shared set that subsumes the codecs each consumer used to hand-roll. Hardened decoders: Netpbm and QOI headers are checked against the file before any allocation (v0.36.2), and ICO is decoded in-house, bounded and with Chromium's alpha rule (v0.36.3).</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gfx/tree/main/vector">vector</a></h4>
+      <p>Paths, an anti-aliased scanline rasterizer, strokes and gradients &mdash; the 2D vector engine renderers build on instead of rolling their own. Since v0.40.0 it also carries <code>ParseData</code>, the path-data parser: SVG&rsquo;s <code>d</code>, ODF&rsquo;s <code>svg:d</code> and OpenXPS&rsquo;s abbreviated geometry are one syntax (ECMA-388 Annex C), read once here rather than transcribed by each format.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gfx/tree/main/svg">svg</a></h4>
+      <p>An SVG rasterizer and walker. Since v0.41.0 the <code>opacity</code> attribute is honoured as <strong>SVG group opacity</strong>: the element or group is drawn offscreen and blended once (SVG 1.1 &sect;14.5), so overlapping children no longer show through each other.</p>
+    </div>
+  </div>
+</section>
+
+<section id="webgpu">
+  <h2>WebGPU in the browser</h2>
+  <p class="section-lead">
+    A second module, <code>github.com/go-gfx/webgpu</code>: the GPU layer for Go programs built with
+    <code>GOOS=js</code>. <strong>Released: v0.15.0.</strong>
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/webgpu">webgpu</a></h4>
+      <p>A typed API over the browser's WebGPU: devices, buffers, textures, pipelines, render bundles, OffscreenCanvas surfaces. Out-of-range writes are errors at the call, and quotas let an embedder run untrusted code.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://go-gfx.github.io/docs/main/webgpu/#batched-encoding">Batched encoding</a></h4>
+      <p>A whole submit recorded in Go and replayed with one JavaScript call: about six times fewer CPU microseconds per frame than one call per draw. The stream format is a portable package (<code>wire</code>), so another process can check a stream and remap its object ids before replaying it. Outside the browser, a remote device sends the same API's work (descriptors and streams) to a device that runs it. For example, a VM guest's program runs on the browser's GPU through <a href="https://github.com/go-virtio/gpudev">go-virtio/gpudev</a>.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://go-gfx.github.io/docs/main/webgpu/#read-back">Read-back and the host context</a></h4>
+      <p>Since v0.7.0 a stream can read a GPU buffer back: <code>Recorder.ReadBuffer</code> (opcode 34, stream version 4) returns a bounded window with the submit, at about 124 &micro;s for 4 KiB and 155 &micro;s for 1 MiB on Apple Metal. The new <code>batch</code> package is the transport-free host side of a stream: private guest ids, checked reads, one implementation for every transport.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://go-gfx.github.io/docs/main/webgpu/#batch">Range checks on replay</a></h4>
+      <p>Since v0.8.0 <code>wire.CheckRanges</code> refuses, before the backend or <code>replay.js</code> runs, a buffer write or copy outside its buffer, indirect arguments that leave the buffer, and a dispatch above <code>maxComputeWorkgroupsPerDimension</code>. Errors wrap <code>wire.ErrRange</code>, and the check is fuzzed.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/wgsl">wgsl</a></h4>
+      <p>A pure-Go WGSL front end, <code>github.com/go-gfx/wgsl</code>: lexer, parser, printer (the output re-parses to an equal AST), name resolution and type checking. Reserved words such as <code>meta</code> are rejected with a line and column, and every input is bounded. Checked against the W3C WebGPU CTS validation cases; the <code>wgsl check</code> and <code>wgsl fmt</code> commands run it from a shell. Since v0.2.0 a loop-budget transform bounds every <code>loop</code>, <code>for</code> and <code>while</code> and sets a flag the host reads back when a run is cut; it does not depend on the checker, which is not yet a security boundary. Since v0.5.0 package <code>msl</code> emits Metal Shading Language for the functions of a checked module, with WGSL's own semantics rather than Metal's defaults: fast math off, signed overflow wrapping, and WGSL's results for a zero divisor and <code>MIN / -1</code>. Run on a Mac's GPU, it matches WGSL's definitions over 361 integer edge pairs; Metal's plain <code>1 / 0</code> gives −1 where WGSL defines 1. Since v0.9.0 package <code>spirv</code> emits SPIR-V 1.5 (the Vulkan 1.2 environment) and package <code>hlsl</code> emits Shader Model 5.0 HLSL for compute entry points, for the subset a fill kernel needs; the rest is refused with a position. SPIR-V is validated by <code>spirv-val</code> in CI; the HLSL is compiled and run on Direct3D 11 WARP. Neither has run on a GPU. <a href="https://go-gfx.github.io/docs/main/wgsl/">Docs</a>.</p>
+    </div>
+  </div>
+</section>
+
+<section id="gpu2d">
+  <h2>2D on the GPU</h2>
+  <p class="section-lead">
+    A third module, <code>github.com/go-gfx/gpu2d</code>: one backend-neutral list of instances, drawn by
+    WebGPU in the browser, a Metal compute kernel on a Mac, Vulkan on Linux or Direct3D 11 on Windows, and held
+    to a CPU reference that defines every pixel. <strong>Released: v0.12.1.</strong>
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gpu2d">gpu2d</a></h4>
+      <p>Fills and outlines, square or with anti-aliased rounded corners; glyph masks, scaled images and paths (since v0.2.0); under nested translations and clips. <code>Rasterize</code>, the CPU reference, equals go-widgets/painter's <code>PixelPainter</code> byte for byte over 3000 random scenes and 51,947 primitives.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gpu2d#measured">13 to 32 times faster</a></h4>
+      <p>A widget-toolkit frame on an Apple M4 Max: 13.1 ms at 1080p and 52.5 ms at 4K on <code>PixelPainter</code>; 0.99 ms and 1.62 ms with WebGPU in Chromium; 1.08 ms and 2.79 ms with the Metal kernel, binning included.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gpu2d#metal-package-metal-macos">Asynchronous submit</a></h4>
+      <p>Since v0.3.0 the Metal renderer has <code>Submit</code> and <code>Wait</code>, with two frames in flight, so the CPU records the next frame while the GPU draws this one: 3.17 ms per frame with <code>Draw</code> against 1.78 ms with 1.5 ms of CPU work, on go-macos/metal v0.4.0.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gpu2d">Presented in a browser canvas</a></h4>
+      <p>Since v0.5.0 <code>webgpu.Renderer.Present(surface)</code> puts the frame into a canvas texture on the GPU, byte-exact. Since v0.6.0 <code>CanvasDescriptor()</code> follows the browser's preferred format, so on macOS and Windows the frame is drawn into a bgra8unorm canvas and the compositor's extra copy is gone: 1.053 → 0.792 ms per 4K frame (−24.8 %). <code>Renderer.Destroy()</code> refunds buffers and texture to the device quota. go-widgets/webcanvas uses it.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gpu2d">One coverage, written in WGSL</a></h4>
+      <p>Since v0.5.2 the Metal kernel's coverage functions are generated from the WebGPU shader by go-gfx/wgsl's <code>msl</code> package, so the arithmetic is no longer written twice. The kernel stays byte-identical to the CPU reference (max |Δ| 0 over 3,686,400 channels), and a test fails if the WGSL changes without the Metal file being regenerated.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gpu2d#metal-package-metal-macos">Exact on the GPU</a></h4>
+      <p>The Metal kernel blends with the reference's integer arithmetic and differs on no channel of the scenes measured. Since v0.12.0 the coverage of a rounded corner is decided exactly, in 32-bit integers from the exact squared distance, in the kernel, the CPU reference and the WebGPU shader: at every radius from 1 to 64 the differing channels are 0 on Metal, RADV and lavapipe, where they were 366, 6,580 and 2,742. WARP and the browser ran random scenes only, not that corner corpus. <code>MaxRadius</code> is 16383. WebGPU's fixed-function blending matches every channel over an opaque surface; over a translucent one alpha differs by up to 4, and the tests report it. WebGPU also has an opt-in compute mode (<code>NewCompute</code>) that runs the whole raster kernel and is byte-identical to the reference over any ground.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gpu2d#vulkan-package-vulkan-linux">Vulkan on Linux</a></h4>
+      <p>Since v0.10.0 package <code>vulkan</code> runs the same raster kernel through <a href="https://github.com/go-gfx/vulkan">go-gfx/vulkan</a>, as SPIR-V generated from the WGSL kernel by go-gfx/wgsl's <code>spirv</code> package. CI runs it on lavapipe (Mesa's software Vulkan) with the Khronos validation layer, failing on any message, and finds 0 differing channels against the CPU reference on both grounds. lavapipe proves the bindings and the kernel, not the speed of a GPU. On an AMD Radeon PRO W7700 (RADV, Mesa 25.2.8; one core for the CPU side; 8 rounds, load below 2), <code>Draw</code> takes 0.524 ms at 1080p and 1.984 ms at 4K against 27.13 ms and 110.0 ms for <code>Rasterize</code>: 52 and 55 times faster, and 5.9 and 6.7 times with the read-back (4.57 ms and 16.4 ms). <code>Draw</code> plus <code>Sync</code> is 2.12 ms and 7.13 ms. One card and one driver.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/gpu2d#direct3d-11-package-d3d11-windows-opt-in">Direct3D 11 on Windows, opt-in</a></h4>
+      <p>Package <code>d3d11</code> runs the kernel as HLSL generated from the same WGSL by go-gfx/wgsl's <code>hlsl</code> package, through <a href="https://github.com/go-mswin/d3d11">go-mswin/d3d11</a>. It ships opt-in, and only WARP (the software device of a <code>windows-latest</code> runner) has run it: parity with the reference on WARP measures WARP's arithmetic, not any GPU, and no Windows GPU has run it yet. Off Windows, and where no device exists, the constructors return an error and a caller falls back to the CPU. <a href="https://github.com/go-gfx/gpu2d/blob/main/docs/NATIVE.md">docs/NATIVE.md</a>.</p>
+    </div>
+  </div>
+</section>
+
+<section id="vulkan">
+  <h2>Vulkan, without cgo</h2>
+  <p class="section-lead">
+    A fourth module, <code>github.com/go-gfx/vulkan</code>: a pure-Go binding to the part of Vulkan a compute
+    workload needs. <strong>Released: v0.2.1.</strong>
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/vulkan">vulkan</a></h4>
+      <p>Calls the system loader <code>libvulkan.so.1</code> through <a href="https://github.com/ebitengine/purego">purego</a>, so a binary built with <code>CGO_ENABLED=0</code> can be cross-compiled on one machine and copied to another that has a Vulkan driver. Instance, physical-device choice, one device with one compute queue, host-visible and device-local buffers, SPIR-V shaders, compute pipelines, command buffers with <code>Barrier</code>, and fences. Compute only, 64-bit Linux (linux/amd64 and linux/arm64): no window-system integration, no graphics pipelines.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-gfx/vulkan#testing">Proven on lavapipe with the validation layer</a></h4>
+      <p>CI builds the tests <code>CGO_ENABLED=0</code> and runs a compute dispatch of a kernel emitted by go-gfx/wgsl on lavapipe with the Khronos validation layer: the expected bytes, and zero validation messages. Break checks show the lane can fail, including a <code>SYNC-HAZARD</code> without <code>Barrier</code>. Buffer sizes are checked in 64 bits before allocation. This lane is software only; the real-GPU result is go-gfx/gpu2d's, on an AMD Radeon PRO W7700 (RADV), in the 2D on the GPU section above.</p>
+    </div>
+  </div>
+</section>
+
+<section id="consumers">
+  <h2>Consumers</h2>
+  <p class="section-lead">
+    go-gfx is a foundation: it is meant to be depended on. These fleet libraries build on it
+    instead of each re-implementing the same primitives.
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h4><a href="https://github.com/go-images/images">go-images</a></h4>
+      <p>The scikit-image-style image-processing library. Filters, edges and morphology built on <code>raster</code>, <code>color</code> and <code>resample</code>.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-widgets">go-widgets/painter</a></h4>
+      <p>The tri-backend widget renderer. Path fills, strokes and gradients built on <code>vector</code>, <code>raster</code> and <code>color</code>.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-webengine">go-webengine</a></h4>
+      <p>The headless HTML/CSS &rarr; image engine (no Chromium). Layout painting built on <code>resample</code>, <code>codec</code> and <code>vector</code>.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-widgets">go-widgets/desktop</a></h4>
+      <p>The desktop shell. Icon and thumbnail rendering built on <code>codec</code> and <code>resample</code>, replacing hand-rolled ICNS/ICO decoders.</p>
+    </div>
+  </div>
+</section>
+
+<section id="quality">
+  <h2>Quality bar</h2>
+  <ul class="features">
+    <li><strong>Pure Go.</strong> <code>CGO_ENABLED=0</code> across the org. No Skia, no Cairo, no native shims.</li>
+    <li><strong>Zero dependencies.</strong> Nothing fleet-side except <a href="https://github.com/go-asmgen">go-asmgen</a> for optional SIMD, pulled in only at code-generation time.</li>
+    <li><strong>100% test coverage.</strong> Gated in CI, including error branches, validated against reference implementations.</li>
+    <li><strong>Six architectures.</strong> Build + test on all six of Go's 64-bit targets &mdash; amd64 / arm64 natively, loong64 / riscv64 / ppc64le / s390x under qemu.</li>
+    <li><strong>BSD-3-Clause</strong> on every source file.</li>
+  </ul>
+</section>
+{{ end }}

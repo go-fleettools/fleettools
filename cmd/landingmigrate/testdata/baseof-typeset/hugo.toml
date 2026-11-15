@@ -1,0 +1,42 @@
+baseURL = 'https://go-typeset.github.io/'
+locale  = 'en-us'
+title   = 'go-typeset'
+# No theme — layouts live in ./layouts
+
+disableKinds = ['taxonomy', 'term', 'rss', 'sitemap']
+
+[params]
+  description = "go-typeset is the pure-Go (CGO=0) home of the algorithms that place marks on a page — Knuth–Plass line breaking, Liang hyphenation and the Unicode bidirectional algorithm — extracted from the go-tex engine and usable by anything that lays out text."
+  brand       = "go-typeset"
+  github      = "go-typeset"
+  heroAccent  = "go-typeset"
+  accent       = "#4338CA"
+  accent2      = "#4F46E5"
+  accent3      = "#6366F1"
+  accentDark   = "#818CF8"
+  accentDark2  = "#A5B4FC"
+  accentDark3  = "#C7D2FE"
+  titleSuffix = "the algorithms that place marks on a page"
+  heroTagline = "Typesetting, not typography. Where the marks go, not what they look like."
+
+  heroIntro = [
+    "<strong>go-typeset</strong> holds the algorithms that decide <em>where</em> text goes: <strong>Knuth–Plass</strong> optimal line breaking, <strong>Liang</strong> hyphenation, and the <strong>Unicode bidirectional algorithm</strong>. Pure Go, cgo-free, standard library only, <strong>100% test coverage</strong>.",
+    "They came out of the <a href=\"https://github.com/go-tex/engine\">go-tex</a> engine, where they were already written as self-contained algorithms with no reference to engine state — so extracting them was a move, not a rewrite. Their public API carries <strong>no TeX vocabulary</strong>, because a paragraph breaker is not a TeX component."
+  ]
+
+[menu]
+  [[menu.main]]
+    identifier = "why"
+    name       = "Why"
+    url        = "#why"
+    weight     = 10
+  [[menu.main]]
+    identifier = "packages"
+    name       = "Packages"
+    url        = "#packages"
+    weight     = 20
+  [[menu.main]]
+    identifier = "quality"
+    name       = "Quality"
+    url        = "#quality"
+    weight     = 30

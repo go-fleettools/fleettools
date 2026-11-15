@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {{/* Dark Reader repaints pages that already draw their own dark theme, as this one does: ask it to stand aside. */}}
+  <meta name="darkreader-lock">
+  <title>{{ .Site.Title }}{{ with .Site.Params.titleSuffix }} &mdash; {{ . }}{{ end }}</title>
+  <meta name="description" content="{{ .Site.Params.description }}">
+  <meta name="generator" content="Hugo">
+  <link rel="icon" type="image/svg+xml" href="{{ "favicon.svg" | relURL }}">
+  <link rel="stylesheet" href="{{ "css/main.css" | relURL }}">
+  <script>
+    // Apply the persisted theme before first paint to avoid a flash.
+    // "system" = no data-theme attribute (falls back to prefers-color-scheme).
+    (function () {
+      try {
+        var t = localStorage.getItem("theme");
+        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    })();
+  </script>
+  {{/* The shared stylesheet is tuned to one accent — cyan. An org whose mark is
+       another colour states its own here rather than forking the CSS.
+
+       All FOUR blocks have to be emitted, not just :root. The stylesheet defines
+       the tokens again under "@media (prefers-color-scheme: dark)
+       :root:not([data-theme=light])" and under :root[data-theme=dark/light], and
+       those selectors are MORE SPECIFIC than a bare :root — so overriding :root
+       alone changes the served CSS and nothing on screen. That is precisely how
+       the first attempt shipped: --accent:#4F46E5 in the document, a cyan page in
+       the browser, and only a screenshot to tell the difference. */}}
+  {{ with .Site.Params.accent }}
+  {{ $l1 := . }}{{ $l2 := $.Site.Params.accent2 | default . }}{{ $l3 := $.Site.Params.accent3 | default . }}
+  {{ $d1 := $.Site.Params.accentDark | default . }}{{ $d2 := $.Site.Params.accentDark2 | default $l2 }}{{ $d3 := $.Site.Params.accentDark3 | default $l3 }}
+  <style>
+  :root{--accent:{{ $l1 }};--accent-2:{{ $l2 }};--accent-3:{{ $l3 }}}
+  @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--accent:{{ $d1 }};--accent-2:{{ $d2 }};--accent-3:{{ $d3 }}}}
+  :root[data-theme="light"]{--accent:{{ $l1 }};--accent-2:{{ $l2 }};--accent-3:{{ $l3 }}}
+  :root[data-theme="dark"]{--accent:{{ $d1 }};--accent-2:{{ $d2 }};--accent-3:{{ $d3 }}}
+  </style>
+  {{ end }}
+</head>
+<body>
+  {{ partial "nav.html" . }}
+
+  <main class="container">
+    {{ block "main" . }}{{ end }}
+  </main>
+
+  {{ partial "footer.html" . }}
+
+  <script>
+    // Three-way theme toggle: light -> dark -> system -> light.
+    (function () {
+      var btn = document.getElementById("theme-toggle");
+      if (!btn) return;
+      var order = ["light", "dark", "system"];
+      var label = { light: "Light", dark: "Dark", system: "System" };
+      var icon  = { light: "☀️", dark: "\u{1F319}", system: "\u{1F5A5}️" };
+      function current() {
+        var t = document.documentElement.dataset.theme;
+        return t === "light" || t === "dark" ? t : "system";
+      }
+      function render() {
+        var c = current();
+        btn.textContent = icon[c] + " " + label[c];
+        btn.setAttribute("aria-label", "Theme: " + label[c] + ". Click to change.");
+      }
+      btn.addEventListener("click", function () {
+        var next = order[(order.indexOf(current()) + 1) % order.length];
+        if (next === "system") {
+          delete document.documentElement.dataset.theme;
+          try { localStorage.removeItem("theme"); } catch (e) {}
+        } else {
+          document.documentElement.dataset.theme = next;
+          try { localStorage.setItem("theme", next); } catch (e) {}
+        }
+        render();
+      });
+      render();
+    })();
+  </script>
+</body>
+</html>

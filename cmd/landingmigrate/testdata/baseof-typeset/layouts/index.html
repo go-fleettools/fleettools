@@ -1,0 +1,79 @@
+{{ define "main" }}
+<section class="hero">
+  <img class="hero-logo" src="{{ "img/logo.svg" | relURL }}" alt="go-typeset logo" width="96" height="96">
+  <h1>
+    <span class="accent">{{ .Site.Params.heroAccent }}</span>
+  </h1>
+  {{ with .Site.Params.heroTagline }}<p class="tag">{{ . }}</p>{{ end }}
+  <div class="intro">
+    {{ range .Site.Params.heroIntro }}<p>{{ . | safeHTML }}</p>{{ end }}
+  </div>
+  <div class="cta">
+    <a class="btn btn-primary" href="https://github.com/go-typeset/linebreak">{{ partial "icons/mark-github.html" . }}linebreak</a>
+    <a class="btn btn-ghost" href="https://github.com/go-typeset">{{ partial "icons/mark-github.html" . }}GitHub</a>
+  </div>
+  <p class="pills">
+    <span class="pill">Pure Go</span>
+    <span class="pill">CGO=0</span>
+    <span class="pill">Standard library only</span>
+    <span class="pill">100% coverage</span>
+    <span class="pill">6 architectures</span>
+    <span class="pill">BSD-3-Clause</span>
+  </p>
+</section>
+
+<section id="why">
+  <h2>Why go-typeset</h2>
+  <p>
+    Breaking a paragraph into lines well is not a TeX feature &mdash; it is an
+    algorithm, published in 1981, that any renderer of text wants: a PDF writer, an
+    e-book engine, a terminal formatter, a widget toolkit. The same is true of
+    hyphenation and of the bidirectional algorithm. Inside a TeX engine they are
+    invisible to everyone else; on their own they are reusable.
+  </p>
+  <p>
+    So they were lifted out of <a href="https://github.com/go-tex/engine">go-tex</a>
+    &mdash; a move, not a rewrite, because they were already written as pure
+    algorithms with no reference to engine state. Their API deliberately carries
+    <strong>no TeX vocabulary</strong>. The engine now consumes them like any other
+    caller, through a small aliasing seam, and its own code reads unchanged.
+  </p>
+</section>
+
+<section id="packages">
+  <h2>Packages</h2>
+  <p class="section-lead">
+    Three modules, each usable alone, each with no dependencies beyond the standard
+    library.
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h4><a href="https://github.com/go-typeset/linebreak">linebreak</a></h4>
+      <p><strong>Knuth&ndash;Plass</strong> optimal line breaking: the box / glue / penalty model and the paragraph builder. Breaks are chosen for the paragraph as a whole rather than line by line, which is what gives TeX its even greyness.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-typeset/hyphenation">hyphenation</a></h4>
+      <p><strong>Liang's algorithm</strong>, reading TeX's own pattern files. Honours <code>\lefthyphenmin</code>/<code>\righthyphenmin</code>, and documents &mdash; with a test pinning it &mdash; the one place it diverges from the thesis.</p>
+    </div>
+    <div class="card">
+      <h4><a href="https://github.com/go-typeset/bidi">bidi</a></h4>
+      <p>The <strong>Unicode bidirectional algorithm</strong>: embedding levels and visual reordering for mixed left-to-right and right-to-left text.</p>
+    </div>
+  </div>
+</section>
+
+<section id="quality">
+  <h2>Quality bar</h2>
+  <p>
+    <strong>100% statement coverage</strong> on every module, error branches included,
+    on six 64-bit architectures, three operating systems and both wasm targets. No
+    cgo, no third-party dependency, BSD-3-Clause.
+  </p>
+  <p>
+    Two API additions were forced by wiring the engine back onto the extracted
+    libraries &mdash; a last-resort tolerance, and the hyphenation minima. That is the
+    useful signal that the extraction was real: an algorithm sealed inside its only
+    caller never has to expose its parameters.
+  </p>
+</section>
+{{ end }}
