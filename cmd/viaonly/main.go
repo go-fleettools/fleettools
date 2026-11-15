@@ -126,9 +126,13 @@ round, and the function form is REFUSED — see that rule above.
     --allow '(*Peer).AcceptAnswer=no call after it can be blocked'
     --allow 'peer_js.go:180=…'                 # also accepted, and worse
 
-Exit status: 0 clean, 1 at least one bypass, 2 refused to decide — the
-directory would not parse, or a declared name is not in it. A name that
-resolves to nothing is never reported as a clean package.`
+Exit status: 0 clean, 1 at least one bypass or one exit that never asked, 2
+REFUSED TO DECIDE. A name that resolves to nothing is never reported as clean,
+and 2 covers every such case: the directory would not parse; more than one
+directory was named; a declared name is not in it; nothing was examined; a
+waiver matches no site; every site is waived (so nothing was judged); or, under
+--asks/--in, the examined function contains a goto, which makes source order
+unusable.`
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
@@ -162,7 +166,7 @@ func RootCmd() *cobra.Command {
 	c.Flags().StringVar(&in, "in", "",
 		"the function whose exit points are examined, with --asks: name, (*T).name or (T).name")
 	c.Flags().StringArrayVar(&allow, "allow", nil,
-		"waive one site: '(*T).Func=why' or 'file.go:LINE=why'. Name the function — a line moves. The reason is printed (repeatable)")
+		"waive one site, with a reason that is PRINTED (repeatable). Under --wraps/--via: '(*T).Func=why' or 'file.go:LINE=why', and prefer the function — a line moves. Under --asks/--in: 'file.go:LINE=why' ONLY, because every exit is in the same function and a function-named waiver would waive them all")
 	c.Flags().BoolVar(&tests, "tests", false,
 		"scan _test.go files too; by default they are skipped and the count is printed")
 	c.Flags().IntVar(&expect, "expect", -1,

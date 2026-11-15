@@ -663,21 +663,25 @@ func TestMentioningThePredicateIsNotAskingIt(t *testing.T) {
 		body string
 		bad  int
 	}{
+		// ⛔ ONE of the two exits, not both: reaching the statement AFTER the if
+		// means the whole condition evaluated false, so `!t.ready()` did run.
+		// Only the body is uncredited. See TestTheTwoPolaritiesOfAShortCircuit.
 		{"the right operand of || is not evaluated when the left is true", `
 	if t.closed || !t.ready() {
 		return 1, nil
 	}
-	return 2, nil`, 2},
+	return 2, nil`, 1},
 		{"the LEFT operand of || always is", `
 	if !t.ready() || t.closed {
 		return 1, nil
 	}
 	return 2, nil`, 0},
+		// The mirror: the BODY of an && asked, and what follows it did not.
 		{"the right operand of && is not evaluated when the left is false", `
 	if t.closed && t.ready() {
 		return 1, nil
 	}
-	return 2, nil`, 2},
+	return 2, nil`, 1},
 		{"the LEFT operand of && always is", `
 	if t.ready() && t.closed {
 		return 1, nil
@@ -752,6 +756,52 @@ func (t *T) Offer() (int, error) {` + c.body + `
 	}
 }
 
+// ⛔⛔ WHICH SIDE OF AN `if` ASKED IS THE WHOLE CONTENT OF A SHORT CIRCUIT, and
+// counting findings cannot tell the two apart. `||` and `&&` credit OPPOSITE
+// sides, so a rule that got the polarity backwards would pass the same count.
+//
+// Reaching the body of `A || ask()` needs only A; reaching what FOLLOWS it
+// means the whole condition was false, so ask() ran. `A && ask()` is the
+// mirror. The first fix here credited neither side — safe, and it reported a
+// phantom on every such function, which is how a reader stops believing a gate.
+func TestTheTwoPolaritiesOfAShortCircuit(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		cond     string
+		bodyAsks bool // is the exit INSIDE the if credited?
+	}{
+		{"or: the body may not have asked, the continuation did", "t.closed || !t.ready()", false},
+		{"and: the body asked, the continuation may not have", "t.closed && t.ready()", true},
+		{"a ! swaps the question", "!(t.closed || !t.ready())", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := pkg(t, map[string]string{"p.go": shortFixture + `
+func (t *T) Offer() (int, error) {
+	if ` + c.cond + ` {
+		return 1, nil
+	}
+	return 2, nil
+}
+`})
+			code, out, errOut := drive(t, "--asks", "(*T).ready", "--in", "(*T).Offer", dir)
+			if code != 1 {
+				t.Fatalf("code %d, want 1 (exactly one side is uncredited)\nout: %s\nerr: %s", code, out, errOut)
+			}
+			// shortFixture is 16 lines; the appended text puts the body's
+			// return on p.go:20 and the one after the if on p.go:22. A wrong
+			// number here fails loudly, which is why a line is tolerable in a
+			// test and refused in a waiver.
+			inBody, after := strings.Contains(out, "p.go:20"), strings.Contains(out, "p.go:22")
+			if c.bodyAsks && (inBody || !after) {
+				t.Errorf("the body asked and the continuation did not; it flagged body=%v after=%v\n%s", inBody, after, out)
+			}
+			if !c.bodyAsks && (!inBody || after) {
+				t.Errorf("the continuation asked and the body did not; it flagged body=%v after=%v\n%s", inBody, after, out)
+			}
+		})
+	}
+}
+
 // ⛔⛔ A goto MAKES SOURCE ORDER A LIE, and source order is all this pass has.
 // `if t.fast { goto done }` jumps over the ask and reaches an exit that was
 // credited because the ask sits above it in the text.
@@ -780,24 +830,98 @@ done:
 	}
 }
 
-// ⛔ A body that gives `panic` a local meaning has no builtin panic in it, so
-// the closing brace is still an exit. Believing otherwise LOSES one, silently.
+// ⛔⛔ THREE SCOPES CAN TAKE THE BUILTIN AWAY, and the first version of this
+// check read only one of them. Each row is a two-exit function that reported
+// ONE — a lost exit, which is the silent direction — and two of the three were
+// found by a review after the body case was already fixed.
 func TestAShadowedPanicDoesNotTerminateABody(t *testing.T) {
-	dir := pkg(t, map[string]string{"p.go": shortFixture + `
+	for _, c := range []struct{ name, src string }{
+		{"a local in the body", `
 func (t *T) Close() {
 	panic := func(string) {}
 	if t.closed {
 		return
 	}
 	panic("gone")
+}`},
+		{"a PARAMETER, which lives in the signature and not the body", `
+func (t *T) Close(panic func(string)) {
+	if t.closed {
+		return
+	}
+	panic("gone")
+}`},
+		{"a PACKAGE-LEVEL declaration, which compiles and shadows it everywhere", `
+func panic(s string) { _ = s }
+
+func (t *T) Close() {
+	if t.closed {
+		return
+	}
+	panic("gone")
+}`},
+		{"a package-level VAR, the third shape a top-level declaration takes", `
+var panic = func(string) {}
+
+func (t *T) Close() {
+	if t.closed {
+		return
+	}
+	panic("gone")
+}`},
+		// ⛔ A package-level TYPE named panic makes `panic("gone")` a
+		// CONVERSION, which terminates nothing — and the type branch of the
+		// scope check was the last thing in this file nothing held.
+		{"a package-level TYPE, which turns the call into a conversion", `
+type panic string
+
+func (t *T) Close() {
+	if t.closed {
+		return
+	}
+	panic("gone")
+}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := pkg(t, map[string]string{"p.go": shortFixture + c.src + "\n"})
+			code, out, errOut := drive(t, "--asks", "(*T).ready", "--in", "(*T).Close", dir)
+			if code != 1 {
+				t.Fatalf("code %d, want 1\nout: %s\nerr: %s", code, out, errOut)
+			}
+			if !strings.Contains(out, "2 of 2 exit(s)") {
+				t.Errorf("the closing brace is still an exit; it said %q", out)
+			}
+			if !strings.Contains(out, "falls off the end") {
+				t.Errorf("the implicit exit should be named as such; it said %q", out)
+			}
+		})
+	}
+}
+
+// ⛔⛔ A fallthrough IS THE FINAL NON-EMPTY STATEMENT, not the final element.
+// Reading only the last element restored the defect this check exists for: one
+// semicolon put the branch second-to-last and the next clause's expression was
+// credited again. gofmt deletes that semicolon — and this command reads other
+// people's repositories, not only formatted ones.
+func TestAFallthroughFollowedByAnEmptyStatementStillFallsThrough(t *testing.T) {
+	dir := pkg(t, map[string]string{"p.go": shortFixture + `
+func (t *T) Offer() (int, error) {
+	switch t.n {
+	case 1:
+		fallthrough
+		;
+	case btoi(t.ready()):
+		return 1, nil
+	}
+	return 2, nil
 }
 `})
-	code, out, _ := drive(t, "--asks", "(*T).ready", "--in", "(*T).Close", dir)
+	code, out, errOut := drive(t, "--asks", "(*T).ready", "--in", "(*T).Offer", dir)
 	if code != 1 {
-		t.Fatalf("code %d, want 1\nout: %s", code, out)
+		t.Fatalf("code %d, want 1\nout: %s\nerr: %s", code, out, errOut)
 	}
-	if !strings.Contains(out, "2 of 2 exit(s)") {
-		t.Errorf("the closing brace is still an exit; it said %q", out)
+	if n := strings.Count(out, "without asking ready"); n != 2 {
+		t.Errorf("both exits are reachable without asking, %d named:\n%s", n, out)
 	}
 }
 

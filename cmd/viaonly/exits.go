@@ -147,9 +147,20 @@ func checkExits(out, errOut io.Writer, fset *token.FileSet, files []*ast.File, o
 		}
 	}
 
+	// Package scope is read once: a top-level declaration named `panic` shadows
+	// the builtin for every function here.
+	pkgShadowsPanic := false
+	for _, f := range files {
+		for _, d := range f.Decls {
+			if topLevelName(d, "panic") {
+				pkgShadowsPanic = true
+			}
+		}
+	}
+
 	var found []exit
 	for _, fd := range decls {
-		found = append(found, exitsOf(fset, fd, o.in, names)...)
+		found = append(found, exitsOf(fset, fd, o.in, names, pkgShadowsPanic)...)
 	}
 
 	// ⛔⛔ NO EXIT IS NOT A CLEAN FUNCTION. --in is declared — that was checked —
@@ -289,18 +300,24 @@ func declaresAny(files []*ast.File, recv, fn string) bool {
 // a package that reaches the predicate through a variable it set earlier is not
 // seen. The direction of the approximation is stated below for each exclusion,
 // because a check that errs toward PASSING is the one that lies.
-func exitsOf(fset *token.FileSet, fd *ast.FuncDecl, in string, asks map[string]bool) []exit {
+func exitsOf(fset *token.FileSet, fd *ast.FuncDecl, in string, asks map[string]bool, pkgShadowsPanic bool) []exit {
 	var out []exit
 	add := func(pos token.Pos, asked, implicit bool) {
 		p := fset.Position(pos)
 		out = append(out, exit{file: filepath.Base(p.Filename), line: p.Line, in: in, asked: asked, implicit: implicit})
 	}
 	asked := walkStmts(fd.Body.List, false, asks, add)
-	// ⛔ A body that DEFINES the name `panic` has no builtin panic in it, so a
-	// call spelled that way does not terminate anything. Believing it does
-	// LOSES the closing brace as an exit, which is the silent direction.
-	// Measured: `panic := func(string){}` made a two-exit function report one.
-	panicOK := !defines(fd.Body, "panic")
+	// ⛔ A declaration that gives the name `panic` a local meaning has no
+	// builtin panic in it, so a call spelled that way does not terminate
+	// anything. Believing it does LOSES the closing brace as an exit, which is
+	// the silent direction.
+	//
+	// ⛔⛔ THREE SCOPES, AND THE FIRST VERSION READ ONLY ONE. A review measured
+	// both misses: `func (t *T) F(panic func(string))` keeps its parameters in
+	// fd.Type, not in the body, and a package-level `func panic(s string)`
+	// compiles and shadows the builtin for every function in the package. Each
+	// made a two-exit function report one, silently.
+	panicOK := !pkgShadowsPanic && !defines(fd.Type, "panic") && !defines(fd.Body, "panic")
 	// ⛔ THE CLOSING BRACE IS AN EXIT TOO, for a function with no results. Without
 	// this, a void function whose last statement is not a `return` had its final
 	// exit — the common one — counted nowhere, and a rule can be broken at a hole
@@ -335,8 +352,40 @@ func firstGoto(n ast.Node) (token.Pos, bool) {
 	return at, found
 }
 
-// defines reports whether a body gives the name a local meaning, which is how
-// a builtin stops being the builtin.
+// topLevelName reports whether a declaration itself declares that name at
+// package scope.
+//
+// ⛔ It reads the declaration's OWN name and never descends: `defines` over a
+// whole FuncDecl would see a local `panic :=` inside any function of the
+// package and take the builtin away from all of them. That errs toward
+// reporting, which is safe, but a phantom exit in every function of a package
+// because of one local variable is how a reader stops believing the tool.
+func topLevelName(d ast.Decl, name string) bool {
+	switch v := d.(type) {
+	case *ast.FuncDecl:
+		return v.Recv == nil && v.Name.Name == name
+	case *ast.GenDecl:
+		for _, s := range v.Specs {
+			switch sp := s.(type) {
+			case *ast.ValueSpec:
+				for _, id := range sp.Names {
+					if id.Name == name {
+						return true
+					}
+				}
+			case *ast.TypeSpec:
+				if sp.Name.Name == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// defines reports whether a node gives the name a local meaning, which is how
+// a builtin stops being the builtin. It is asked of a function's type (its
+// parameters and results) and of its body.
 func defines(n ast.Node, name string) bool {
 	found := false
 	ast.Inspect(n, func(x ast.Node) bool {
@@ -404,18 +453,29 @@ func walkStmt(s ast.Stmt, asked bool, asks map[string]bool, add func(token.Pos, 
 		// A bare block always runs, so what it establishes carries out of it.
 		return walkStmts(st.List, asked, asks, add)
 	case *ast.IfStmt:
-		head := asked || asksIn(asks, st.Init) || asksIn(asks, st.Cond)
-		walkStmts(st.Body.List, head, asks, add)
+		// ⛔ THE BODY AND WHAT FOLLOWS KNOW DIFFERENT THINGS, and treating them
+		// alike was over-strict in one direction and would be unsound in the
+		// other. `if A || ask() { … }` reaches its body on A alone — so the body
+		// may not have asked — while reaching the ELSE means A was false AND
+		// ask() was evaluated. `if A && ask()` is the mirror. Reporting a
+		// phantom is the safe direction, but a gate that cries wolf is a gate
+		// somebody turns off, so each side is credited with what it actually
+		// knows. See asksWhen.
+		init := asked || asksIn(asks, st.Init)
+		walkStmts(st.Body.List, init || asksWhen(asks, st.Cond, true), asks, add)
+		cont := init || asksWhen(asks, st.Cond, false)
 		if st.Else != nil {
-			walkStmt(st.Else, head, asks, add)
+			walkStmt(st.Else, cont, asks, add)
 		}
-		return head
+		return cont
 	case *ast.ForStmt:
 		// Init and Cond are evaluated before the first iteration; Post is NOT
 		// evaluated at all when the body never runs, so it counts for nothing.
-		head := asked || asksIn(asks, st.Init) || asksIn(asks, st.Cond)
-		walkStmts(st.Body.List, head, asks, add)
-		return head
+		// The body runs on a true condition and the statements after the loop
+		// are reached on a false one — the same two answers as an if.
+		init := asked || asksIn(asks, st.Init)
+		walkStmts(st.Body.List, init || asksWhen(asks, st.Cond, true), asks, add)
+		return init || asksWhen(asks, st.Cond, false)
 	case *ast.RangeStmt:
 		head := asked || asksIn(asks, st.X) // the range expression is evaluated once
 		walkStmts(st.Body.List, head, asks, add)
@@ -478,7 +538,7 @@ func walkCases(list []ast.Stmt, asked bool, asks map[string]bool, add func(token
 				inner = true
 			}
 			walkStmts(cc.Body, inner, asks, add)
-			fellThrough = endsWithFallthrough(cc.Body)
+			fellThrough = anyFallthrough(cc.Body)
 		case *ast.CommClause:
 			// A select's chosen clause DID evaluate its own communication, and
 			// select has no fallthrough. What the comment at the SelectStmt
@@ -488,12 +548,22 @@ func walkCases(list []ast.Stmt, asked bool, asks map[string]bool, add func(token
 	}
 }
 
-func endsWithFallthrough(body []ast.Stmt) bool {
-	if len(body) == 0 {
-		return false
+// anyFallthrough reports whether a clause body hands control to the next clause.
+//
+// ⛔ IT USED TO READ ONLY THE LAST ELEMENT, and one character restored the
+// defect it was written for: `fallthrough` followed by an explicit empty
+// statement leaves the branch second-to-last, and the next clause's expression
+// was credited again. The specification says a fallthrough is the final
+// NON-EMPTY statement of a clause, which is not the same as the final element —
+// and `gofmt` deletes that semicolon, so the shape only survives in source
+// nobody has formatted. This command reads other people's repositories.
+func anyFallthrough(body []ast.Stmt) bool {
+	for _, s := range body {
+		if b, ok := s.(*ast.BranchStmt); ok && b.Tok == token.FALLTHROUGH {
+			return true
+		}
 	}
-	b, ok := body[len(body)-1].(*ast.BranchStmt)
-	return ok && b.Tok == token.FALLTHROUGH
+	return false
 }
 
 // endsTerminating reports whether a body cannot fall off its end, following the
@@ -621,6 +691,46 @@ func hasBreak(n ast.Node) bool {
 // and Walk returns before its type switch, so nothing panics and nothing
 // changed when the outer guard was deleted. Two guards where neither is
 // load-bearing is worse than one that is, so the outer one is gone.
+// asksWhen reports whether a condition that evaluated to `want` certainly
+// called one of the predicates on its way to that answer.
+//
+// ⭐ The two polarities are the whole content of a short-circuit, and writing
+// them out is what makes the credit exact rather than merely safe:
+//
+//	A && B  true   both operands were evaluated, and both were true
+//	A && B  false  only A is certain: a false A never reaches B
+//	A || B  true   only A is certain: a true A never reaches B
+//	A || B  false  both operands were evaluated, and both were false
+//
+// A `!` swaps the question. Anything else is evaluated whole, which is what
+// asksIn already answers.
+func asksWhen(asks map[string]bool, n ast.Node, want bool) bool {
+	switch e := n.(type) {
+	case nil:
+		return false
+	case *ast.ParenExpr:
+		return asksWhen(asks, e.X, want)
+	case *ast.UnaryExpr:
+		if e.Op == token.NOT {
+			return asksWhen(asks, e.X, !want)
+		}
+	case *ast.BinaryExpr:
+		switch e.Op {
+		case token.LAND:
+			if want {
+				return asksWhen(asks, e.X, true) || asksWhen(asks, e.Y, true)
+			}
+			return asksIn(asks, e.X)
+		case token.LOR:
+			if want {
+				return asksIn(asks, e.X)
+			}
+			return asksWhen(asks, e.X, false) || asksWhen(asks, e.Y, false)
+		}
+	}
+	return asksIn(asks, n)
+}
+
 func asksIn(asks map[string]bool, n ast.Node) bool {
 	found := false
 	var walk func(ast.Node)
