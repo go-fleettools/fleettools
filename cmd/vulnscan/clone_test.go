@@ -37,7 +37,7 @@ func TestACloneRefusedForPaceIsRetried(t *testing.T) {
 		}
 		return nil, nil, nil
 	}
-	refused, err := clone(context.Background(), run, "go-images/gif", t.TempDir())
+	refused, err := clone(context.Background(), run, "go-images/gif", t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("clone failed although the third attempt succeeded: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestACloneRefusedForPaceStillGivesUp(t *testing.T) {
 		calls++
 		return nil, []byte(paced), errors.New("exit status 128")
 	}
-	refused, err := clone(context.Background(), run, "go-images/gif", t.TempDir())
+	refused, err := clone(context.Background(), run, "go-images/gif", t.TempDir(), "")
 	if err == nil {
 		t.Fatal("a clone refused every time came back as success")
 	}
@@ -83,7 +83,7 @@ func TestARepositoryThatIsGoneIsNotRetried(t *testing.T) {
 		calls++
 		return nil, []byte(gone), errors.New("exit status 128")
 	}
-	refused, err := clone(context.Background(), run, "acme/gone", t.TempDir())
+	refused, err := clone(context.Background(), run, "acme/gone", t.TempDir(), "")
 	if err == nil {
 		t.Fatal("a missing repository came back as success")
 	}

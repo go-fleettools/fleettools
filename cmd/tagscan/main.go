@@ -45,6 +45,20 @@ first draft asking /releases/latest reported a module as behind fifteen minutes
 after its tag had been pushed and proved to resolve. ` + "`git ls-remote`" + `
 costs no API budget, and a tag that IS the head settles without a call.
 
+--vulns reads a ` + "`vulnscan --json`" + ` report and says, beside a module that
+is ahead, whether its PUBLISHED tag calls a known advisory — the one fact that
+turns this list from a hygiene report into an order of work. A count of commits
+cannot tell six commits of prose from eight that include a security fix, and on
+2026-11-15 one organisation printed three lines of identical shape whose
+meanings were a README, a dependency graph, and five advisories CALLED by the
+only version anyone could resolve.
+
+⛔ It refuses to attribute. An entry taken WITHOUT ` + "`--at-tag`" + ` carries no
+ref and describes the default branch, so it is named as saying nothing about the
+tag rather than quietly borrowed; an entry whose ref is not the tag this pass
+found is reported as the stale reading it is; and a repository absent from the
+report is said to be absent, because a missing line is not a clean one.
+
 ⛔ An incomplete pass says so and exits 1: an organisation whose repositories
 could not be listed, or a repository whose tags could not be read, is named,
 because a count missing whole organisations is not a count of the fleet.
@@ -58,14 +72,16 @@ func main() {
 
 // RootCmd builds the command. Tests drive it through run, below.
 func RootCmd() *cobra.Command {
-	var only string
+	var only, vulns string
 	c := cli.New("tagscan [flags]",
 		"Modules whose branch is ahead of their latest tag", longHelp)
 	c.RunE = func(cmd *cobra.Command, _ []string) error {
-		return cli.FromStatus(scan(cli.Out(cmd), cli.Err(cmd), only))
+		return cli.FromStatus(scan(cli.Out(cmd), cli.Err(cmd), only, vulns))
 	}
 	c.Flags().StringVar(&only, "orgs", "",
 		"comma-separated organisations instead of the whole fleet")
+	c.Flags().StringVar(&vulns, "vulns", "",
+		"a vulnscan --json report: say whether a module's PUBLISHED tag calls an advisory")
 	return c
 }
 
@@ -110,8 +126,80 @@ type ahead struct {
 // that failed.
 const noCommonAncestor = "No common ancestor"
 
+// tagVulns is what this command can honestly use out of a vulnscan report. The
+// REF matters as much as the status: a CLEAN taken on the default branch says
+// nothing about the tag, and borrowing it would be the exact mistake vulnscan's
+// --at-tag exists to remove.
+type tagVulns struct {
+	Status string `json:"status"`
+	Ref    string `json:"ref"`
+	Called []struct {
+		ID string `json:"id"`
+	} `json:"called"`
+}
+
+// readVulns loads a `vulnscan --json` report, keyed by repository.
+//
+// ⛔ A report that could not be read is not a report that found nothing: the
+// error comes back and the caller says so beside every line, rather than
+// printing lines that look unannotated because nothing was annotated.
+func readVulns(path string) (map[string]tagVulns, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rep struct {
+		Repos []struct {
+			Repo string `json:"repo"`
+			tagVulns
+		} `json:"repos"`
+	}
+	if err := json.Unmarshal(b, &rep); err != nil {
+		return nil, err
+	}
+	// ⛔ A REPORT THAT LISTS NOTHING IS NOT A FLEET WITH NOTHING IN IT. Any
+	// valid JSON unmarshals into this shape -- `{}`, another tool's output, a
+	// half-written file -- and then every line below would read "absent from the
+	// report", which is true of each module and says nothing about the mistake,
+	// which is that the wrong file was named.
+	if len(rep.Repos) == 0 {
+		return nil, fmt.Errorf("no repositories in it: is %s a vulnscan --json report?", path)
+	}
+	out := make(map[string]tagVulns, len(rep.Repos))
+	for _, r := range rep.Repos {
+		out[r.Repo] = r.tagVulns
+	}
+	return out, nil
+}
+
+// vulnNote is the line printed under a module that is ahead, given what the
+// report holds about it. It returns "" when there is nothing honest to add.
+//
+// ⛔ EVERY CASE SAYS WHAT IT KNOWS. The dangerous one is silence: a module with
+// no note reads as a module with no advisory, so an absent entry, a report taken
+// on the default branch and a reading about some other tag each get a line of
+// their own.
+func vulnNote(have bool, v tagVulns, tag string) string {
+	switch {
+	case !have:
+		return "      ⚠ absent from the vulnscan report: not scanned, which is not the same as clean"
+	case v.Ref == "":
+		return "      ⚠ that report scanned the DEFAULT BRANCH, so it says nothing about " + tag +
+			" -- rerun vulnscan --at-tag"
+	case v.Ref != tag:
+		return "      ⚠ that report is about " + v.Ref + ", not the " + tag + " this pass found: a stale reading"
+	case v.Status == "CALLED":
+		return fmt.Sprintf("      ⛔ %s CALLS %d advisorie(s): the version consumers resolve is the exposed one",
+			tag, len(v.Called))
+	case v.Status == "CLEAN":
+		return "      ok " + tag + " is clean, so being ahead here is hygiene and not exposure"
+	default:
+		return "      ⚠ " + tag + " came back " + v.Status + ": not a measurement of exposure"
+	}
+}
+
 // scan is the whole program, so a test can drive it and read what it says.
-func scan(stdout, stderr io.Writer, only string) int {
+func scan(stdout, stderr io.Writer, only, vulns string) int {
 	orgs, err := organisations(only)
 	if err != nil {
 		fmt.Fprintln(stderr, "orgs:", err)
@@ -218,17 +306,48 @@ func scan(stdout, stderr io.Writer, only string) int {
 	})
 	fmt.Fprintf(stdout, "tagged: %d   checked: %d of %d   AHEAD of their latest tag: %d\n",
 		tagged, checked, tagged, len(aheads))
+	// The report is read AFTER the sweep, so a missing or broken one costs the
+	// pass nothing it had already measured.
+	var atTag map[string]tagVulns
+	if vulns != "" {
+		m, err := readVulns(vulns)
+		if err != nil {
+			fmt.Fprintf(stdout, "⛔ --vulns %s could not be read: %v\n"+
+				"   Every line below is therefore unannotated, which is NOT a statement that nothing is exposed.\n",
+				vulns, err)
+		} else {
+			atTag = m
+		}
+	}
 	for _, a := range aheads {
 		fmt.Fprintf(stdout, "  %-46s latest tag %-10s +%d commit(s) its consumers cannot reach\n",
 			a.repo, a.tag, a.commits)
+		if atTag != nil {
+			v, have := atTag[a.repo]
+			if note := vulnNote(have, v, a.tag); note != "" {
+				fmt.Fprintln(stdout, note)
+			}
+		}
 	}
 	if len(orphans) > 0 {
 		sort.Slice(orphans, func(i, j int) bool { return orphans[i].repo < orphans[j].repo })
 		fmt.Fprintf(stdout, "\nFROZEN: %d module(s) whose only tag sits on a history the branch no longer\n"+
 			"shares. The tag still resolves, so nothing looks wrong -- but it names a tree\n"+
 			"from before the rewrite, and no `go get -u` will ever move off it.\n", len(orphans))
+		// ⛔ AND A FROZEN MODULE IS ANNOTATED TOO, which the first draft of
+		// --vulns forgot. It is the WORSE case: an advisory at a tag a consumer
+		// is merely behind can be fixed by publishing the next one, while a
+		// frozen tag is one nothing will move off -- `go get -u` has nowhere to
+		// go. Leaving these lines bare would have put the annotation on every
+		// case except the one that needs it most.
 		for _, a := range orphans {
 			fmt.Fprintf(stdout, "  %-46s latest tag %s\n", a.repo, a.tag)
+			if atTag != nil {
+				v, have := atTag[a.repo]
+				if note := vulnNote(have, v, a.tag); note != "" {
+					fmt.Fprintln(stdout, note)
+				}
+			}
 		}
 	}
 

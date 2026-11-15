@@ -18,6 +18,11 @@ const (
 	Clean  = "CLEAN"  // the scan RAN and found nothing reachable
 	NoGo   = "NO-GO"  // no go.mod anywhere: not a Go repository
 	Unread = "UNREAD" // the scan could not read the code: NOT clean
+	// NoTag is --at-tag only: the repository publishes no version this scan can
+	// read, so there is no consumer's tree to ask about. It is NOT clean and
+	// NOT unread -- nothing failed, and nothing was measured -- and it is
+	// counted in the summary so that the scanned total still adds up.
+	NoTag = "NO-TAG"
 )
 
 // Finding is one advisory reachable from one module, in the shape the report

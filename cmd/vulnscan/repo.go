@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/semver"
 )
 
 // runner is the one seam through which this program starts a process: git to
@@ -63,8 +64,78 @@ func refusedForPace(stderr []byte) bool {
 		strings.Contains(s, "rate limit")
 }
 
-// clone makes a depth-1 copy of repo's default branch at dir, and reports how
-// many times it was refused for pace before it got through.
+// latestTag is the version a consumer resolves: the highest semantic version
+// among the repository's ROOT-module tags, read from the remote without cloning
+// it.
+//
+// ⛔ WHY THIS EXISTS. govulncheck over a clone of the DEFAULT BRANCH answers
+// about the tree nobody imports. Measured 2026-11-15 on go-xrkit/player: at
+// v0.1.0 -- the only version published at the time -- the code CALLED five
+// vulnerabilities (four x/net HTTP/2 advisories and one in brotli), while main
+// was clean, because the dependencies carrying them had left the graph. A sweep
+// of that organisation would have printed the repository CLEAN, truthfully,
+// about a tree no consumer had ever fetched.
+//
+// ls-remote and not the API: this is git over https, which is metered apart from
+// the REST budget the fleet's Renovate runners share.
+func latestTag(ctx context.Context, run runner, repo string) (string, error) {
+	stdout, stderr, err := run(ctx, "", []string{"GIT_TERMINAL_PROMPT=0"},
+		"git", "ls-remote", "--tags", "--refs", cloneURL(repo))
+	if err != nil {
+		return "", fmt.Errorf("git ls-remote %s: %v: %s", repo, err, tail(stderr))
+	}
+	return highestTag(string(stdout)), nil
+}
+
+// highestTag picks the tag out of `git ls-remote --tags --refs` output, whose
+// lines are "<sha>\trefs/tags/<tag>". It returns "" when the repository
+// publishes no version this scan can read, which is a state of its own and not
+// an error.
+//
+// ⛔ A NESTED MODULE'S TAG IS NOT THIS MODULE'S VERSION. `sub/dir/v1.2.3`
+// versions the module in that directory; taking it as the repository's would
+// scan a tree whose root module is at some other version entirely. Only a bare
+// vX.Y.Z counts, and semver.IsValid is what says so: it requires the leading
+// "v", so every nested form fails it.
+//
+// ⚠ That last sentence is the measurement and not a guess. This function first
+// carried an explicit `strings.Contains(tag, "/")` beside IsValid; mutating it
+// away left the tests GREEN, which is how dead code announces itself. The case
+// is covered below by what rejects it rather than by a second guard nobody
+// exercises.
+//
+// ⛔ AND A PRERELEASE IS NOT WHAT `@latest` RESOLVES. Go's module proxy serves
+// the highest RELEASE version and falls back to a prerelease only when there is
+// no release at all, so that is the order here: any release beats every
+// prerelease, and within a kind the higher version wins. A sweep that scanned
+// v2.0.0-rc1 while consumers were served v1.9.0 would be measuring a tree
+// nobody has, which is the defect this whole flag exists to remove.
+func highestTag(lsRemote string) string {
+	var best string
+	bestIsRelease := false
+	for _, line := range strings.Split(lsRemote, "\n") {
+		_, after, ok := strings.Cut(line, "refs/tags/")
+		if !ok {
+			continue
+		}
+		tag := strings.TrimSpace(after)
+		if !semver.IsValid(tag) {
+			continue
+		}
+		release := semver.Prerelease(tag) == ""
+		switch {
+		case best == "",
+			release && !bestIsRelease,
+			release == bestIsRelease && semver.Compare(tag, best) > 0:
+			best, bestIsRelease = tag, release
+		}
+	}
+	return best
+}
+
+// clone makes a depth-1 copy of repo at dir and reports how many times it was
+// refused for pace before it got through. ref is a branch or tag to clone
+// instead of the default branch; empty means the default branch.
 //
 // GIT_TERMINAL_PROMPT=0 because a repository that was deleted or made private
 // otherwise asks for a username on a terminal nobody is watching, and the
@@ -75,10 +146,14 @@ func refusedForPace(stderr []byte) bool {
 // and UNREAD makes the lane red -- so a sweep could go red over nothing but its
 // own pace. The retry count is returned rather than swallowed, so a slow pass
 // is legible instead of mysterious.
-func clone(ctx context.Context, run runner, repo, dir string) (refused int, err error) {
+func clone(ctx context.Context, run runner, repo, dir, ref string) (refused int, err error) {
+	args := []string{"clone", "--quiet", "--depth", "1"}
+	if ref != "" {
+		args = append(args, "--branch", ref)
+	}
+	args = append(args, cloneURL(repo), dir)
 	for attempt := 1; ; attempt++ {
-		_, stderr, runErr := run(ctx, "", []string{"GIT_TERMINAL_PROMPT=0"},
-			"git", "clone", "--quiet", "--depth", "1", cloneURL(repo), dir)
+		_, stderr, runErr := run(ctx, "", []string{"GIT_TERMINAL_PROMPT=0"}, "git", args...)
 		if runErr == nil {
 			return refused, nil
 		}
@@ -290,7 +365,7 @@ func siblings(ctx context.Context, run runner, root, repo, repoDir string, mods 
 				// module fail to load, so it is the same defect one level
 				// down. The count goes into problems, where a reader
 				// already looks for why a sibling was odd.
-				refused, cerr := clone(ctx, run, name, filepath.Join(root, parts[0], parts[1]))
+				refused, cerr := clone(ctx, run, name, filepath.Join(root, parts[0], parts[1]), "")
 				if refused > 0 {
 					problems = append(problems, fmt.Sprintf("sibling %s: clone refused %d time(s) for pace and retried", name, refused))
 				}

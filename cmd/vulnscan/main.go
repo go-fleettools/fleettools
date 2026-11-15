@@ -73,6 +73,7 @@ type config struct {
 	work        string
 	keep        bool
 	timeout     time.Duration
+	atTag       bool // scan the published tag instead of the default branch
 }
 
 // moduleResult is one module scanned under one GOOS.
@@ -84,8 +85,12 @@ type moduleResult struct {
 
 // result is one repository's answer, and one line of the -state file.
 type result struct {
-	Repo      string         `json:"repo"`
-	Status    string         `json:"status"`
+	Repo   string `json:"repo"`
+	Status string `json:"status"`
+	// Ref is the tag that was scanned under --at-tag, so that a CLEAN is
+	// legible: clean ABOUT WHAT is the whole question this flag answers. Empty
+	// means the default branch, which is what every scan before this did.
+	Ref       string         `json:"ref,omitempty"`
 	Called    []Finding      `json:"called,omitempty"`
 	Imported  int            `json:"imported_only"`
 	Required  int            `json:"required_only"`
@@ -118,6 +123,19 @@ vulnerability, under each GOOS named.
 are decided by that one version, so a sweep that silently resolved another
 answered a different question.
 
+--at-tag scans each repository's highest published vX.Y.Z tag instead of its
+default branch, because the default branch is the tree NOBODY IMPORTS. Measured
+on go-xrkit/player, 2026-11-15: at v0.1.0, the only version published then, the
+code CALLED five vulnerabilities -- four x/net HTTP/2 advisories and one in
+brotli -- while main was clean, the modules carrying them having left the graph.
+Without the flag this tool would have printed that repository CLEAN, truthfully,
+about a tree no consumer had ever fetched. The default is unchanged: main
+answers "is our work exposed", the tag answers "are our consumers exposed", and
+only the second is somebody else's problem. A repository with no such tag is
+NO-TAG -- nothing is published, so nothing was measured, and it is counted in
+the totals rather than folded into CLEAN. Scanning both refs doubles a sweep
+that already costs a clone and a govulncheck per repository.
+
 --state appends each finished repository and skips the ones it already holds, so
 a sweep interrupted after four hours resumes rather than starting again;
 --rescan ignores it and --retry-unread asks again only about the repositories
@@ -145,6 +163,7 @@ type scanOptions struct {
 	keep                     bool
 	timeout                  time.Duration
 	self                     bool
+	atTag                    bool
 }
 
 // RootCmd builds the command with the real runner behind it.
@@ -176,6 +195,8 @@ func command(exe runner) *cobra.Command {
 	f.StringVar(&o.gvc, "govulncheck", filepath.Join(home, "go", "bin", "govulncheck"), "govulncheck binary")
 	f.StringVar(&o.work, "work", "", "scratch directory for clones (default: a new one under $TMPDIR)")
 	f.BoolVar(&o.keep, "keep", false, "keep each clone after scanning it")
+	f.BoolVar(&o.atTag, "at-tag", false,
+		"scan each repository's highest published vX.Y.Z tag instead of its default branch: what a consumer resolves")
 	f.DurationVar(&o.timeout, "timeout", 20*time.Minute, "per clone and per govulncheck run")
 	f.BoolVar(&o.self, "selftest", false,
 		"judge the recorded fixtures and exit: a known positive, a known clean, a known load failure")
@@ -242,7 +263,7 @@ func scanFleet(stdin io.Reader, stdout, stderr io.Writer, o *scanOptions, exe ru
 		fmt.Fprintf(stderr, "govulncheck: %v\n    go install golang.org/x/vuln/cmd/govulncheck@latest, or name one with -govulncheck\n", err)
 		return 2
 	}
-	cfg := config{goTool: *goTool, goarch: *goarch, govulncheck: *gvc, keep: *keep, timeout: *timeout}
+	cfg := config{goTool: *goTool, goarch: *goarch, govulncheck: *gvc, keep: *keep, timeout: *timeout, atTag: o.atTag}
 	for _, g := range strings.Split(*goosList, ",") {
 		if g = strings.TrimSpace(g); g != "" {
 			cfg.goos = append(cfg.goos, g)
@@ -431,8 +452,31 @@ func scanRepo(ctx context.Context, exe runner, cfg config, repo, jobDir string) 
 		res.Status, res.Err = Unread, err.Error()
 		return res
 	}
+	// ⛔ WHICH TREE IS BEING ASKED ABOUT. Without --at-tag this scans the
+	// default branch, which is what every pass before this did -- and which is
+	// the tree nobody imports. With it, the question becomes the one a consumer
+	// lives with: the published tag.
+	ref := ""
+	if cfg.atTag {
+		tctx, tcancel := context.WithTimeout(ctx, cfg.timeout)
+		tag, terr := latestTag(tctx, exe, repo)
+		tcancel()
+		if terr != nil {
+			res.Status, res.Err = Unread, terr.Error()
+			return res
+		}
+		if tag == "" {
+			// Nothing is published, so there is nothing a consumer could be
+			// exposed to. Not clean, not unread: measured as absent.
+			res.Status = NoTag
+			res.Notes = append(res.Notes, "no vX.Y.Z tag on the repository: nothing published for a consumer to resolve")
+			return res
+		}
+		ref = tag
+		res.Ref = tag
+	}
 	cctx, cancel := context.WithTimeout(ctx, cfg.timeout)
-	refused, err := clone(cctx, exe, repo, repoDir)
+	refused, err := clone(cctx, exe, repo, repoDir, ref)
 	cancel()
 	// ⛔ SAY THAT THE CLONE WAS REFUSED AND RETRIED, whichever way it ended. A
 	// pass that took minutes longer than usual, or one that read a repository
@@ -601,6 +645,17 @@ func line(r result) string {
 			return fmt.Sprintf("%-6s %-50s no Go code (%s)", r.Status, r.Repo, strings.Join(r.Notes, "; "))
 		}
 		return fmt.Sprintf("%-6s %-50s no go.mod", r.Status, r.Repo)
+	// ⛔ NOT "could not scan". Nothing failed here: the repository publishes
+	// nothing, so there was no consumer's tree to ask about. Falling through to
+	// the error case below printed `could not scan: ` with an EMPTY reason --
+	// found by running the flag for real against two untagged repositories,
+	// which the tests did not catch because they asserted the summary and the
+	// note and never this line.
+	case NoTag:
+		if len(r.Notes) > 0 {
+			return fmt.Sprintf("%-6s %-50s %s", r.Status, r.Repo, strings.Join(r.Notes, "; "))
+		}
+		return fmt.Sprintf("%-6s %-50s nothing published to scan", r.Status, r.Repo)
 	}
 	return fmt.Sprintf("%-6s %-50s could not scan: %s", r.Status, r.Repo, firstLine(r.Err))
 }
@@ -620,7 +675,7 @@ func buildReport(cfg config, listed []string, done map[string]result) report {
 	rep := report{
 		Generated: time.Now().UTC().Format(time.RFC3339), Go: cfg.goTool, GOOS: cfg.goos, GOARCH: cfg.goarch,
 		Govulncheck: cfg.govulncheck, Listed: len(listed),
-		Totals: map[string]int{Called: 0, Clean: 0, NoGo: 0, Unread: 0},
+		Totals: map[string]int{Called: 0, Clean: 0, NoGo: 0, Unread: 0, NoTag: 0},
 	}
 	for _, r := range listed {
 		res, ok := done[r]
@@ -651,9 +706,15 @@ func writeJSON(path string, v any) error {
 // summary prints the totals and returns the exit status.
 func summary(w io.Writer, rep report) int {
 	t := rep.Totals
-	scanned := t[Called] + t[Clean] + t[NoGo] + t[Unread]
+	// ⛔ EVERY STATE IS IN THE TOTAL. A repository counted in none of these
+	// would make "N listed, M scanned" disagree with itself, which is how a
+	// sweep hides the ones it did not answer about.
+	scanned := t[Called] + t[Clean] + t[NoGo] + t[Unread] + t[NoTag]
 	fmt.Fprintf(w, "\n%d listed, %d scanned: CALLED %d, CLEAN %d, NO-GO %d, UNREAD %d",
 		rep.Listed, scanned, t[Called], t[Clean], t[NoGo], t[Unread])
+	if t[NoTag] > 0 {
+		fmt.Fprintf(w, ", NO-TAG %d", t[NoTag])
+	}
 	if rep.Pending > 0 {
 		fmt.Fprintf(w, ", NOT YET SCANNED %d", rep.Pending)
 	}
