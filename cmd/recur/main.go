@@ -65,6 +65,7 @@ import (
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/go-gitsafe/gitsafe/shellcmd"
 	"github.com/spf13/cobra"
 )
 
@@ -166,40 +167,195 @@ func RootCmd() *cobra.Command {
 // or a test run would make the gate something to disable rather than satisfy.
 var publishing = map[string]bool{"gitpush": true, "ghmerge": true, "ghrelease": true}
 
-// segment splits a command line where one command ends and another begins.
-var segment = regexp.MustCompile(`(?:^|[;\n]|&&|\|\||\||&)\s*`)
-
-// envAssign is what may stand between a segment's start and its program.
+// envAssign is what may stand between a statement's start and its program.
 var envAssign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// wrappers run a program named among their OWN arguments, so the search has to
+// go past them rather than stop at the first word.
+var wrappers = map[string]bool{
+	"env": true, "nohup": true, "time": true, "command": true, "exec": true,
+	"sudo": true, "builtin": true, "xargs": true, "stdbuf": true,
+	"setsid": true, "nice": true, "ionice": true, "timeout": true,
+}
+
+// keyword opens a compound command; the program follows it.
+var keyword = map[string]bool{
+	"if": true, "then": true, "else": true, "elif": true, "while": true,
+	"until": true, "for": true, "do": true, "{": true, "!": true,
+}
+
+// redirectBare is a redirection operator whose target is the NEXT word, so that
+// word is not the program either.
+var redirectBare = regexp.MustCompile(`^[0-9]*(?:<|>|>>|<<<|<&|>&)$`)
+
+// redirectJoined is a redirection with its target attached: >/dev/null, 2>&1.
+var redirectJoined = regexp.MustCompile(`^[0-9]*(?:<|>|>>|<&|>&)\S`)
 
 // publishes answers whether this command line RUNS one of the publishing
 // programs.
 //
-// ⛔⛔ IT READS COMMAND POSITIONS, NOT WORDS. The first version matched
-// /\b(gitpush|ghmerge|ghrelease)\b/ anywhere in the line — and the first
-// command it refused was `recur --accept … --gate-pending "<prose naming
-// ghmerge>"`: the gate denied the one command that clears it, over a word
-// inside a quoted reason. Any `git commit -m "... ghrelease ..."` would have
-// gone the same way. A guard that fires on prose about itself is a guard
-// somebody removes.
-func publishes(cmd string) bool {
-	for _, part := range segment.Split(cmd, -1) {
-		fields := strings.Fields(part)
-		for len(fields) > 0 && envAssign.MatchString(fields[0]) {
-			fields = fields[1:]
+// ⛔⛔ IT READS COMMAND POSITIONS, NOT WORDS, and it gets "where does a command
+// begin" from [shellcmd] rather than from a regex of its own. Two versions of
+// this failed before, in OPPOSITE directions, and both are measured:
+//
+// The first matched /\b(gitpush|ghmerge|ghrelease)\b/ anywhere in the line, so
+// the first command it refused was `recur --accept … --gate-pending "<prose
+// naming ghmerge>"` — the gate denying the one command that clears it.
+//
+// The second split on separators with a regex that had NO NOTION OF QUOTING,
+// which fixed the word-anywhere match and left the SAME defect one level along:
+// `--gate-pending "mergeable; ghmerge must land it"` was still denied, because
+// the `;` inside the quoted reason read as the end of a command. That is the
+// FOURTH occurrence of "the gate refuses its own remedy" on this machine, and
+// it is why the split is no longer written here: shellcmd.Statements and
+// shellcmd.Stages already know both quote characters, heredocs, and that `||`
+// is not a pipeline, and gitsafe's guards share that one answer on purpose.
+//
+// ⚠ WHAT IS STILL NOT SHARED, said rather than left to be discovered: the word
+// splitting and the wrapper list below are recur's own, and a review witnessed
+// 16 forms that a shell RUNS and that the second version answered false for.
+// They are handled here now, but the right home is an exported
+// shellcmd.Programs, which has been requested from gitsafe with those 16 forms;
+// the recur ledger records this gate as written-and-not-landed until it exists.
+func publishes(cmd string) bool { return runs(cmd, 0) }
+
+// maxDepth bounds the descent into `sh -c` strings and substitutions.
+//
+// ⛔ RUNNING OUT OF BUDGET COUNTS AS PUBLISHING, never as a clean line. This
+// answer gates publishing, so a line too deeply nested to read is a line nobody
+// vetted, and "I could not tell" must not read as "no".
+const maxDepth = 4
+
+func runs(cmd string, depth int) bool {
+	if depth > maxDepth {
+		return true
+	}
+	for _, st := range shellcmd.Statements(shellcmd.StripQuotedHeredocs(cmd)) {
+		for _, stage := range shellcmd.Stages(st) {
+			if stageRuns(stage, depth) {
+				return true
+			}
 		}
-		if len(fields) == 0 {
-			continue
-		}
-		prog := fields[0]
-		if i := strings.LastIndexByte(prog, '/'); i >= 0 {
-			prog = prog[i+1:] // ~/.local/bin/gitpush is gitpush
-		}
-		if publishing[prog] {
-			return true
+		// ⛔ $( … ) and backticks RUN even inside double quotes, which
+		// shellcmd.InsideQuotes says in so many words. `echo "$(ghmerge …)"`
+		// is a merge.
+		for _, m := range substitution.FindAllStringSubmatch(st, -1) {
+			if runs(m[1]+m[2], depth+1) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// substitution finds the body of a $( … ) or a ` … `.
+var substitution = regexp.MustCompile("\\$\\(([^()]*)\\)|`([^`]*)`")
+
+// stageRuns reads one pipeline stage and answers whether its program is one of
+// the publishing ones.
+func stageRuns(stage string, depth int) bool {
+	words := split(stage)
+	// wrapped says a wrapper has already been passed, so the program is still
+	// ahead and the wrapper's OWN options and operands stand in between.
+	//
+	// ⛔ `timeout 30 gitpush` was the case that found this: `timeout` was passed
+	// as a wrapper and `30` was then read as the program, so the line answered
+	// false. `nice -n 5`, `xargs -n1` and `env -i` all have the same shape. An
+	// ordinary program still STOPS the scan, which is what keeps
+	// `timeout 30 echo "gitpush"` from being read as a push.
+	wrapped := false
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		switch {
+		case w == "" || envAssign.MatchString(w) || keyword[w] || redirectJoined.MatchString(w):
+			continue
+		case wrapped && operandish(w):
+			continue
+		case redirectBare.MatchString(w):
+			i++ // its target is the next word, and is not a program either
+			continue
+		}
+		prog := w
+		if j := strings.LastIndexByte(prog, '/'); j >= 0 {
+			prog = prog[j+1:] // ~/.local/bin/gitpush, and ./gitpush, are gitpush
+		}
+		switch {
+		case publishing[prog]:
+			return true
+		case shells[prog]:
+			// sh -c '<a command line>' runs whatever that string runs.
+			for j := i + 1; j < len(words)-1; j++ {
+				if words[j] == "-c" {
+					return runs(words[j+1], depth+1)
+				}
+			}
+			return false
+		case wrappers[prog]:
+			wrapped = true
+			continue // the program it runs is further along this stage
+		}
+		return false // an ordinary program: the rest of the stage is arguments
+	}
+	return false
+}
+
+// operandish is the shape of a wrapper's own option or operand: an option, or
+// something beginning with a digit (`30`, `30s`, `1m` for timeout, `5` for
+// nice). It is only ever consulted AFTER a wrapper, never in first position.
+func operandish(w string) bool {
+	return strings.HasPrefix(w, "-") || (w != "" && w[0] >= '0' && w[0] <= '9')
+}
+
+// shells run a program named in a -c operand.
+var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true}
+
+// split breaks one pipeline stage into shell words, with the quotes they were
+// written in removed and a quoted operand kept WHOLE.
+//
+// ⛔ strings.Fields CANNOT DO THIS, and that is what the previous version used:
+// `sh -c 'gitpush -u origin topic'` came back as six words, so the operand of
+// -c was `'gitpush` and nothing could read the command line inside it. Quoting
+// does not protect a program name — the shell runs `"gitpush"` — so what keeps
+// prose safe is POSITION, which is the whole design above.
+func split(stage string) []string {
+	var out []string
+	cur := &strings.Builder{}
+	q := byte(0)
+	open := false
+	flush := func() {
+		if open {
+			out = append(out, cur.String())
+			cur.Reset()
+			open = false
+		}
+	}
+	for i := 0; i < len(stage); i++ {
+		c := stage[i]
+		switch {
+		case q != 0:
+			if c == q {
+				q = 0
+			} else {
+				cur.WriteByte(c)
+			}
+			open = true
+		case c == '\'' || c == '"':
+			q, open = c, true
+		case c == '\\' && i+1 < len(stage):
+			i++
+			cur.WriteByte(stage[i])
+			open = true
+		case c == ' ' || c == '\t' || c == '(' || c == ')' || c == '}' || c == ';':
+			// Grouping is not a word, and `(gitpush …)` is a subshell running
+			// gitpush. `{` IS a word, and is in keyword above.
+			flush()
+		default:
+			cur.WriteByte(c)
+			open = true
+		}
+	}
+	flush()
+	return out
 }
 
 // hookMode answers a PreToolUse payload.
@@ -301,6 +457,20 @@ func triage(known map[string]entry, found []recorded) (open []finding, backlog, 
 			open = append(open, finding{r.lesson, "recorded a recurrence and has no gate"})
 			continue
 		}
+		// ⛔⛔ A STATE WORD NOBODY CHOSE SETTLED A LESSON FOREVER. Measured
+		// 2026-11-15 on a hand-edited ledger: a line reading
+		// `gatee@<the right fingerprint>` made the report say "1 recurrence(s)
+		// read, 1 accounted for", exit 0, and the hook ALLOW — with no warning
+		// of any kind, because nothing compared the word against the four that
+		// mean something. Any typo, and any state word a later version adds and
+		// an older binary does not know, reads as a decision. It is a finding
+		// now: a word nobody chose is the one thing this must not take on
+		// trust.
+		if !states[e.state] {
+			open = append(open, finding{r.lesson, fmt.Sprintf(
+				"is recorded with %q, which is not one of gate, pending, no-gate or backlog", e.state)})
+			continue
+		}
 		switch {
 		case e.mark == "":
 			// Written before fingerprints existed: counted and named, never
@@ -318,6 +488,11 @@ func triage(known map[string]entry, found []recorded) (open []finding, backlog, 
 	sort.Slice(open, func(i, j int) bool { return open[i].lesson < open[j].lesson })
 	return open, backlog, unmarked
 }
+
+// states are the four decisions a ledger line may record. Anything else is a
+// typo or a word written by a newer version, and either way it is not a
+// decision this binary can act on.
+var states = map[string]bool{"gate": true, "pending": true, "no-gate": true, "backlog": true}
 
 // entry is one ledger line: a lesson, and what was decided about it.
 type entry struct {
