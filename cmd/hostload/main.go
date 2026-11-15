@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"runtime"
 	"time"
@@ -57,9 +58,22 @@ read quiet on a host giving a third of its CPU time to other users' niced jobs.
 Prefer --max-busy wherever /proc/stat exists; reach for --max-load when it does
 not, knowing what it cannot see.
 
+A negative limit is OFF, for both gates. --max-load 0 is therefore ON and means
+"only a load of exactly zero passes", which on a live host is a permanent
+refusal; abbench rejects that value instead, and the difference is stated here
+rather than discovered. With --pick, the reading goes to stderr: --pick's output
+is piped into taskset and carries nothing else.
+
 Exit status: 0 what was asked was answered, 1 the host is busier than
---max-busy or more loaded than --max-load, 2 nothing was measured -- /proc/stat
-could not be read and no answerable question was asked.`
+--max-busy or more loaded than --max-load, 2 REFUSED TO DECIDE.
+
+A 2 means one of three things, and this sentence used to name only the first,
+which a review measured as false for the other two: /proc/stat could not be
+read and nothing answerable was asked; or a busy-share question (--pick,
+--max-busy) was asked where there is no /proc/stat, which is refused even when
+a --max-load alongside it did pass; or a limit was NaN, in which case nothing
+was read at all. In every case 2 means the answer is not to be trusted, never
+that the host is fine.`
 
 // procPath is read through readSnapshot, below, and never opened directly.
 const procPath = "/proc/stat"
@@ -118,12 +132,22 @@ func run(args []string, out, errOut io.Writer) int {
 // readLoad is the whole measurement, taking its writers so that what it prints
 // can be read by something other than a terminal.
 func readLoad(stdout, stderr io.Writer, interval time.Duration, k int, maxBusy, maxLoad float64) int {
+	// ⛔⛔ NaN IS NOT A LIMIT, AND IT HAS TO BE REFUSED BEFORE ANYTHING IS READ.
+	// Every comparison with NaN is false, so `--max-busy NaN` on a 100%-busy
+	// host exited 0 with nothing on stderr — the gate silently vanished.
+	// Measured by a review. A limit nobody can compare against is a refusal,
+	// never a pass, and checking it after the readings would let the --max-load
+	// gate pass on it first.
+	if math.IsNaN(maxBusy) || math.IsNaN(maxLoad) {
+		fmt.Fprintln(stderr, "hostload: a limit of NaN cannot be compared against; give a number")
+		return 2
+	}
 	// ⛔ --max-load IS ANSWERED FIRST, for two reasons. It is the only question
 	// answerable without /proc/stat, so it must not sit behind a read that
 	// fails there; and a host that already fails it should not be slept on for
 	// the interval before being told so.
 	if maxLoad >= 0 {
-		switch code := gateOnLoad(stdout, stderr, maxLoad); code {
+		switch code := gateOnLoad(stdout, stderr, maxLoad, k > 0); code {
 		case 1, 2:
 			return code
 		}
@@ -170,7 +194,7 @@ func readLoad(stdout, stderr io.Writer, interval time.Duration, k int, maxBusy, 
 // ⛔⛔ AN UNREAD LOAD IS NOT A LOW ONE. Returning 0 here on a read error would
 // make an unanswerable question read as a pass, which is the way this fleet has
 // lost measurements before: the gate that cannot see says "go ahead".
-func gateOnLoad(stdout, stderr io.Writer, maxLoad float64) int {
+func gateOnLoad(stdout, stderr io.Writer, maxLoad float64, picking bool) int {
 	l, err := readAvg1()
 	if err != nil {
 		fmt.Fprintln(stderr, "hostload: --max-load: cannot read the load average:", err)
@@ -178,7 +202,19 @@ func gateOnLoad(stdout, stderr io.Writer, maxLoad float64) int {
 	}
 	// Printed whether it passes or not: a caller that gated on a number wants
 	// the number, and a bare status cannot carry it.
-	fmt.Fprintf(stdout, "load1 %.2f over 1 min\n", l)
+	//
+	// ⛔⛔ BUT NOT ON STDOUT WHEN --pick OWNS IT. Measured by a review:
+	// `hostload --pick 1 --max-load 8` on a host WITH /proc/stat put
+	// "load1 0.42 over 1 min" above the CPU list, so the README's own
+	// `taskset -c "$(hostload --pick 1)"` got a two-line argument. --pick's
+	// output is machine-readable and this command's own documentation pipes
+	// it straight into another program; a diagnostic line on that stream is
+	// not a cosmetic problem.
+	where := stdout
+	if picking {
+		where = stderr
+	}
+	fmt.Fprintf(where, "load1 %.2f over 1 min\n", l)
 	if l > maxLoad {
 		fmt.Fprintf(stderr, "hostload: load1 %.2f > %.2f\n", l, maxLoad)
 		return 1
