@@ -102,9 +102,29 @@ Entries written before fingerprints existed carry none; they are counted and
 named in every run, and --seed records their fingerprints without touching the
 decision already made about them.
 
+⛔⛔ THE LEDGER KEEPS ONE ENTRY PER LESSON, AND --accept REPLACES IT. About
+twenty-five sessions share a memory directory, so the entry you read a minute
+ago may not be the entry that is there now. Every replacement therefore PRINTS
+the entry it is about to overwrite — its decision, its fingerprint, the instant
+it was written and its reason — before writing, not after.
+
+And a landed --gate may not become --gate-pending or --no-gate without
+--downgrade '<why>', which is written into the ledger beside the new decision.
+That one direction is a strict loss of information and needs no judgement about
+which text is better; a gate replaced by another gate may be an improvement or
+a regression, and deciding that is nobody's business here, so it is announced
+and allowed. --gate-pending and --no-gate are NOT ordered against each other:
+"written, not landed" and "none can exist" are different decisions, not
+different strengths.
+
+It exists because it happened twice in one day, 2026-11-15: a careful relay
+from one session replaced another's landed, mutation-confirmed gate with a
+pending thirty seconds after it was written, and nothing told either of them.
+
 Exit status: 0 accounted for, 1 at least one is not, 2 refused to decide — the
-memory directory or the ledger could not be read. A directory that would not
-open is never reported as a clean one.`
+memory directory or the ledger could not be read, or a landed gate would have
+been downgraded without a reason. A directory that would not open is never
+reported as a clean one.`
 
 const ledgerName = ".recur-ledger.md"
 
@@ -155,6 +175,8 @@ func RootCmd() *cobra.Command {
 		"the gate is written but has not landed: name it and say what must land (for the case where landing it needs the very command this gate refuses)")
 	c.Flags().StringVar(&o.noGate, "no-gate", "",
 		"why no gate can exist for this one; the reason is written into the ledger, dated")
+	c.Flags().StringVar(&o.downgrade, "downgrade", "",
+		"why a landed `gate` may be replaced by a weaker decision; the reason is written into the ledger beside it (required to replace a gate with --gate-pending or --no-gate)")
 	c.Flags().BoolVar(&o.seed, "seed", false,
 		"write everything known right now as untriaged backlog, so the gate starts clean")
 	c.Flags().BoolVar(&o.hook, "hook", false,
@@ -560,13 +582,14 @@ func run(args []string, out, errOut io.Writer) int {
 }
 
 type opts struct {
-	memory  string
-	accept  string
-	gate    string
-	pending string
-	noGate  string
-	seed    bool
-	hook    bool
+	memory    string
+	accept    string
+	gate      string
+	pending   string
+	noGate    string
+	downgrade string
+	seed      bool
+	hook      bool
 }
 
 // findings is the reading both the report and the hook are built on: which
@@ -648,6 +671,39 @@ type entry struct {
 	state  string // "gate", "pending", "no-gate" or "backlog"
 	mark   string // fingerprint of the sentences that recorded it; "" before these existed
 	detail string
+	when   string // RFC3339 instant this decision was written; "" for lines older than the stamp
+}
+
+// whenTag is how the write instant rides on a ledger line: appended to the
+// DETAIL, in brackets, at the end.
+//
+// ⛔⛔ NOT INSIDE THE `state@mark` TOKEN, and that is the whole reason it is
+// here. `readLedger` cuts the pre-colon segment at its FIRST "@", so a
+// `gate@mark@time` or a `gate@mark time` would hand an OLDER binary
+// `mark = "mark@time"` — every entry would then read as a fingerprint that had
+// changed, and every lesson would be reported again as having repeated after
+// it was accounted for. At the end of the detail an old reader simply prints it
+// as part of the reason, which is true and readable.
+var whenTag = regexp.MustCompile(`\s*\[written ([^\]]+)\]\s*$`)
+
+// clock is the seam a test drives, so the stamp a test asserts is a value and
+// not whatever second the suite ran in.
+var clock = time.Now
+
+// theRank of a decision, for the ONE comparison this command makes: a landed
+// `gate` may not be replaced by anything weaker without a reason.
+//
+// ⛔ `pending` and `no-gate` are NOT ordered against each other, deliberately.
+// "written, not landed" and "none can exist" are different decisions, not
+// different strengths, and inventing an order between them would make the
+// command refuse replacements it cannot justify refusing. The only strict loss
+// of information is a gate that stops being one — which is detectable without
+// any model of which text is better.
+func theRank(state string) int {
+	if state == "gate" {
+		return 1
+	}
+	return 0
 }
 
 func check(out, errOut io.Writer, o opts) int {
@@ -740,6 +796,50 @@ func accept(out, errOut io.Writer, path string, known map[string]entry, found []
 	case o.noGate != "":
 		e = entry{lesson: o.accept, state: "no-gate", mark: mark, detail: o.noGate}
 	}
+
+	// ⛔⛔ THE LEDGER KEEPS ONE ENTRY PER LESSON AND THIS REPLACES IT. Said out
+	// loud, BEFORE the write, because ~25 sessions share this file and the
+	// entry read a minute ago is not the entry that is there now.
+	//
+	// Measured 2026-11-15: a careful relay from one session replaced another's
+	// LANDED, mutation-confirmed `gate` with a `pending` thirty seconds after
+	// it was written, so the ledger then said "nothing landed" about a gate
+	// that was already green. Neither session was told, and the only reason it
+	// was repaired is that the two happened to be talking. It had already
+	// happened once that day, to a third session's entry.
+	//
+	// ⛔ PRINTED BEFORE, NOT AFTER, and that is the author of the overwritten
+	// entry's own point: a diff printed afterwards would have been exactly as
+	// invisible. The useful form shows the operator what is there while they
+	// are still deciding.
+	if prev, had := known[o.accept]; had {
+		when := prev.when
+		if when == "" {
+			when = "not recorded — written before recur stamped the instant"
+		}
+		fmt.Fprintf(out, "replacing the entry that is there:\n  %s %s\n  written %s\n  %s\n",
+			prev.state, prev.mark, when, prev.detail)
+
+		// The ONE refusal. A `gate` becoming anything else is a strict loss of
+		// information, which needs no judgement about which text is better —
+		// unlike a gate replaced by another gate, which may be an improvement
+		// or a regression and is nobody's to decide here. So that one is
+		// announced and allowed, and this one is refused until the operator
+		// says why in public.
+		if theRank(prev.state) > theRank(e.state) && o.downgrade == "" {
+			fmt.Fprintf(errOut, "recur: %s already names a landed gate, and %s is weaker. Replacing it needs --downgrade \"<why>\" — a reason, never a bare flag, and it is written into the ledger beside the new decision.\nIf you are relaying somebody else's work, ask them first: the entry above may be newer than what you read.\n",
+				o.accept, e.state)
+			return 2
+		}
+		if o.downgrade != "" {
+			e.detail += " ⛔ DOWNGRADED from " + prev.state + ": " + o.downgrade
+		}
+	} else if o.downgrade != "" {
+		// A reason for replacing something that is not there describes nothing.
+		fmt.Fprintf(errOut, "recur: --downgrade was given but %s has no entry to replace\n", o.accept)
+		return 2
+	}
+	e.when = clock().UTC().Format(time.RFC3339)
 	known[o.accept] = e
 	if err := writeLedger(path, known); err != nil {
 		fmt.Fprintln(errOut, "recur: writing the ledger:", err)
@@ -880,7 +980,12 @@ func readLedger(path string) (map[string]entry, error) {
 		// "backlog@a1b2c3d4e5f6". A line written before fingerprints existed
 		// carries none, and is reported rather than assumed current.
 		state, mark, _ := strings.Cut(state, "@")
-		known[lesson] = entry{lesson: lesson, state: state, mark: mark, detail: detail}
+		when := ""
+		if m := whenTag.FindStringSubmatch(detail); m != nil {
+			when = m[1]
+			detail = whenTag.ReplaceAllString(detail, "")
+		}
+		known[lesson] = entry{lesson: lesson, state: state, mark: mark, detail: detail, when: when}
 	}
 	return known, nil
 }
@@ -910,7 +1015,11 @@ func writeLedger(path string, known map[string]entry) error {
 		if e.mark != "" {
 			state += "@" + e.mark
 		}
-		b.WriteString(fmt.Sprintf("- %s — %s: %s\n", e.lesson, state, e.detail))
+		detail := e.detail
+		if e.when != "" {
+			detail += " [written " + e.when + "]"
+		}
+		b.WriteString(fmt.Sprintf("- %s — %s: %s\n", e.lesson, state, detail))
 	}
 	b.WriteString(fmt.Sprintf("\nlast written %s\n", time.Now().Format("2006-01-02")))
 	return os.WriteFile(path, []byte(b.String()), 0o644)

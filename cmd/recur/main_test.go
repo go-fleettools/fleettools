@@ -496,3 +496,178 @@ func TestTheLedgerAndTheIndexAreNotScanned(t *testing.T) {
 		t.Errorf("neither file is a lesson; it said %q", out)
 	}
 }
+
+// ⛔⛔ THE LEDGER KEEPS ONE ENTRY PER LESSON AND `--accept` REPLACES IT, so the
+// entry a session read a minute ago is not the entry that is there now.
+// Measured 2026-11-15: a careful relay replaced another session's LANDED,
+// mutation-confirmed `gate` with a `pending` thirty seconds after it was
+// written, and the ledger then said "nothing landed" about a gate that was
+// already green. It had happened once that day already, to a third session.
+//
+// What is printed, and WHEN, is the remedy the overwritten entry's own author
+// argued for: a warning naming what is there, BEFORE the write, because a diff
+// printed afterwards is exactly as invisible.
+func TestReplacingAnEntryPrintsTheOneThatIsThere(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Troisième récidive."})
+	if code, out, _ := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/first"); code != 0 {
+		t.Fatalf("first accept: %d\n%s", code, out)
+	}
+	code, out, _ := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/second")
+	if code != 0 {
+		t.Fatalf("a gate replaced by another gate must be allowed: %d\n%s", code, out)
+	}
+	for _, want := range []string{"replacing the entry that is there", "gate", "cmd/first", "written "} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the replacement did not say what it replaced (%q missing):\n%s", want, out)
+		}
+	}
+	if !strings.Contains(ledger(t, dir), "cmd/second") {
+		t.Errorf("the new decision is not in the ledger: %q", ledger(t, dir))
+	}
+}
+
+// The ONE refusal: a landed gate becoming something weaker is a strict loss of
+// information, and needs a reason written in public.
+func TestALandedGateIsNotSilentlyDowngraded(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Deuxième fois."})
+	if code, out, _ := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/landed"); code != 0 {
+		t.Fatalf("first accept: %d\n%s", code, out)
+	}
+	for _, weaker := range [][]string{{"--gate-pending", "somewhere"}, {"--no-gate", "cannot"}} {
+		args := append([]string{"--memory", dir, "--accept", "lesson"}, weaker...)
+		code, _, errOut := drive(t, args...)
+		if code != 2 {
+			t.Errorf("%s over a landed gate: code %d, want 2", weaker[0], code)
+		}
+		if !strings.Contains(errOut, "--downgrade") {
+			t.Errorf("the refusal does not name the way through: %q", errOut)
+		}
+		// ⛔ And the ledger still holds the gate: a refusal that had already
+		// written would be the defect with a message on top.
+		if !strings.Contains(ledger(t, dir), "cmd/landed") || strings.Contains(ledger(t, dir), "somewhere") {
+			t.Errorf("the refused write changed the ledger: %q", ledger(t, dir))
+		}
+	}
+}
+
+func TestADowngradeWithItsReasonIsAllowedAndStamped(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Troisième récidive."})
+	drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/landed")
+	code, out, errOut := drive(t, "--memory", dir, "--accept", "lesson",
+		"--gate-pending", "rewritten, not landed", "--downgrade", "the gate passed on a race")
+	if code != 0 {
+		t.Fatalf("a stated downgrade must be allowed: %d\n%s\n%s", code, out, errOut)
+	}
+	l := ledger(t, dir)
+	if !strings.Contains(l, "DOWNGRADED from gate: the gate passed on a race") {
+		t.Errorf("the reason is not published beside the decision: %q", l)
+	}
+	if !strings.Contains(l, "rewritten, not landed") {
+		t.Errorf("the new decision is missing: %q", l)
+	}
+}
+
+// ⛔ `pending` and `no-gate` are NOT ordered against each other: "written, not
+// landed" and "none can exist" are different decisions, not different
+// strengths. Ordering them would refuse replacements this command cannot
+// justify refusing.
+func TestPendingAndNoGateReplaceEachOtherFreely(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Deuxième occurrence."})
+	drive(t, "--memory", dir, "--accept", "lesson", "--gate-pending", "over there")
+	if code, _, errOut := drive(t, "--memory", dir, "--accept", "lesson", "--no-gate", "none can exist"); code != 0 {
+		t.Errorf("pending → no-gate: code %d, %q", code, errOut)
+	}
+	if code, _, errOut := drive(t, "--memory", dir, "--accept", "lesson", "--gate-pending", "back again"); code != 0 {
+		t.Errorf("no-gate → pending: code %d, %q", code, errOut)
+	}
+}
+
+func TestADowngradeReasonWithNothingToReplaceIsRefused(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Troisième récidive."})
+	code, _, errOut := drive(t, "--memory", dir, "--accept", "lesson",
+		"--gate", "cmd/x", "--downgrade", "why")
+	if code != 2 || !strings.Contains(errOut, "no entry to replace") {
+		t.Errorf("code %d, %q", code, errOut)
+	}
+}
+
+// ⛔⛔ THE STAMP MUST NOT RIDE INSIDE THE `state@mark` TOKEN. readLedger cuts
+// that segment at its FIRST "@", so a `gate@mark@time` would hand an older
+// binary `mark = "mark@time"`: every entry would read as a fingerprint that
+// had changed, and every lesson would be reported again as having repeated
+// after it was accounted for. This is the control on the format choice.
+func TestTheWriteInstantDoesNotPolluteTheFingerprint(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Troisième récidive."})
+	drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/x")
+	l := ledger(t, dir)
+	if !strings.Contains(l, "[written ") {
+		t.Fatalf("the instant was not recorded: %q", l)
+	}
+	// Exactly one "@" in the whole entry line: the fingerprint's own.
+	var line string
+	for _, ln := range strings.Split(l, "\n") {
+		if strings.HasPrefix(ln, "- lesson — ") {
+			line = ln
+		}
+	}
+	if line == "" {
+		t.Fatalf("no entry line in %q", l)
+	}
+	if n := strings.Count(line, "@"); n != 1 {
+		t.Errorf("the line carries %d '@', want exactly the fingerprint's: %q", n, line)
+	}
+	// And the report still reads it as accounted for, which is what a polluted
+	// fingerprint would break.
+	if code, out, _ := drive(t, "--memory", dir); code != 0 {
+		t.Errorf("accounted-for lesson reported again: %d\n%s", code, out)
+	}
+}
+
+// An entry from before the stamp existed says so rather than being given a
+// time it does not have.
+func TestAnEntryWrittenBeforeTheStampSaysSo(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Troisième récidive."})
+	// Hand-written, in the shape an older binary left behind: no [written …].
+	if err := os.WriteFile(filepath.Join(dir, ledgerName),
+		[]byte("- lesson — gate@deadbeef: cmd/old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/new")
+	if code != 0 {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "not recorded") {
+		t.Errorf("it should say the instant is unknown rather than invent one: %q", out)
+	}
+}
+
+// A rewrite of the whole file keeps every other entry's instant: writeLedger
+// re-emits all of them, so a stamp that did not survive the round trip would
+// be lost the first time any other lesson was accounted for.
+func TestOneAcceptDoesNotEraseAnotherEntrysInstant(t *testing.T) {
+	dir := mem(t, map[string]string{
+		"first.md":  "Troisième récidive.",
+		"second.md": "Deuxième fois.",
+	})
+	drive(t, "--memory", dir, "--accept", "first", "--gate", "cmd/one")
+	before := ledger(t, dir)
+	drive(t, "--memory", dir, "--accept", "second", "--gate", "cmd/two")
+	after := ledger(t, dir)
+
+	stamp := func(l, lesson string) string {
+		for _, ln := range strings.Split(l, "\n") {
+			if strings.HasPrefix(ln, "- "+lesson+" — ") {
+				if m := whenTag.FindStringSubmatch(ln); m != nil {
+					return m[1]
+				}
+			}
+		}
+		return ""
+	}
+	if s := stamp(before, "first"); s == "" || s != stamp(after, "first") {
+		t.Errorf("first's instant was %q before and %q after another accept", s, stamp(after, "first"))
+	}
+	if stamp(after, "second") == "" {
+		t.Errorf("second got no instant: %q", after)
+	}
+}
