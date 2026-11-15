@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
 	"strings"
 	"testing"
@@ -370,14 +371,17 @@ func TestTheAllowanceFollowsTheDeadline(t *testing.T) {
 		timeout time.Duration
 		want    int
 	}{
-		// ⛔ A non-positive deadline cannot reach this through the command --
-		// RunE refuses it first -- but a mutation of the minimum-window guard
-		// SURVIVED, and the honest reading of that was the third one: not dead
-		// code, a corpus with no witness. maxRounds is a package function its
-		// own tests already call directly, so it must stay total: deleting the
-		// guard would hand a future caller a bound of 3 instead of 4.
+		// ⛔⛔ THE LAST ROW IS THE ONE THAT MATTERS, and it is reachable from the
+		// command line. At the largest duration cobra accepts, the ceil's
+		// `+ time.Hour - 1` OVERFLOWS int64 and the unguarded formula yields
+		// -2562043, so the very first round is already over the limit: an
+		// instant STALLED with no wait, asked for by the flag that wants the
+		// longest wait there is. I had kept the guard for a hypothetical future
+		// caller -- right conclusion, wrong reason, and review measured the
+		// real one.
 		{0, 4},
 		{-5 * time.Second, 4},
+		{time.Duration(math.MaxInt64), 4},
 		{30 * time.Second, 4},
 		{59 * time.Minute, 4},
 		{60 * time.Minute, 4},

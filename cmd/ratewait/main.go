@@ -216,10 +216,19 @@ exit 2 the question could not be put: nothing named, an impossible threshold, a
 // against it. The deadline is the other bound and is the one that stops a short
 // run; this count exists to stop a RECEDING reset, so it must not also refuse a
 // patient one.
+// ⛔⛔ AND THE MINIMUM IS NOT A COURTESY, IT IS THE OVERFLOW GUARD. I first kept
+// it for a hypothetical future caller, reasoning that a non-positive deadline
+// cannot arrive through the command because RunE refuses one. Review measured
+// the real path: at the largest duration cobra accepts,
+// --timeout 2562047h47m16.854775807s, the `+ time.Hour - 1` of the ceil
+// OVERFLOWS int64 and the unguarded formula yields a limit of -2562043, so
+// `round >= limit` is true on the first round -- an instant STALLED with no
+// wait at all, from the flag that asks for the longest wait possible. Right
+// conclusion, wrong reason, and the reason is what a reader would have trusted.
 func maxRounds(timeout time.Duration) int {
 	windows := int((timeout + time.Hour - 1) / time.Hour) // ceil
 	if windows < 1 {
-		windows = 1
+		windows = 1 // a non-positive result means it overflowed, or was not a wait
 	}
 	return 3 + windows
 }
