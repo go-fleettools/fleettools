@@ -283,6 +283,57 @@ func TestTheThresholdIsAtLeastAndTheBoundaryIsPinned(t *testing.T) {
 	}
 }
 
+// ⛔ The help has always said "exit 1 ... or the reset stopped advancing", and
+// until this test the code did not do it: a window that resets while the
+// resource stays short left the loop with a distance of zero to sleep, which is
+// the tight poll this command exists to avoid.
+func TestAResetThatDidNotAdvanceIsAFindingAndNotAnotherSleep(t *testing.T) {
+	slept, reads := fake(t,
+		answer(0, 5000, 300, 4745, 5000, 900),
+		answer(0, 5000, 300, 4745, 5000, 900), // the same reset, still short
+	)
+	code, out, _ := drive("--rest", "50")
+	if code != 1 {
+		t.Fatalf("exit %d when the reset did not advance, want 1", code)
+	}
+	if !strings.HasPrefix(out, "STALLED core 0/50") {
+		t.Errorf("stdout does not carry the stall as an answer: %q", out)
+	}
+	if len(*slept) != 1 {
+		t.Errorf("slept %d time(s), want exactly 1: a second sleep to the same reset is a poll", len(*slept))
+	}
+	if *reads != 2 {
+		t.Errorf("read %d time(s), want 2", *reads)
+	}
+}
+
+// ⛔ A reset instant already behind us -- a stale reading, or a clock that
+// disagrees with GitHub's -- gives a negative distance, and sleep returns
+// instantly. The floor is what stops one bad reading becoming a thousand calls.
+func TestAResetAlreadyInThePastCannotBecomeATightPoll(t *testing.T) {
+	slept, reads := fake(t,
+		answer(0, 5000, -100, 4745, 5000, 900), // reset 100s BEHIND the clock
+		answer(5000, 5000, 3500, 4745, 5000, 4000),
+	)
+	code, out, _ := drive("--rest", "50")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 once the second reading is above the threshold", code)
+	}
+	if len(*slept) != 1 {
+		t.Fatalf("slept %d time(s), want 1: %v", len(*slept), *slept)
+	}
+	if (*slept)[0] < resetMargin {
+		t.Errorf("slept %s on a reset in the past, want at least the %s floor -- anything less is a poll",
+			(*slept)[0], resetMargin)
+	}
+	if *reads != 2 {
+		t.Errorf("read %d time(s), want 2", *reads)
+	}
+	if !strings.Contains(out, "PASS") {
+		t.Errorf("stdout: %q", out)
+	}
+}
+
 // A timeout of zero or less is not a wait, and must not pass by being instant.
 func TestATimeoutThatCannotWaitIsRefused(t *testing.T) {
 	slept, reads := fake(t)

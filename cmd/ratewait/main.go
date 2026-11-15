@@ -146,7 +146,19 @@ exit 2 the question could not be put: nothing named, an impossible threshold,
 }
 
 // waitFor is the whole command: read, answer or sleep to the reset, read again.
+//
+// ⛔ EVERY ROUND MUST SLEEP TO A STRICTLY LATER RESET THAN THE LAST ONE, and
+// that is what bounds this loop. Two readings can leave it with nothing to wait
+// for: a reset instant already in the past (a stale reading, or a clock that
+// disagrees with GitHub's), and a window that reset while the resource stayed
+// short. In both, the distance to the reset is zero or negative, sleep returns
+// at once, and the loop becomes the tight poll this command exists to avoid --
+// spending the budget it is waiting for, a thousand calls inside one deadline.
+// A reset that did not advance is therefore a FINDING, which is what this
+// command's own help has always said ("the reset stopped advancing") and what
+// its code did not do until a review of that sentence.
 func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
+	var slept time.Time // the reset this loop has already waited past
 	for {
 		res, err := readBudget()
 		if err != nil {
@@ -165,8 +177,22 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
 			return nil
 		}
 
+		if !slept.IsZero() && !latest.After(slept) {
+			fmt.Fprintf(cli.Out(c), "STALLED %s, the reset at %s did not advance after the wait\n",
+				strings.Join(short, ", "), latest.Local().Format("15:04:05 MST"))
+			return cli.Found("the reset did not advance: %s still short of %s",
+				strings.Join(short, ", "), describeWants(wants))
+		}
+
 		wake := latest.Add(resetMargin)
 		left := wake.Sub(now())
+		// ⛔ A reset already behind us gives a negative distance, and sleep
+		// would return instantly. The floor is what keeps one bad reading from
+		// becoming a poll loop; the stall check above is what keeps it from
+		// becoming an hour of them.
+		if left < resetMargin {
+			left = resetMargin
+		}
 		if wake.After(deadline) {
 			// ⛔ A FINDING PRINTS ITSELF. cli.Status does not print the message
 			// of a status 1 -- "the command has already printed what it found"
@@ -180,6 +206,7 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
 		fmt.Fprintf(cli.Err(c), "%s -- sleeping %s, to the reset at %s\n",
 			strings.Join(short, ", "), left.Round(time.Second), latest.Local().Format("15:04:05 MST"))
 		sleep(left)
+		slept = latest
 	}
 }
 
