@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +33,7 @@ func fake(t *testing.T, readings ...string) (slept *[]time.Duration, reads *int)
 		durations = append(durations, d)
 		clock = clock.Add(d)
 	}
-	runGH = func(_ ...string) ([]byte, error) {
+	runGH = func(_ context.Context, _ ...string) ([]byte, error) {
 		if n >= len(readings) {
 			t.Fatalf("the command read the budget %d time(s); only %d reading(s) were provided", n+1, len(readings))
 		}
@@ -469,6 +471,221 @@ func TestALimitIsOnlyNeededWhenTheResourceIsShort(t *testing.T) {
 			t.Errorf("stdout=%q, slept=%v", out, *slept)
 		}
 	})
+}
+
+// ⛔⛔ A reset creeping one second per reading is LEGAL by every bound above --
+// at or after 2020, inside the horizon, and strictly greater than the last --
+// and it polled on the floor for the whole deadline: six calls in ten seconds
+// measured by review, about 1950 under the default. The rule is progress.
+func TestAResetThatCreepsIsNotProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  int64
+		second int64
+	}{
+		{"creeping behind the clock", -100, -99},
+		{"creeping ahead of it by less than the margin", 120, 121},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slept, reads := fake(t,
+				core(0, 5000, start.Add(time.Duration(tc.first)*time.Second).Unix()),
+				core(0, 5000, start.Add(time.Duration(tc.second)*time.Second).Unix()),
+			)
+			code, out, _ := drive("--rest", "50")
+			if code != 1 {
+				t.Fatalf("exit %d for a reset that crept, want 1", code)
+			}
+			if !strings.HasPrefix(out, "STALLED core 0/50") {
+				t.Errorf("stdout does not carry the stall: %q", out)
+			}
+			if len(*slept) != 1 {
+				t.Errorf("slept %d time(s), want exactly 1: more than one is the poll", len(*slept))
+			}
+			if *reads != 2 {
+				t.Errorf("read %d time(s), want 2", *reads)
+			}
+		})
+	}
+}
+
+// ⛔ TWO DIFFERENT FACTS, AND ONE MESSAGE FOR BOTH WAS FALSE: the single line
+// printed "the deadline passed at 22:11" at 22:06, having slept not once. A
+// mutation of that sentence survived, which is how review found it.
+func TestTheTwoTimeoutsSayWhichBoundExpired(t *testing.T) {
+	t.Run("the next reset is out of reach", func(t *testing.T) {
+		slept, _ := fake(t, answer(0, 5000, 3600, 4745, 5000, 3600))
+		code, out, _ := drive("--rest", "50", "--timeout", "5m")
+		if code != 1 {
+			t.Fatalf("exit %d, want 1", code)
+		}
+		if !strings.Contains(out, "the next reset at") || !strings.Contains(out, "is past the deadline at") {
+			t.Errorf("the line does not say that the RESET is out of reach: %q", out)
+		}
+		if len(*slept) != 0 {
+			t.Errorf("slept %v before its deadline", *slept)
+		}
+	})
+	t.Run("the time is spent", func(t *testing.T) {
+		slept, _ := fake(t,
+			core(0, 5000, start.Add(-100*time.Second).Unix()),
+			core(0, 5000, start.Add(900*time.Second).Unix()),
+		)
+		code, out, _ := drive("--rest", "50", "--timeout", "1s")
+		if code != 1 {
+			t.Fatalf("exit %d, want 1", code)
+		}
+		if !strings.Contains(out, "the deadline passed at") || !strings.Contains(out, "next reset") {
+			t.Errorf("the line does not say that the TIME is spent, with the reset to come back to: %q", out)
+		}
+		if len(*slept) != 1 {
+			t.Errorf("slept %d time(s), want 1", len(*slept))
+		}
+	})
+}
+
+// ⛔ EACH CALL IS BOUNDED BY THE SOONER OF THE RUN'S DEADLINE AND THE PER-CALL
+// CAP. Without this witness the min() between them is untested, since the fake
+// seam elsewhere ignores the context it is handed.
+func TestEachCallIsBoundedByTheSoonerOfTheTwo(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout string
+		want    time.Duration
+	}{
+		{"the run's deadline is sooner", "1s", time.Second},
+		{"the per-call cap is sooner", "30m", callCap},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got time.Duration
+			oldRun := runGH
+			t.Cleanup(func() { runGH = oldRun })
+			runGH = func(ctx context.Context, _ ...string) ([]byte, error) {
+				dl, ok := ctx.Deadline()
+				if !ok {
+					t.Error("the call was handed a context with no deadline at all")
+					return nil, fmt.Errorf("no deadline")
+				}
+				got = time.Until(dl)
+				return []byte(answer(5000, 5000, 600, 4745, 5000, 1200)), nil
+			}
+			if code, _, errOut := drive("--rest", "50", "--timeout", tc.timeout); code != 0 {
+				t.Fatalf("exit %d; stderr=%q", code, errOut)
+			}
+			if d := got - tc.want; d > 500*time.Millisecond || d < -500*time.Millisecond {
+				t.Errorf("the call's deadline was %s away, want about %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// ⛔ THE EXEC SEAM WAS ENTIRELY UNTESTED -- `grep -c "execGH\|capped\|maxAnswer"`
+// over this file answered 0, and a mutation of maxAnswer to 1 survived. These
+// run real programs rather than a fake, because what is being asserted is what
+// os/exec does with a child that fails, streams or stalls.
+func TestTheExecSeamIsBoundedAndCapped(t *testing.T) {
+	look := func(t *testing.T, name string) string {
+		t.Helper()
+		p, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("%s is not on PATH here: %v", name, err)
+		}
+		return p
+	}
+	set := func(t *testing.T, p string) {
+		t.Helper()
+		old := ghPath
+		ghPath = p
+		t.Cleanup(func() { ghPath = old })
+	}
+
+	t.Run("stdout comes back", func(t *testing.T) {
+		set(t, look(t, "echo"))
+		out, err := execGH(context.Background(), "hello")
+		if err != nil {
+			t.Fatalf("err=%v", err)
+		}
+		if strings.TrimSpace(string(out)) != "hello" {
+			t.Errorf("out=%q", out)
+		}
+	})
+
+	t.Run("a failing child is an error and not an empty answer", func(t *testing.T) {
+		set(t, look(t, "false"))
+		out, err := execGH(context.Background(), "api", "rate_limit")
+		if err == nil {
+			t.Fatalf("a child that exits 1 returned out=%q and no error", out)
+		}
+	})
+
+	t.Run("a child that streams is cut off rather than read to the end", func(t *testing.T) {
+		set(t, look(t, "yes"))
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { _, err := execGH(ctx, "x"); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "more than") {
+				t.Errorf("err=%v, want the over-the-cap refusal", err)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("execGH read an endless stream to the end: the cap bounded nothing")
+		}
+	})
+
+	t.Run("a child that stalls is killed by the context", func(t *testing.T) {
+		set(t, look(t, "sleep"))
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		began := time.Now()
+		if _, err := execGH(ctx, "30"); err == nil {
+			t.Fatal("a 30s child under a 300ms context returned no error")
+		}
+		if took := time.Since(began); took > 10*time.Second {
+			t.Errorf("took %s: the context did not bound the child", took)
+		}
+	})
+}
+
+// ⛔ A writer that never fails is why a streaming child is read to the end: the
+// cap recorded a number and bounded nothing.
+func TestCappedFailsAtTheLimitRatherThanOnlyRecordingIt(t *testing.T) {
+	var c capped
+	n, err := c.Write(bytes.Repeat([]byte("a"), maxAnswer-1))
+	if err != nil || n != maxAnswer-1 {
+		t.Fatalf("under the cap: n=%d err=%v", n, err)
+	}
+	n, err = c.Write([]byte("bb"))
+	if err == nil {
+		t.Errorf("a write across the cap returned no error, so os/exec would keep copying")
+	}
+	if n != 1 {
+		t.Errorf("n=%d, want the 1 byte that fitted", n)
+	}
+	if !c.over {
+		t.Error("over=false after crossing the cap")
+	}
+	if c.buf.Len() != maxAnswer {
+		t.Errorf("buffered %d bytes, want exactly the %d-byte cap", c.buf.Len(), maxAnswer)
+	}
+	if n, err := c.Write([]byte("c")); n != 0 || err == nil {
+		t.Errorf("a write beyond the full buffer: n=%d err=%v", n, err)
+	}
+}
+
+func TestClipCountsRunesAndNotBytes(t *testing.T) {
+	// 200 runes of three bytes each: a byte slice would cut one in half.
+	s := strings.Repeat("é", 200)
+	got := clip([]byte(s))
+	if r := []rune(got); len(r) != 121 { // 120 plus the ellipsis
+		t.Errorf("clip returned %d runes, want 121", len(r))
+	}
+	if strings.Contains(got, "�") {
+		t.Error("clip cut a rune in half")
+	}
+	if short := clip([]byte(" ok ")); short != "ok" {
+		t.Errorf("clip(%q)=%q", " ok ", short)
+	}
 }
 
 // A timeout of zero or less is not a wait, and must not pass by being instant.

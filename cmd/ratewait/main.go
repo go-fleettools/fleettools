@@ -24,6 +24,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,22 +47,27 @@ var (
 	now   = time.Now
 	sleep = time.Sleep
 
+	// ghPath is the program the seam runs, so that a test can point it at a
+	// binary of known behaviour instead of at the real gh.
+	ghPath = "gh"
+
 	// runGH is the exec seam, replaced by the tests.
 	//
 	// ⛔ IT IS NOT [fleet.GH], AND THE REASON IS THE SAME ONE budget.go GIVES
 	// FOR ITS OWN autoStart: GH accounts for every call against the budget
-	// projection, and this command's one call is rate_limit, which costs
-	// nothing. Charging it would make the guard believe a call was spent that
+	// projection, and the rate_limit endpoint this calls is itself free of the
+	// budget. Charging it would make the guard believe a call was spent that
 	// was not -- the MEASUREMENT must not move what it measures.
 	//
-	// ⚠ THE COMMAND IS NOT FREE, AND AN EARLIER VERSION OF THIS COMMENT
-	// OVERCLAIMED THAT IT WAS. Review measured it: [fleet.WarnIfStale], which
+	// ⚠ THE COMMAND IS NOT FREE, and the sentence above is deliberately about
+	// the READING rather than the run, because an earlier version of it said
+	// "a tool whose job is to read the budget must not move it" and that was
+	// false of the process. Review measured why: [fleet.WarnIfStale], which
 	// every command here calls first and a repository-wide test requires, makes
-	// one uncached `repos/.../compare/...` request per run. So a wait costs one
-	// call plus one free reading per round, and under an exhausted budget the
-	// staleness note is the thing that prints a 403 -- as it did at 22:06 CET
-	// on 2026-11-15, above ghissue's own refusal. The claim is about the
-	// budget READING, not about the process.
+	// one uncached `repos/.../compare/...` request per run. A wait therefore
+	// costs exactly one accounted call, plus one free reading per round -- and
+	// under an exhausted budget that staleness note is the thing that prints a
+	// 403, as it did at 22:06 CET on 2026-11-15 above ghissue's own refusal.
 	runGH = execGH
 )
 
@@ -126,7 +132,11 @@ a time before year 1 and loses every comparison it is in, which made the loop
 poll on its floor without end -- seven calls in thirteen seconds under
 --timeout 3s.
 
---timeout bounds the RUN, in elapsed time, not merely the next sleep.
+--timeout bounds the RUN, in elapsed time, and bounds each gh call with it: a
+child that stalls or streams is killed rather than read to the end, and one call
+may not take more than 30s even under a long deadline. ⚠ The single exception is
+the staleness note below, which runs before the flags are parsed and which this
+command cannot bound.
 
 ⚠ One more cost to be exact about: like every command here, this one calls
 fleet.WarnIfStale first, which spends ONE request asking whether the binary is
@@ -180,9 +190,19 @@ exit 2 the question could not be put: nothing named, an impossible threshold, a
 // command's own help has always said ("the reset stopped advancing") and what
 // its code did not do until a review of that sentence.
 func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
-	var sleptTo time.Time // the reset this loop has already waited past
+	// reread says the one short re-read allowed for a first stale reading is
+	// spent. ⛔ There is no "the reset this loop waited past" variable any
+	// more: the compiler reported it unused the moment the unreachable second
+	// guard went, which is a better witness for a removal being complete than
+	// a green suite is.
+	var reread bool
 	for {
-		res, err := readBudget()
+		res, err := readBudget(deadline)
+		if errors.Is(err, errRunDeadline) {
+			fmt.Fprintf(cli.Out(c), "TIMEOUT waited for %s, the deadline passed at %s while gh was running\n",
+				describeWants(wants), deadline.Local().Format("2006-01-02 15:04:05 MST"))
+			return cli.Found("the deadline passed while gh was running")
+		}
 		if err != nil {
 			return cli.Wrap(err)
 		}
@@ -199,17 +219,45 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
 			return nil
 		}
 
-		// ⛔ ROUND 1 CANNOT STALL WITHOUT A GUARD OF ITS OWN ONLY BECAUSE
-		// resetInstant REFUSES A ZERO OR ABSURD INSTANT: latest is therefore
-		// always at or after 2020, which is after the zero Time that sleptTo
-		// starts at. The earlier `!sleptTo.IsZero() &&` clause was removed
-		// because a mutation deleting it survived every test -- it could only
-		// ever matter for the zero latest that is now impossible, and a
-		// condition that cannot fire reads as a guard without being one.
-		if !latest.After(sleptTo) {
-			fmt.Fprintf(cli.Out(c), "STALLED %s, the reset at %s did not advance after the wait\n",
+		// ⛔⛔ THE RULE IS PROGRESS, NOT DIFFERENCE, and review measured both
+		// ways the older "did it advance at all" test was not one. A reset
+		// creeping forward one second per reading is perfectly legal (at or
+		// after 2020, within the horizon) and passed that test every round: six
+		// calls in ten seconds under --timeout 10s, about 1950 under the
+		// default deadline -- the thousand calls inside one deadline this very
+		// check claims to prevent. A reset must therefore be strictly in the
+		// FUTURE to be worth sleeping to, and must have moved by at least the
+		// margin since the one already waited out. One short re-read is allowed
+		// for a stale reading, because a reset just behind the clock is what a
+		// cache or a second of skew looks like, and re-reading settles it.
+		// ⛔ THE CALLER'S BOUND IS JUDGED FIRST, and the order is a decision
+		// rather than an accident: when the time is spent AND the reset has
+		// stopped moving, both are true and only one can be printed. "Your
+		// deadline passed" is the fact the caller acts on; "the reset stalled"
+		// is about GitHub and would send them looking the wrong way.
+		if now().After(deadline) {
+			fmt.Fprintf(cli.Out(c), "TIMEOUT %s, waited for %s, the deadline passed at %s, next reset %s\n",
+				strings.Join(short, ", "), describeWants(wants),
+				deadline.Local().Format("2006-01-02 15:04:05 MST"), latest.Local().Format("15:04:05 MST"))
+			return cli.Found("the deadline passed before %s", describeWants(wants))
+		}
+
+		// ⛔ ONE TEST DOES ALL OF IT, and a second one written beside it was
+		// UNREACHABLE. The first draft of this rule also refused a reset that
+		// had advanced by less than the margin, which reads like the other half
+		// of the creep -- and a mutation turning that clause back into "did it
+		// advance at all" was never caught, which is how the redundancy showed.
+		// The reason is the sleep: a round that waits leaves now() at or past
+		// sleptTo+margin, so any reset within a margin of sleptTo is already
+		// BEHIND the clock and arrives here as stale. A creep forwards and a
+		// creep backwards are therefore the same case, and this is the second
+		// guard in this file removed for being unable to fire rather than
+		// dressed in a test that could not fail.
+		stale := !latest.After(now())
+		if stale && reread {
+			fmt.Fprintf(cli.Out(c), "STALLED %s, the reset at %s is not in the future and the budget did not refill\n",
 				strings.Join(short, ", "), latest.Local().Format("2006-01-02 15:04:05 MST"))
-			return cli.Found("the reset did not advance: %s still short of %s",
+			return cli.Found("the reset is not in the future: %s still short of %s",
 				strings.Join(short, ", "), describeWants(wants))
 		}
 
@@ -217,18 +265,21 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
 		// ⛔ THE DEADLINE IS ELAPSED TIME, AND COMPARING IT ONLY TO wake WAS A
 		// SENTENCE WITH NO CODE: the help promised "exit 1 the deadline passed
 		// first" while nothing ever compared now() to it, so --timeout bounded
-		// the next sleep rather than the run. Both tests are needed -- wake
-		// catches a reset beyond the deadline before sleeping into it, now()
-		// catches a run that has already spent its time on earlier rounds.
-		if now().After(deadline) || wake.After(deadline) {
-			// ⛔ A FINDING PRINTS ITSELF. cli.Status does not print the message
-			// of a status 1 -- "the command has already printed what it found"
-			// -- so a timeout that only returned the error would exit 1 in
-			// silence, which is the one shape a caller cannot act on. It goes
-			// on stdout, next to PASS, because both are this command's answer.
-			fmt.Fprintf(cli.Out(c), "TIMEOUT %s, waited for %s, the deadline passed at %s\n",
-				strings.Join(short, ", "), describeWants(wants), deadline.Local().Format("2006-01-02 15:04:05 MST"))
-			return cli.Found("the deadline passed before %s", describeWants(wants))
+		// the next sleep rather than the run. Both tests are needed, and they
+		// are SEPARATE because they are different facts -- one says the time is
+		// spent, the other says the next reset is out of reach -- and a single
+		// message for both printed "the deadline passed at 22:11" at 22:06.
+		//
+		// ⛔ A FINDING PRINTS ITSELF. cli.Status does not print the message of a
+		// status 1 ("the command has already printed what it found"), so a
+		// timeout that only returned the error would exit 1 in silence. Both
+		// lines carry the reset instant, which is the one datum a caller needs
+		// in order to come back.
+		if wake.After(deadline) {
+			fmt.Fprintf(cli.Out(c), "TIMEOUT %s, waited for %s, the next reset at %s is past the deadline at %s\n",
+				strings.Join(short, ", "), describeWants(wants),
+				latest.Local().Format("2006-01-02 15:04:05 MST"), deadline.Local().Format("15:04:05 MST"))
+			return cli.Found("the next reset is past the deadline for %s", describeWants(wants))
 		}
 		left := wake.Sub(now())
 		// ⛔ A reset already behind us gives a negative distance, and sleep
@@ -244,7 +295,11 @@ func waitFor(c *cobra.Command, wants []want, deadline time.Time) error {
 		fmt.Fprintf(cli.Err(c), "%s -- sleeping %s, to the reset at %s\n",
 			strings.Join(short, ", "), left.Round(time.Second), latest.Local().Format("2006-01-02 15:04:05 MST"))
 		sleep(left)
-		sleptTo = latest
+		// ⛔ THE RE-READ IS SPENT BY ANY SLEEP, not only by a stale one: its
+		// purpose is to settle a FIRST reading whose reset is a second behind
+		// the clock, so after any wait a stale reset means the budget did not
+		// refill rather than that the reading was early.
+		reread = true
 	}
 }
 
@@ -355,9 +410,32 @@ func describeWants(wants []want) string {
 // empty answer from a zero one. A --jq expression that selects nothing prints an
 // empty line, which unmarshals into a zero and reads exactly like a spent
 // budget.
-func readBudget() (map[string]resource, error) {
-	out, err := runGH("api", "rate_limit")
+func readBudget(deadline time.Time) (map[string]resource, error) {
+	// ⛔⛔ THE CHILD IS BOUNDED, AND NOT BOUNDING IT LEFT --timeout A SENTENCE
+	// WITH NO CODE FOR THE ONE FAILURE AN AGENT CANNOT RECOVER FROM. Review
+	// measured a gh that sleeps 15s: `--timeout 1s` took 31 SECONDS, because
+	// exec.Command has no deadline of its own and the capped writer reported
+	// every write as a success, so a child that stalls or streams was read to
+	// the end. The bound is the SOONER of the run's deadline and a per-call
+	// cap: a single rate_limit answer that takes longer than the cap is a
+	// broken seam, not a slow budget.
+	until := now().Add(callCap)
+	if deadline.Before(until) {
+		until = deadline
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), until.Sub(now()))
+	defer cancel()
+
+	out, err := runGH(ctx, "api", "rate_limit")
 	if err != nil {
+		// ⛔ WHICH BOUND EXPIRED CHANGES THE STATUS, so the caller can tell "I
+		// ran out of time" from "this seam does not answer".
+		if ctx.Err() != nil {
+			if !deadline.After(now()) {
+				return nil, errRunDeadline
+			}
+			return nil, cli.Unanswerable("gh did not answer rate_limit within %s", callCap)
+		}
 		return nil, fmt.Errorf("reading the budget: %w", err)
 	}
 	var v struct {
@@ -382,45 +460,69 @@ func readBudget() (map[string]resource, error) {
 // while a machine is under pressure.
 const maxAnswer = 1 << 20
 
-// capped is a writer that stops at maxAnswer and remembers that it did.
+// callCap bounds ONE gh call, under the run's own deadline.
 //
-// It reports every write as fully written: a short write would break the child
-// process rather than bound this one.
+// A rate_limit answer is one request and a few hundred bytes; thirty seconds is
+// a seam that does not answer, not a budget that is slow.
+const callCap = 30 * time.Second
+
+// errRunDeadline says the run's own deadline expired while gh was running, so
+// the answer is a timeout rather than an unreadable seam.
+var errRunDeadline = errors.New("the run's deadline expired while gh was running")
+
+// errTooBig stops the copy rather than only recording that it should have.
+var errTooBig = errors.New("more than the answer this command will hold")
+
+// capped is a writer that stops at maxAnswer and FAILS once it is reached.
+//
+// ⛔ AN EARLIER VERSION REPORTED EVERY WRITE AS FULLY WRITTEN, on the reasoning
+// that a short write would break the child rather than bound this process.
+// Review showed that is the wrong way round: a writer that never fails is
+// exactly why a child that streams is read to the end, so the cap recorded a
+// number and bounded nothing. Breaking the child IS the bound -- os/exec stops
+// copying and reports the error, and the child gets a closed pipe.
 type capped struct {
 	buf  bytes.Buffer
 	over bool
 }
 
 func (c *capped) Write(p []byte) (int, error) {
-	if room := maxAnswer - c.buf.Len(); room > 0 {
-		if len(p) > room {
-			c.over = true
-			c.buf.Write(p[:room])
-			return len(p), nil
-		}
-		c.buf.Write(p)
-		return len(p), nil
-	}
-	if len(p) > 0 {
+	room := maxAnswer - c.buf.Len()
+	if room <= 0 {
 		c.over = true
+		return 0, errTooBig
 	}
+	if len(p) > room {
+		c.over = true
+		c.buf.Write(p[:room])
+		return room, errTooBig
+	}
+	c.buf.Write(p)
 	return len(p), nil
 }
 
 // execGH is the real seam. Stdin is closed: a command that inherits a terminal
-// can block a wait forever on a prompt nobody sees.
-func execGH(args ...string) ([]byte, error) {
-	cmd := exec.Command("gh", args...)
+// can block a wait forever on a prompt nobody sees. The context is what bounds
+// a child that stalls or streams.
+func execGH(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, ghPath, args...)
 	var out, errOut capped
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &out, &errOut, nil
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if out.over || errors.Is(err, errTooBig) {
+		return nil, fmt.Errorf("gh answered more than %d bytes for rate_limit, which is not that answer", maxAnswer)
+	}
+	if err != nil {
 		if msg := strings.TrimSpace(errOut.buf.String()); msg != "" {
-			return nil, errors.New(msg)
+			// ⚠ The error is clipped and its truncation declared: an
+			// unannounced cut reads as the whole message, and a megabyte of
+			// somebody else's HTML is not a reason.
+			if errOut.over {
+				return nil, fmt.Errorf("%s [truncated at %d bytes]", clip([]byte(msg)), maxAnswer)
+			}
+			return nil, errors.New(clip([]byte(msg)))
 		}
 		return nil, err
-	}
-	if out.over {
-		return nil, fmt.Errorf("gh answered more than %d bytes for rate_limit, which is not that answer", maxAnswer)
 	}
 	return out.buf.Bytes(), nil
 }
