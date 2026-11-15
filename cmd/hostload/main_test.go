@@ -21,7 +21,7 @@ import (
 // use: -i unchanged, and --pick and --max-busy through the compatibility shim.
 func TestEveryFlagTheHelpNamesIsWiredUp(t *testing.T) {
 	c := RootCmd()
-	for _, name := range []string{"interval", "pick", "max-busy"} {
+	for _, name := range []string{"interval", "pick", "max-busy", "max-load"} {
 		if c.Flags().Lookup(name) == nil {
 			t.Errorf("--%s is named in the help but not registered", name)
 		}
