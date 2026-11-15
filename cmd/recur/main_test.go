@@ -851,7 +851,7 @@ func TestPointerShapes(t *testing.T) {
 		{"[[x#h]]: " + q, "z.md", true},
 		{"- [t](p.md): " + q, "z.md", true},  // pending counts
 		{"- [t](n.md): " + q, "z.md", true},  // no-gate counts
-		{"- [t](b.md): " + q, "z.md", false}, // backlog is not a decision
+		{"- [t](b.md): " + q, "z.md", true},  // backlog is tracked: it re-fires on a new recurrence
 		{"- [t](w.md): " + q, "z.md", false}, // a state nobody chose is not one
 		{"- [t](u.md): " + q, "z.md", false}, // no ledger entry
 		{"- [[x]]: " + q, "x.md", false},     // a self-link

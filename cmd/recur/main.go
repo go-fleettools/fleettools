@@ -1012,10 +1012,11 @@ func isIndex(b []byte) bool {
 var pointerRe = regexp.MustCompile(`^(?:[-*+>]\s+)?(?:\[[^\]]*\]\(([^)\s]+)\)|\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\])\s*[:;]`)
 
 // pointer reports whether line is a pointer to ANOTHER memory that exists in dir
-// and that the ledger accounts for with a decision (gate, pending or no-gate; a
-// backlog entry is "seeded, not triaged", not a decision). A URL, a path outside
-// dir, a missing file, a self-link, the ledger, MEMORY.md and an unaccounted
-// target are not.
+// and that the ledger TRACKS under its own name: any valid entry (gate, pending,
+// no-gate or backlog). A backlog entry is fingerprinted and re-fires on a new
+// recurrence, so the gate still watches the target. A memory with no entry at
+// all, a URL, a path outside dir, a missing file, a self-link, the ledger and
+// MEMORY.md are not pointers.
 func pointer(line, dir, self string, known map[string]entry) bool {
 	m := pointerRe.FindStringSubmatch(line)
 	if m == nil {
@@ -1042,7 +1043,7 @@ func pointer(line, dir, self string, known map[string]entry) bool {
 		return false
 	}
 	e, ok := known[strings.TrimSuffix(target, ".md")]
-	return ok && states[e.state] && e.state != "backlog"
+	return ok && states[e.state]
 }
 
 func readLedger(path string) (map[string]entry, error) {
