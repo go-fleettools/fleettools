@@ -69,3 +69,40 @@ func TestSubjectIsTheStrip(t *testing.T) {
 		}
 	}
 }
+
+// go-embedded-ruby at ef3540656d6377c3fdc23e59951118abd70ffb5b (layouts/index.html,
+// 2026-11-15): its "One static binary" card lists the eight tested architectures,
+// which the strip's goarch line says; `landingkit check` failed it ("a feature card
+// repeats the tested architectures"). Only that sentence goes, under the goarch
+// condition; the rest of the card stays.
+func TestRepeatsArchitecturesInARealCard(t *testing.T) {
+	b, err := os.ReadFile("testdata/repeats-embedded-ruby/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, frags := repeats(string(b))
+	want := `<p>CGO=0 by default. ` + goarchOff + `Tested on amd64, arm64, riscv64, loong64, ppc64le, s390x, 386 and arm;` + end
+	if !strings.Contains(out, "<h3>One static binary</h3>") || !strings.Contains(out, goarchOff+"Tested on amd64") {
+		t.Errorf("the architectures sentence is not under the goarch condition:\n%s", clip(out[strings.Index(out, "One static binary")-60:]))
+	}
+	_ = want
+	if !strings.Contains(out, "47 targets") {
+		t.Error("the rest of the card was lost")
+	}
+	n := 0
+	for _, f := range frags {
+		if f.Where == "arch sentence" {
+			n++
+		}
+	}
+	if n == 0 {
+		t.Error("no arch sentence noted")
+	}
+	// a card naming one architecture is left, and a second pass changes nothing
+	if again, _ := repeats(out); again != out {
+		t.Error("a second pass changed the page")
+	}
+	if got, _ := repeats(`<div class="card"><h3>Speed</h3><p>Measured on an arm64 laptop.</p></div>`); strings.Contains(got, goarchOff) {
+		t.Error("one architecture name is a fact about a measurement, not a repeat")
+	}
+}
