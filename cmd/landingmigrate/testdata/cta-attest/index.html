@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ .Site.Title }} — {{ .Site.Params.subtitle }}</title>
+<meta name="description" content="{{ .Site.Params.description }}">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+{{ partial "styles.html" . }}
+{{/* The template's own rules for what <main> holds, kept for it alone (class legacy),
+     its colours read from the kit's tokens. Written by landingmigrate. */}}
+<style>
+.legacy{--fg:var(--ink);--muted:var(--slate);--card:var(--bg-soft);--border:var(--line);--tag-a:#1a7f37;--tag-b:#9a6700}
+@media(prefers-color-scheme:dark){:root:not([data-theme]) .legacy{--tag-a:#3fb950;--tag-b:#d29922}}
+:root[data-theme="dark"] .legacy{--tag-a:#3fb950;--tag-b:#d29922}
+.legacy .theme-toggle:hover{border-color: var(--accent);}
+.legacy .lead{color: var(--fg); max-width: 800px; margin: 8px auto 0; text-align: center;}
+.legacy h2.section{text-align: center; margin: 40px 0 4px; font-size: 1.4rem;}
+.legacy .grid{display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; padding: 16px 0 8px;}
+.legacy .card{background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; display: flex; flex-direction: column;}
+.legacy .card h3{margin: 0 0 .35em; font-size: 1.2rem; display: flex; align-items: center; justify-content: space-between; gap: 8px;}
+.legacy .card h3 a{text-decoration: none;}
+.legacy .card .reach{color: var(--muted); font-size: .85rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0 0 .6em;}
+.legacy .card p{margin: 0 0 .8em; color: var(--fg); font-size: .95rem;}
+.legacy .card .note{color: var(--muted); font-size: .85rem; margin: 0 0 .8em;}
+.legacy .card .badges{margin-top: auto;}
+.legacy .card .badges img{height: 20px; vertical-align: middle;}
+.legacy .role{font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); white-space: nowrap;}
+.legacy .role.a{color: var(--tag-a);}
+.legacy .role.b{color: var(--tag-b);}
+.legacy .principles{color: var(--muted); text-align: center; padding: 10px 0 0; max-width: 820px; margin: 0 auto;}
+</style>
+</head>
+<body class="lm">
+  <header class="nav"><div class="wrap">
+    <a class="brand" href="/"><img class="glyph" src="/img/logo.svg" width="32" height="32" alt="go-attest logo"> {{ .Site.Title }}</a>
+    {{ partial "theme-toggle.html" . }}
+  </div></header>
+  {{ partial "fork-ribbon.html" "https://github.com/go-attest" }}
+
+  <div class="hero"><div class="wrap">
+    <div>
+      <h1 class="head">{{ .Site.Title }}</h1>
+      <p class="sub">{{ .Site.Params.tagline | safeHTML }}</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/{{ .Site.Title }}">{{ partial "icons/github.html" . }}GitHub</a>
+        <a class="btn btn-ghost" href="{{ . }}">{{ partial "icons/arrow-right.html" . }}{{ $.Site.Params.secondary_label }}</a>
+      </div>
+      <div class="trust">{{ range .Site.Params.pills }}<span class="pill">{{ . }}</span>{{ end }}</div>
+    </div>
+    {{ partial "hero-carousel.html" . }}
+  </div></div>
+
+  {{ with .Site.Params.repos }}<div class="strip"><div class="wrap">
+    <span class="lead-line">One organisation, <b>{{ len . }}</b> repositories</span>
+    <div class="mods">{{ range . }}<a href="#repos">{{ .name }}</a>{{ end }}</div>
+  </div></div>{{ end }}
+
+  <main id="repos" class="legacy"><div class="wrap">
+    {{ range .Site.Params.leads }}
+    <p class="lead">{{ . | safeHTML }}</p>
+    {{ end }}
+
+    <h2 class="section">Repositories</h2>
+    <section class="grid">
+      {{ range .Site.Params.repos }}
+      <article class="card">
+        <h3>
+          <a href="https://github.com/{{ $.Site.Title }}/{{ .name }}"><code>{{ .name }}</code></a>
+          {{ with .role }}<span class="role {{ if eq . $.Site.Params.primary_role }}a{{ else }}b{{ end }}">{{ . }}</span>{{ end }}
+        </h3>
+        {{ with .reach }}<p class="reach">{{ . }}</p>{{ end }}
+        <p>{{ .result | safeHTML }}</p>
+        {{ with .note }}<p class="note">{{ . | safeHTML }}</p>{{ end }}
+        <div class="badges">
+          {{ if not .no_ci }}<a href="https://github.com/{{ $.Site.Title }}/{{ .name }}/actions/workflows/ci.yml"><img src="https://github.com/{{ $.Site.Title }}/{{ .name }}/actions/workflows/ci.yml/badge.svg" alt="CI"></a>{{ end }}
+          {{ if .gomod }}<a href="https://pkg.go.dev/github.com/{{ $.Site.Title }}/{{ .name }}"><img src="https://pkg.go.dev/badge/github.com/{{ $.Site.Title }}/{{ .name }}.svg" alt="Go reference"></a>{{ end }}
+          {{ if not (partial "mantra-on.html" $) }}<img src="https://img.shields.io/badge/license-BSD--3--Clause-blue.svg" alt="BSD-3-Clause">{{ end }}
+        </div>
+      </article>
+      {{ end }}
+    </section>
+    {{ with .Site.Params.principles }}<p class="principles">{{ . | safeHTML }}</p>{{ end }}
+    </div></main>
+
+  <footer><div class="wrap"><span>{{ if not (partial "mantra-on.html" $) }}BSD-3-Clause · {{ end }}<a href="https://github.com/{{ .Site.Title }}">github.com/{{ .Site.Title }}</a>{{ with .Site.Params.footer_note }} · {{ . | safeHTML }}{{ end }}</span></div></footer>
+</body>
+</html>

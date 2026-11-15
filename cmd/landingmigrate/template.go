@@ -401,6 +401,73 @@ func ctaKind(c cta) string {
 	return "link"
 }
 
+var (
+	siteTitleExpr = regexp.MustCompile(`\{\{\s*\$?\.Site\.Title\s*\}\}`)
+	siteParamExpr = regexp.MustCompile(`\{\{\s*\$?\.Site\.Params\.(\w+)\s*\}\}`)
+	labelParamRe  = regexp.MustCompile(`^(\w+)_label$`)
+)
+
+// tomlString is the string value of a top-level or [params] key of a hugo.toml.
+func tomlString(conf, key string) (string, bool) {
+	m := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*"((?:[^"\\]|\\.)*)"`).FindStringSubmatch(conf)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// resolveCTAs writes a button's expressions as the literal values hugo.toml
+// holds, when the expression only READS one: `{{ .Site.Title }}` (the title),
+// `{{ $.Site.Params.x }}` (a param), and the bare `{{ . }}` of a href whose label
+// is `{{ $.Site.Params.NAME_label }}`, which is the param NAME_url (the layout of
+// go-attest, go-keyring, go-mswin, go-scss, go-versions and nano-container-linux:
+// the `with` that gave `.` its meaning was lost in an earlier migration, and the
+// built page links to the runner's content file instead). A value hugo.toml does
+// not hold leaves the expression, and the caller refuses.
+func resolveCTAs(ctas []cta, conf string) []cta {
+	out := make([]cta, 0, len(ctas))
+	for _, c := range ctas {
+		href, inner := c.Href, c.Inner
+		// a button whose label is a param hugo.toml does not set renders with no
+		// words (go-attest: secondary_label is not set), and its href `{{ . }}`
+		// with the path of the runner's content file: it is dropped
+		if p := labelParamName(inner); p != "" {
+			if _, ok := tomlString(conf, p); !ok {
+				continue
+			}
+		}
+		if strings.TrimSpace(href) == "{{ . }}" {
+			if m := labelParamRe.FindStringSubmatch(labelParamName(inner)); m != nil {
+				if v, ok := tomlString(conf, m[1]+"_url"); ok {
+					href = v
+				}
+			}
+		}
+		if t, ok := tomlString(conf, "title"); ok {
+			href = siteTitleExpr.ReplaceAllString(href, t)
+			inner = siteTitleExpr.ReplaceAllString(inner, t)
+		}
+		sub := func(s string) string {
+			return siteParamExpr.ReplaceAllStringFunc(s, func(m string) string {
+				if v, ok := tomlString(conf, siteParamExpr.FindStringSubmatch(m)[1]); ok {
+					return v
+				}
+				return m
+			})
+		}
+		out = append(out, cta{Href: sub(href), Inner: sub(inner)})
+	}
+	return out
+}
+
+// labelParamName is the param a button's label reads, "" when it reads none.
+func labelParamName(inner string) string {
+	if m := siteParamExpr.FindStringSubmatch(inner); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
 // ctaLabel is a button's words without its icon partials and tags; empty when
 // the words are a Hugo expression.
 func ctaLabel(c cta) string {

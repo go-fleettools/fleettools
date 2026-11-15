@@ -207,9 +207,9 @@ func TestMigrateRefusesAButtonBuiltFromAnExpression(t *testing.T) {
 	d := landingDir(t)
 	idx := filepath.Join(d, "layouts/index.html")
 	src := strings.Replace(readFile(t, idx), `</div>
-    <div class="badges">`, `{{ with .Site.Params.secondary_url }}<a class="btn ghost" href="{{ . }}">{{ $.Site.Params.secondary_label }}</a>{{ end }}</div>
+    <div class="badges">`, `{{ with .Page.Params.docs }}<a class="btn ghost" href="{{ . }}">{{ $.Page.Title }}</a>{{ end }}</div>
     <div class="badges">`, 1)
-	if !strings.Contains(src, "secondary_url") {
+	if !strings.Contains(src, "Page.Params.docs") {
 		t.Fatal("the fixture did not take the expression button")
 	}
 	if err := os.WriteFile(idx, []byte(src), 0o644); err != nil {

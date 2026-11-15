@@ -101,6 +101,7 @@ func upgrade(dir, kit string, goarch []string) ([]string, error) {
 		if len(ctas) == 0 {
 			return nil, errors.New("a .cta row with no button this tool can read")
 		}
+		ctas = resolveCTAs(ctas, conf)
 		for _, c := range ctas {
 			if strings.Contains(c.Href, "{{") || ctaLabel(c) == "" {
 				return nil, fmt.Errorf("the button %q is built from a Hugo expression, which [[params.cta]] cannot hold", clip(c.Href+" "+c.Inner))

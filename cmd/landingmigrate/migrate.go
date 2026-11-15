@@ -57,11 +57,17 @@ type report struct {
 	Written   []string   `json:"written"`
 	Workflows []string   `json:"workflows"`
 	Data      []string   `json:"data,omitempty"`
+	Notes     []string   `json:"notes,omitempty"`
 }
 
 // copiedPartials are the kit's own partials, which a landing must not keep a
 // copy of: a file of the same name overrides the module's, silently.
 var copiedPartials = []string{"styles.html", "theme-toggle.html", "fork-ribbon.html", "icons/book.html", "icons/github.html", "icons/mark-github.html", "hero-carousel.html", "loading-carousel.html", "mantra-on.html"}
+
+// followLogo (migrate --follow-logo): an external-stylesheet landing whose
+// brand.css disagrees with its logo is migrated onto the logo's palette instead
+// of refused.
+var followLogo bool
 
 // migrate moves the landing checked out at dir onto the kit at version kit.
 func migrate(dir, org, kit string, data []string) (report, error) {
@@ -113,6 +119,8 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 	// a button whose address or words are a Hugo expression cannot become a
 	// [[params.cta]] entry (nano-container-linux: href="{{ . }}" inside a
 	// `with`, its label a param): a person decides how it is rendered
+	earlyConf, _ := read("hugo.toml")
+	l.CTAs = resolveCTAs(l.CTAs, earlyConf)
 	for _, c := range l.CTAs {
 		if strings.Contains(c.Href, "{{") || ctaLabel(c) == "" {
 			return r, fmt.Errorf("not migrated, a person should look: the button %q is built from a Hugo expression, which [[params.cta]] cannot hold", clip(c.Href+" "+c.Inner))
@@ -153,7 +161,13 @@ func migrate(dir, org, kit string, data []string) (report, error) {
 		}
 		if brandCSS != "" {
 			if err := checkBrand(string(brand), brandCSS); err != nil {
-				return r, fmt.Errorf("not migrated: %v", err)
+				if !followLogo {
+					return r, fmt.Errorf("not migrated: %v", err)
+				}
+				// --follow-logo: the page takes the logo's palette; what it
+				// painted before (brand.css) goes, and the report says so
+				from, to := stylesheetBrand(brandCSS)
+				r.Notes = append(r.Notes, fmt.Sprintf("the page's own colours (--from %s, --to %s) are replaced by the palette derived from the logo", from, to))
 			}
 		}
 		conf = strings.TrimRight(conf, "\n") + "\n\n" + strings.TrimRight(string(brand), "\n") + "\n"

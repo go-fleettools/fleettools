@@ -1,0 +1,6 @@
+Real landings, verbatim (layouts/index.html, hugo.toml, go.mod as go.mod.txt), 2026-11-15:
+- testdata/cta-attest: go-attest.github.io at 53c5fd359345f624b9e3435dc511aa94977d4b27. Its second
+  hero button reads `href="{{ . }}"` and the label param secondary_label, which hugo.toml does not
+  set: the published page links to the runner's content file path. It is dropped.
+- testdata/cta-keyring: go-keyring.github.io (see its commit in the sweep log). hugo.toml sets
+  secondary_url and secondary_label: the button resolves to the literal values.
