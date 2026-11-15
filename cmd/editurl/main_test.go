@@ -116,6 +116,29 @@ func TestABaseThatIsNotAGitHubEditURLIsNotJudgedByPath(t *testing.T) {
 	}
 }
 
+// TestABaseThatEscapesTheRepositoryIsRefused is the witness for a path
+// traversal this tool had on the day it landed.
+//
+// ⛔ THE BASE COMES FROM A REPOSITORY'S OWN hugo.yaml, which is untrusted
+// input: this command walks ~1300 checkouts, any one of which can write
+// anything there. `path.Join` CLEANS `..` segments rather than refusing them,
+// so a base ending `content/../../../../../..` made InRepo escape the tree and
+// Inspect then stat-ed a path outside the checkout. Existence only, never a
+// read — but an existence oracle over the whole file system is not something a
+// documentation checker gets to have.
+func TestABaseThatEscapesTheRepositoryIsRefused(t *testing.T) {
+	for _, base := range []string{
+		"https://github.com/go-desktop/docs/edit/main/content/../../../../../../etc",
+		"https://github.com/go-desktop/docs/edit/main/..",
+		"https://github.com/go-desktop/docs/edit/main/content/..%2F..%2F..",
+	} {
+		l := Resolve(base, "passwd", "go-desktop", "docs", "main")
+		if l.Reason == ReasonNone && (strings.HasPrefix(l.InRepo, "../") || l.InRepo == ".." || strings.HasPrefix(l.InRepo, "/")) {
+			t.Errorf("%s\n  InRepo = %q escapes the repository and was NOT refused", base, l.InRepo)
+		}
+	}
+}
+
 // writeFile writes one file under dir, creating parents.
 func writeFile(t *testing.T, dir, rel, body string) string {
 	t.Helper()
