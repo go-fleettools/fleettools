@@ -111,6 +111,9 @@ func repeats(body string) (string, []fragment) {
 	note := func(where, h string, hidden bool) {
 		frags = append(frags, fragment{Where: where, HTML: h, Text: plain(h), Hidden: hidden})
 	}
+	// the architectures a card lists go first: the sentence pass below then sees
+	// them already wrapped, and a strip wrap next to them splits cleanly
+	body = hideArchCards(body, note)
 	// pills and the hero's trust line: one element is one fragment
 	body = eachElement(body, `<span class="pill"`, "span", func(whole string) string {
 		if !mention.MatchString(plain(whole)) {
@@ -145,6 +148,86 @@ func repeats(body string) (string, []fragment) {
 	// fails a card that repeats it). A card that is about something more is kept.
 	body = hideCards(body, note)
 	return body, frags
+}
+
+// goarchOff is the condition under which the strip's architectures line is
+// NOT shown: what a card says about the tested architectures shows only then.
+const goarchOff = `{{ if not (and $.Site.Params.mantra $.Site.Params.mantra.goarch) }}`
+
+func hideGoarch(s string) string { return goarchOff + s + end }
+
+var archWords = []string{"amd64", "arm64", "riscv64", "loong64", "ppc64le", "s390x", "386", "arm"}
+
+// namesArches: a text naming at least two architectures, as whole words (the
+// kit's `check` rule for the strip's "Tested on" line).
+func namesArches(t string) bool {
+	n := 0
+	for _, a := range archWords {
+		if regexp.MustCompile(`(?i)(^|[^a-z0-9])` + a + `($|[^a-z0-9])`).MatchString(t) {
+			n++
+		}
+	}
+	return n >= 2
+}
+
+// hideArchCards: a static feature card that names the tested architectures
+// says the strip's goarch line again (`landingkit check` fails it). Only the
+// sentences that list them go, under the goarch condition, so the rest of what
+// the card says stays. A card whose blurb is data (a Hugo action in the markup,
+// the text living in hugo.toml) cannot be read at this point and is left, for a
+// person; so is a hero sub-text.
+func hideArchCards(body string, note func(string, string, bool)) string {
+	var out strings.Builder
+	i := 0
+	for {
+		j := indexOpen(body, `<div class="card"`, i)
+		if j < 0 {
+			out.WriteString(body[i:])
+			return out.String()
+		}
+		k := closeOf(body, j, "div")
+		if k < 0 {
+			out.WriteString(body[i:])
+			return out.String()
+		}
+		out.WriteString(body[i:j])
+		whole := body[j:k]
+		switch {
+		case !namesArches(plain(whole)) || strings.Contains(whole, goarchOff) || strings.HasSuffix(out.String(), ifOff) || strings.HasSuffix(out.String(), goarchOff):
+			out.WriteString(whole)
+		default:
+			out.WriteString(eachElement(whole, "<p", "p", func(p string) string {
+				return archSentences(p, note)
+			}))
+		}
+		i = k
+	}
+}
+
+// archSentences hides, under the goarch condition, the sentences of a card's
+// paragraph that name at least two architectures.
+func archSentences(p string, note func(string, string, bool)) string {
+	gt := strings.Index(p, ">")
+	inner := p[gt+1 : len(p)-len("</p>")]
+	var b strings.Builder
+	any := false
+	for _, s := range splitSentences(inner) {
+		// an action in the sentence is a wrap done already (the strip's, above)
+		// or a value this cannot read: only a sentence of plain text is judged
+		if namesArches(plain(s)) && !strings.Contains(s, "{{") {
+			any = true
+			lead := s[:len(s)-len(strings.TrimLeft(s, " \t\n"))]
+			t := strings.TrimLeft(s, " \t\n")
+			note("arch sentence", t, true)
+			b.WriteString(lead + hideGoarch(t))
+			continue
+		}
+		b.WriteString(s)
+	}
+	if !any {
+		return p
+	}
+	return p[:gt+1] + b.String() + "</p>"
 }
 
 // hideCards wraps each feature card whose heading is the strip's own subject.
