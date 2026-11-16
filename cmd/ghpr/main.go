@@ -37,6 +37,7 @@ import (
 	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/go-fleettools/fleettools/internal/ghtoken"
 	"github.com/go-fleettools/fleettools/internal/paritytext"
+	"github.com/go-fleettools/fleettools/internal/privgate"
 	"github.com/spf13/cobra"
 )
 
@@ -50,6 +51,7 @@ const (
 
 const longHelp = `Pull-request writes, after showing the pull request.
 
+  ghpr <owner/repo> create --head BRANCH --title T --body-file F [--base-branch B] [--draft]
   ghpr <owner/repo> <n> edit [--title T] [--body-file F]
   ghpr <owner/repo> <n> close | reopen | ready | update-branch
   ghpr <owner/repo> <n> review --approve|--comment|--request-changes [--body-file F]
@@ -60,6 +62,13 @@ write is the state the API reports, not the one asked for. The token is read
 only from a file (default ~/.github-token, owner-only) and sent only in the
 Authorization header. Prose comes from a FILE; the title is one line, at most
 256 characters. Commenting is ghissue, merging is ghmerge.
+
+create shows the repository and the head branch first, and refuses a head with
+no commits ahead of the base, a head that already has an open pull request, a
+body whose issue references lack Closes/Refs (the merge gate's own parser, which
+would refuse the merge later) and a body or title naming a private file system.
+It prints the number and URL the API reports. --base-branch is the target branch
+because --base is the API URL; --dry-run sends only reads.
 
 update-branch pins expected_head_sha to the head just read, so it cannot update
 a head that moved. ready is a GraphQL mutation (REST has none), sent with the
@@ -88,16 +97,21 @@ type opts struct {
 	approve, comment, reqChanges   bool
 	titleSet                       bool
 	parityWaiver                   string
+	privateWaiver                  string
+	// create: the branch to merge, the branch to merge into ("" = the
+	// repository's default) and whether to open it as a draft.
+	head, baseBranch string
+	draft            bool
 }
 
 // RootCmd builds the command; tests drive it with SetArgs/SetOut/SetErr.
 func RootCmd() *cobra.Command {
 	var o opts
 	cmd := &cobra.Command{
-		Use:          "ghpr <owner/repo> <number> edit|close|reopen|ready|update-branch|review",
-		Short:        "Edit, close, reopen, ready, update or review a GitHub pull request",
+		Use:          "ghpr <owner/repo> create | ghpr <owner/repo> <number> edit|close|reopen|ready|update-branch|review",
+		Short:        "Create, edit, close, reopen, ready, update or review a GitHub pull request",
 		Long:         longHelp,
-		Args:         cobra.ExactArgs(3),
+		Args:         argsOK,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o.titleSet = cmd.Flags().Changed("title")
@@ -110,6 +124,10 @@ func RootCmd() *cobra.Command {
 	f.StringVar(&o.bodyFile, "body-file", "", "file holding the body (edit, review)")
 	f.StringVar(&o.title, "title", "", "new title, one line (edit)")
 	f.StringVar(&o.parityWaiver, "parity-waiver", "", "why this body may defer a performance change because it breaks bit identity (STAMPED into the body; no waiver covers a title)")
+	f.StringVar(&o.privateWaiver, "allow-private-path", "", "why this body must name a private file system (STAMPED into the body; no waiver covers a title)")
+	f.StringVar(&o.head, "head", "", "create: the branch to merge (owner:branch for a fork)")
+	f.StringVar(&o.baseBranch, "base-branch", "", "create: the branch to merge into (default: the repository's default branch); --base is the API URL")
+	f.BoolVar(&o.draft, "draft", false, "create: open as a draft")
 	f.BoolVar(&o.dryRun, "dry-run", false, "show the pull request and what would be sent; send nothing")
 	f.BoolVar(&o.approve, "approve", false, "review: approve")
 	f.BoolVar(&o.comment, "comment", false, "review: comment only")
@@ -139,11 +157,25 @@ func (p pull) line(owner, repo string) string {
 		map[bool]string{true: ", draft", false: ""}[p.Draft], p.Title, p.Head.Ref, p.Base.Ref, p.HTMLURL)
 }
 
+// argsOK: `<owner/repo> create`, or `<owner/repo> <number> <verb>`.
+func argsOK(_ *cobra.Command, args []string) error {
+	if len(args) == 2 && args[1] == "create" || len(args) == 3 {
+		return nil
+	}
+	return errors.New("want `<owner/repo> create` or `<owner/repo> <number> <verb>`")
+}
+
 func run(cmd *cobra.Command, args []string, o opts) error {
 	out := cmd.OutOrStdout()
 	owner, repo, err := splitRepo(args[0])
 	if err != nil {
 		return err
+	}
+	if len(args) == 2 {
+		return runCreate(cmd, owner, repo, o)
+	}
+	if o.head != "" || o.baseBranch != "" || o.draft {
+		return errors.New("--head, --base-branch and --draft apply to create")
 	}
 	num, err := strconv.Atoi(args[1])
 	if err != nil || num <= 0 {
@@ -175,7 +207,7 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 			return errors.New("edit: nothing to change; give --title and/or --body-file")
 		}
 		if o.titleSet {
-			if title, err = checkTitle(o.title); err != nil {
+			if title, err = checkTitle(o.title, o.privateWaiver); err != nil {
 				return err
 			}
 		}
@@ -201,7 +233,7 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		}
 	}
 	if o.bodyFile != "" {
-		if body, err = readBody(o.bodyFile, o.parityWaiver); err != nil {
+		if body, err = readBody(o.bodyFile, o.parityWaiver, o.privateWaiver); err != nil {
 			return err
 		}
 	}
@@ -402,7 +434,7 @@ func markReady(c *http.Client, base, tok, nodeID string) error {
 // graphqlURL: api.github.com serves GraphQL at /graphql; a test base is used as is.
 func graphqlURL(base string) string { return strings.TrimRight(base, "/") + "/graphql" }
 
-func checkTitle(t string) (string, error) {
+func checkTitle(t, privateWaiver string) (string, error) {
 	t = strings.TrimSpace(t)
 	switch {
 	case t == "":
@@ -413,6 +445,9 @@ func checkTitle(t string) (string, error) {
 		return "", fmt.Errorf("--title: over %d characters", maxTitle)
 	}
 	// No waiver covers a title: it cannot carry the reason.
+	if err := privgate.Title(t, privateWaiver); err != nil {
+		return "", err
+	}
 	if err := paritytext.GateTitle(t, "--parity-waiver"); err != nil {
 		return "", err
 	}
@@ -446,7 +481,7 @@ func splitRepo(s string) (owner, repo string, err error) {
 	return owner, repo, nil
 }
 
-func readBody(path, parityWaiver string) (string, error) {
+func readBody(path, parityWaiver, privateWaiver string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("body file: %w", err)
@@ -462,10 +497,17 @@ func readBody(path, parityWaiver string) (string, error) {
 	if strings.TrimSpace(string(b)) == "" {
 		return "", errors.New("body file: empty")
 	}
+	// The privacy door (internal/privgate), shared with ghissue: a body naming a
+	// person's own file system is refused unless a reason is given, and the
+	// reason is stamped into the published text.
+	text, err := privgate.Body(string(b), privateWaiver)
+	if err != nil {
+		return "", err
+	}
 	// The bit-parity gate (go-fft/fft#121): a body that defers a performance
 	// change because of bit identity is refused unless it cites a measured bound
 	// or carries a waiver, whose reason is STAMPED into the text.
-	return paritytext.Gate(string(b), parityWaiver, "--parity-waiver")
+	return paritytext.Gate(text, parityWaiver, "--parity-waiver")
 }
 
 // readToken is ghtoken.Read: the token from a file only its owner may read.

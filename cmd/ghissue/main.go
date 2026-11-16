@@ -43,6 +43,7 @@ import (
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/go-fleettools/fleettools/internal/ghtoken"
+	"github.com/go-fleettools/fleettools/internal/privgate"
 	"github.com/spf13/cobra"
 )
 
@@ -349,7 +350,7 @@ func checkTitle(t string, w waivers) (string, error) {
 	case len([]rune(t)) > maxTitle:
 		return "", fmt.Errorf("--title: over %d characters", maxTitle)
 	}
-	if err := gateTitle(t, w.private); err != nil {
+	if err := privgate.Title(t, w.private); err != nil {
 		return "", err
 	}
 	if err := gateParityTitle(t); err != nil {
@@ -559,7 +560,7 @@ func readBody(path string, w waivers) (string, error) {
 	if strings.TrimSpace(string(b)) == "" {
 		return "", errors.New("body file: empty")
 	}
-	s, err := gateBody(string(b), w.private)
+	s, err := privgate.Body(string(b), w.private)
 	if err != nil {
 		return "", err
 	}
