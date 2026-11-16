@@ -401,3 +401,28 @@ func TestEscapeRefKeepsSlashes(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// A compare reply carries commits and file patches after "ahead_by" and can pass
+// do()'s size limit; the count that came before the cut must still be read.
+func TestCreateReadsAheadByFromAReplyCutAtTheLimit(t *testing.T) {
+	s := newCreateServer(t)
+	s.compare = `{"status":"ahead","ahead_by":3,"commits":[{"x":"` + strings.Repeat("y", maxResponse) + `"}]}`
+	out, err := s.create(t, append(good(t), "--dry-run")...)
+	if err != nil || !strings.Contains(out, "3 commit(s) ahead") {
+		t.Fatalf("err %v\n%s", err, out)
+	}
+	if !strings.Contains(s.queries[1], "per_page=1") || !strings.Contains(s.queries[2], "base=main") {
+		t.Errorf("queries %v", s.queries)
+	}
+}
+
+func TestTopLevelInt(t *testing.T) {
+	for in, want := range map[string]bool{
+		`{"a":1,"ahead_by":5}`: true, `{"ahead_by":"x"}`: false, `{"a":{"b":1}}`: false,
+		`[1]`: false, ``: false, `{"a":`: false, `{"ahead_by":`: false, `{1:2}`: false,
+	} {
+		if _, ok := topLevelInt([]byte(in), "ahead_by"); ok != want {
+			t.Errorf("%q: ok %v", in, ok)
+		}
+	}
+}

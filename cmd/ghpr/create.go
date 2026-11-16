@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,7 +102,7 @@ func runCreate(cmd *cobra.Command, owner, repo string, o opts) error {
 	}
 	fmt.Fprintf(out, "%d commit(s) ahead of %s\n", ahead, baseBranch)
 
-	open, err := openPullsOfHead(c, o.base, tok, owner, repo, o.head)
+	open, err := openPullsOfHead(c, o.base, tok, owner, repo, o.head, baseBranch)
 	if err != nil {
 		return err
 	}
@@ -173,25 +174,50 @@ func getRepo(c *http.Client, base, tok, owner, repo string) (repoInfo, error) {
 // commitsAhead is how many commits head has that base lacks. The comparison is
 // a read, so --dry-run does it too.
 func commitsAhead(c *http.Client, base, tok, owner, repo, baseBranch, head string) (int, error) {
-	u := reposURL(base, owner, repo) + "/compare/" + escapeRef(baseBranch) + "..." + escapeRef(head)
+	u := reposURL(base, owner, repo) + "/compare/" + escapeRef(baseBranch) + "..." + escapeRef(head) + "?per_page=1"
 	b, err := do(c, http.MethodGet, u, tok, nil, http.StatusOK)
 	if err != nil {
 		return 0, err
 	}
-	var got struct {
-		AheadBy *int `json:"ahead_by"`
+	if n, ok := topLevelInt(b, "ahead_by"); ok {
+		return n, nil
 	}
-	if err := json.Unmarshal(b, &got); err != nil || got.AheadBy == nil {
-		return 0, errors.New("compare: the reply did not say how many commits are ahead")
-	}
-	return *got.AheadBy, nil
+	return 0, errors.New("compare: the reply did not say how many commits are ahead")
 }
 
-func openPullsOfHead(c *http.Client, base, tok, owner, repo, head string) ([]pull, error) {
+// topLevelInt reads one top-level integer key from a JSON object, token by
+// token, so that a reply cut at do()'s size limit (a compare carries commits and
+// file patches after "ahead_by") still answers when the key came before the cut.
+func topLevelInt(b []byte, key string) (int, bool) {
+	d := json.NewDecoder(bytes.NewReader(b))
+	if t, err := d.Token(); err != nil || t != json.Delim('{') {
+		return 0, false
+	}
+	for d.More() {
+		k, err := d.Token()
+		if err != nil {
+			return 0, false
+		}
+		if k == key {
+			var n int
+			if err := d.Decode(&n); err != nil {
+				return 0, false
+			}
+			return n, true
+		}
+		var skip json.RawMessage
+		if err := d.Decode(&skip); err != nil {
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+func openPullsOfHead(c *http.Client, base, tok, owner, repo, head, baseBranch string) ([]pull, error) {
 	if !strings.Contains(head, ":") {
 		head = owner + ":" + head
 	}
-	u := reposURL(base, owner, repo) + "/pulls?state=open&head=" + url.QueryEscape(head)
+	u := reposURL(base, owner, repo) + "/pulls?state=open&head=" + url.QueryEscape(head) + "&base=" + url.QueryEscape(baseBranch)
 	b, err := do(c, http.MethodGet, u, tok, nil, http.StatusOK)
 	if err != nil {
 		return nil, err
