@@ -1,4 +1,7 @@
-package main
+// Package privgate is the door against publishing a person's own file system
+// in text sent to GitHub: ghissue and ghpr both pass every body and title
+// through it, so that they cannot diverge in what they consider a disclosure.
+package privgate
 
 import (
 	"fmt"
@@ -25,18 +28,18 @@ import (
 // body afterwards does not remove it, because the forge keeps the original
 // under "edited" for anyone who opens the history.
 
-// waiverFlag is the name of the flag that overrides the gate, quoted in its own
+// WaiverFlag is the name of the flag that overrides the gate, quoted in its own
 // refusal so that the reader does not have to look it up.
-const waiverFlag = "--allow-private-path"
+const WaiverFlag = "--allow-private-path"
 
-// gateBody refuses a body that names a person's own file system.
+// Body refuses a body that names a person's own file system.
 //
 // ⛔ The waiver takes a REASON and has no default. A boolean waiver is one
 // keystroke and gets passed by reflex; a reason has to be written, and writing
 // it is the moment to notice there is nothing to write. And it STAMPS: the
 // reason is appended to the published text, where the recipient reads it too, so
 // a waiver is a statement made in public and not a switch flicked in private.
-func gateBody(text, waiver string) (string, error) {
+func Body(text, waiver string) (string, error) {
 	found := scanOutgoing(text)
 	if len(found) == 0 {
 		return text, nil
@@ -47,7 +50,7 @@ func gateBody(text, waiver string) (string, error) {
 	return text + "\n\n" + stamp(waiver) + "\n", nil
 }
 
-// gateTitle refuses a title that names a person's own file system, and NO
+// Title refuses a title that names a person's own file system, and NO
 // waiver covers it.
 //
 // ⛔ The asymmetry is deliberate. A title is one line — it cannot carry the
@@ -55,14 +58,14 @@ func gateBody(text, waiver string) (string, error) {
 // it appears in every listing, every search result, every notification mail and
 // every cross-reference, none of which an edit reaches. So a disclosure in a
 // title is rewritten, not excused.
-func gateTitle(t, waiver string) error {
+func Title(t, waiver string) error {
 	found := scanOutgoing(t)
 	if len(found) == 0 {
 		return nil
 	}
 	if waiver != "" {
 		return fmt.Errorf("the title names a person's own file system, and %s does not cover a title: it cannot carry the waiver's reason, and it is republished in every listing, notification and cross-reference that an edit never reaches. Rewrite the title.\n  %s",
-			waiverFlag, found[0])
+			WaiverFlag, found[0])
 	}
 	return refusal("title", found)
 }
@@ -93,7 +96,7 @@ func refusal(what string, found []privpath.Finding) error {
 		}
 		fmt.Fprintf(&b, "  %s\n", f)
 	}
-	fmt.Fprintf(&b, "Fix it with `privscan --fix <file>`, look with `privscan --show <file>`, or, if the path IS the subject, pass %s \"<why>\" — the reason is appended to the published text.", waiverFlag)
+	fmt.Fprintf(&b, "Fix it with `privscan --fix <file>`, look with `privscan --show <file>`, or, if the path IS the subject, pass %s \"<why>\" — the reason is appended to the published text.", WaiverFlag)
 	return fmt.Errorf("%s", b.String())
 }
 

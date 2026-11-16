@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/go-fleettools/fleettools/internal/privgate"
 )
 
 const privateBody = "## The measurement\n\n" +
@@ -30,7 +32,7 @@ func TestGateRefusesABodyNamingAPrivateFileSystem(t *testing.T) {
 			t.Errorf("the refusal published %q: %s", secret, msg)
 		}
 	}
-	for _, want := range []string{"line 3", "privscan --fix", waiverFlag, "edited"} {
+	for _, want := range []string{"line 3", "privscan --fix", privgate.WaiverFlag, "edited"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("the refusal does not say %q: %s", want, msg)
 		}
@@ -125,13 +127,5 @@ func TestDryRunIsStillGated(t *testing.T) {
 	}
 	if strings.Contains(out, "alicia") {
 		t.Errorf("--dry-run printed the path before refusing:\n%s", out)
-	}
-}
-
-// The stamp is appended, not substituted, and reads as a sentence.
-func TestStampReads(t *testing.T) {
-	got := stamp("  because the path is the defect  ")
-	if !strings.HasPrefix(got, "⚠ ") || !strings.HasSuffix(got, "because the path is the defect") {
-		t.Errorf("stamp = %q", got)
 	}
 }
