@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 )
@@ -100,6 +101,7 @@ func RootCmd() *cobra.Command {
 }
 
 func main() {
+	fleet.WarnIfStale(os.Stderr)
 	cmd := RootCmd()
 	cmd.SetOut(os.Stdout)
 	cmd.SetErr(os.Stderr)
