@@ -3,13 +3,23 @@
 //	go test -json ./... > run.json && testtime run.json
 //	go test -json ./... | testtime
 //
-// The fleet had no way to ask this. testwhy attributes FAILURES, tinydur flags
-// sub-resolution durations, testscan finds packages CI never runs, failset
-// compares two logs by which tests failed — none reads elapsed times. Three
-// sessions wanted it on 2026-11-17 alone, each working around its absence:
-// go-tex/engine's ubuntu lane went from 1229 s to past its 1800 s bound and the
-// only way anyone could attribute it was to bisect whole suite runs on a machine
-// two orders of magnitude away from the one that grew.
+// ⚠ THE GAP IS PER-TEST, NOT TIMING ALTOGETHER, and the first version of this
+// comment got that wrong. cmd/testwhy already parses the elapsed time of every
+// PACKAGE and makes it load-bearing: "the time is a witness ... -min-seconds
+// refuses a package that finished faster than it plausibly could"
+// (cmd/testwhy/main.go:36-37, :430). What nobody had is the breakdown WITHIN a
+// package — which tests account for its clock.
+//
+// ⛔ And the check that produced the wrong sentence deserves naming: `fleetverbs
+// --match timing|elapsed|duration` returned 0 verbs over 112 packages, which
+// reads like absence and is not — --match searches NAMES and DOCS, so a tool
+// whose help says "the time is a witness" without the word "elapsed" in its verb
+// line is invisible to it. A scan that could not see reported zero.
+//
+// Three sessions wanted the per-test breakdown on 2026-11-17 alone, each working
+// around its absence: go-tex/engine's ubuntu lane went from 1229 s to past its
+// 1800 s bound and the only way anyone could attribute it was to bisect whole
+// suite runs on a machine two orders of magnitude away from the one that grew.
 package main
 
 import (
