@@ -1133,6 +1133,29 @@ func RootCmd() *cobra.Command {
 		"list the CITATION findings too, not only their count")
 	c.Flags().BoolVarP(&o.quiet, "quiet", "q", false,
 		"the per-tree counts and the totals only, no findings")
+	// ⛔⛔ A RENAME'S PROSE TAIL CANNOT BE SWEPT IN ONE SITTING, AND WITHOUT A
+	// RATCHET THE CHECK CANNOT BE TURNED ON AT ALL. Measured on go-zpkg/zpkb on
+	// 2026-11-17: 313 doc files, 1012 occurrences — 16 STALE, 17 CITATION and
+	// 979 UNSURE. The 979 are not noise; each needs a decision about whether
+	// THAT SENTENCE means our tree or pkgx's, which this command deliberately
+	// refuses to make for you. So the choice was: leave the gate off until a
+	// campaign ends, or state the number and refuse an increase.
+	//
+	// That is `zpkb lint --max-fragments`'s shape, and it is borrowed on
+	// purpose: MORE fails as a regression and FEWER FAILS TOO, because a ceiling
+	// nobody lowers stops describing the tree within a week and a regression
+	// then hides inside the slack.
+	//
+	// ⛔ IT TOLERATES UNSURE ONLY. A STALE, DEBT or DOUBLED finding still fails
+	// at the stated ceiling: those are addresses, unmigrated code and damage,
+	// none of which is a judgement about a sentence. A ratchet that swallowed
+	// them would turn the one flag that makes this gate usable into the flag
+	// that switches it off.
+	//
+	// -1 means "not given", and that stays the default: zero tolerance is the
+	// stricter reading and it is available by simply not passing this.
+	c.Flags().IntVar(&o.maxUnsure, "max-unsure", -1,
+		"the number of UNSURE findings this tree still has. More fails as a regression, FEWER fails as a ceiling to lower. STALE/DEBT/DOUBLED still fail")
 	return c
 }
 
@@ -1149,6 +1172,9 @@ type opts struct {
 	exts          []string
 	showCitations bool
 	quiet         bool
+	// maxUnsure is the ratchet, -1 when not given. See the flag's own comment:
+	// a stated ceiling that refuses BOTH directions.
+	maxUnsure int
 }
 
 func run(stdout, stderr io.Writer, o opts, dirs []string) int {
@@ -1204,6 +1230,42 @@ func run(stdout, stderr io.Writer, o opts, dirs []string) int {
 		fmt.Fprintf(stderr, "staleref: --allow matched no file in any tree: %s\n", strings.Join(u, " "))
 		fmt.Fprintln(stderr, "staleref: an exemption that names nothing exempts nothing — delete it, or correct the path it was written for")
 		return 2
+	}
+	// ⛔ THE RATCHET IS READ AFTER THE REPORT, so the findings are on screen
+	// whichever way it goes: a ceiling that printed only its own verdict would
+	// hide the very list somebody has to work through to lower it.
+	if o.maxUnsure >= 0 {
+		var nUnsure, nHard int
+		for _, found := range byRoot {
+			for _, f := range found {
+				switch f.Verdict {
+				case unsure:
+					nUnsure++
+				case stale, debt, doubled:
+					nHard++
+				}
+			}
+		}
+		switch {
+		case nUnsure > o.maxUnsure:
+			fmt.Fprintf(stderr, "staleref: %d UNSURE finding(s), and --max-unsure says %d: that is a REGRESSION — %d sentence(s) gained the old name since the ceiling was written\n",
+				nUnsure, o.maxUnsure, nUnsure-o.maxUnsure)
+			return 1
+		case nUnsure < o.maxUnsure:
+			// ⛔ FEWER IS ALSO A FAILURE, and this is the half that makes it a
+			// ratchet rather than a budget. Nothing is wrong with the tree —
+			// the number in the lane is what needs the edit, and the message
+			// says which number to write.
+			fmt.Fprintf(stderr, "staleref: %d UNSURE finding(s), and --max-unsure says %d: lower it to %d. A ceiling nobody lowers stops describing the tree, and then a regression hides in the slack\n",
+				nUnsure, o.maxUnsure, nUnsure)
+			return 1
+		}
+		// At the stated ceiling the UNSURE findings are tolerated — that is what
+		// stating a number means — and nothing else is.
+		if nHard == 0 {
+			return 0
+		}
+		return 1
 	}
 	if clean {
 		return 0
