@@ -268,3 +268,35 @@ func TestSeveralDirectoriesAreReadAndCountedTogether(t *testing.T) {
 		t.Errorf("two repositories did not add up:\n%s", out)
 	}
 }
+
+// ⛔ A ZERO THAT DOES NOT SAY WHAT IT DID NOT SEARCH IS READ AS AN ABSENCE.
+// --match reads names and documentation; the source is a wider surface that
+// only --text covers. Measured 2026-11-17 on this very repository: `--match
+// elapsed` answered 0, and --text then found cmd/testwhy parsing every
+// package's elapsed time. The fixture's `psd` is the same shape — it lives in
+// a table and in no exported name.
+//
+// The four rows are the boundary: the disclosure must appear ONLY when --match
+// found nothing AND the wider surface went unsearched. A test for the firing
+// row alone would pass just as well on a line printed unconditionally.
+func TestAZeroFromMatchSaysWhatItDidNotSearch(t *testing.T) {
+	const disclosure = "The source itself was NOT searched"
+	dir := tree(t)
+	for _, c := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"nothing named for it, and the source unsearched", []string{"--match", "psd", dir}, true},
+		{"control: --text DID search the wider surface", []string{"--match", "psd", "--text", dir}, false},
+		{"control: something WAS found by name", []string{"--match", "ArchiveToPDF", dir}, false},
+		{"control: no --match at all, so nothing was narrowed", []string{dir}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, out, _ := drive(t, c.args...)
+			if got := strings.Contains(out, disclosure); got != c.want {
+				t.Errorf("disclosure present = %v, want %v:\n%s", got, c.want, out)
+			}
+		})
+	}
+}
