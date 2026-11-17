@@ -137,6 +137,23 @@ func report(out, errOut io.Writer, o options, args []string) int {
 		for _, s := range t.skipped {
 			fmt.Fprintf(out, "  not read: %s\n", s)
 		}
+		// ⛔ A ZERO MUST SAY WHAT IT DID NOT SEARCH. --match reads NAMES and
+		// DOCUMENTATION, which is the strong question ("does anything here already
+		// do X?"). Printed alone, its zero reads as "nothing here does X" — and
+		// that is how it was read on 2026-11-17: `--match elapsed` over this
+		// repository answered 0, and `--text` then found cmd/testwhy parsing every
+		// package's elapsed time and using it as a witness. A positive control
+		// (`--match ledger`, a word certainly in cmd/recur) also answered 0, which
+		// is what exposed the gap rather than confirming the absence.
+		//
+		// The help explains the two questions. The OUTPUT did not, and the output
+		// is what is read at the moment the answer is believed.
+		if o.match != "" && !o.text && t.symbols == 0 && t.verbs == 0 && t.packages > 0 {
+			fmt.Fprintf(out, "  ⛔ 0 of %d package(s) name or document %q, which is the STRONG question.\n",
+				t.packages, o.match)
+			fmt.Fprintln(out, "     The source itself was NOT searched: --text asks that weaker question,")
+			fmt.Fprintln(out, "     and a capability reached through a table has no symbol named for it.")
+		}
 	}
 	if t.packages == 0 {
 		fmt.Fprintln(errOut, "fleetverbs: nothing was read")
