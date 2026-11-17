@@ -87,7 +87,7 @@ func RootCmd() *cobra.Command {
 		},
 	}
 	f := install.Flags()
-	f.StringVar(&c.host, "host", "127.0.0.1", "loopback address of the port-forwarded VM (127.0.0.0/8, ::1 or localhost only)")
+	f.StringVar(&c.host, "host", "localhost", "loopback name or address of the port-forwarded VM (localhost, 127.0.0.0/8 or ::1 only); the name must be the one known_hosts has")
 	f.IntVar(&c.port, "ssh-port", 0, "ssh port of the VM on the loopback address")
 	f.StringVar(&c.admin, "admin", "", "administrator account used to log in")
 	f.StringVar(&c.user, "user", "", "non-administrator local account that receives the key")
@@ -180,31 +180,51 @@ func (c config) inspect() step {
 		`$u=Get-LocalUser -Name '` + c.user + `'; 'USER|'+$u.Name; ` +
 		`Get-LocalGroupMember -Group 'Administrators' | ForEach-Object { 'ADMIN|'+$_.Name }; ` +
 		`'PROFILE|'+(Test-Path 'C:\Users\` + c.user + `'); ` +
-		`if (Test-Path '` + f + `') { Get-Content '` + f + `' | ForEach-Object { 'KEY|'+$_ } }`}
+		// An earlier locked-down state leaves the administrator without
+		// access: report it instead of failing, the write step recovers.
+		`try { if (Test-Path '` + f + `') { Get-Content '` + f + `' -ErrorAction Stop | ForEach-Object { 'KEY|'+$_ } } } catch { 'KEYS|unreadable' }`}
 }
 
+// write is the first of two steps and never removes inheritance: removing it
+// from a directory that has no explicit entry yet locks the administrator out
+// (measured 2026-11-17: icacls /reset on the file then failed with Access is
+// denied). It recovers an earlier lock-out, appends the key once, grants the
+// user and SYSTEM EXPLICIT entries and the ownership while the administrator
+// still has access through inheritance, and prints what it set so that Go can
+// check it before lock() is allowed to run.
 func (c config) write(line string) step {
 	d, f := c.dir(), c.dir()+`\authorized_keys`
-	return step{what: "append the key to " + f + " and set owner " + c.user + ", ACL " + c.user + ":F SYSTEM:F, inheritance removed",
+	return step{what: "recover access if an earlier run locked the administrator out, append the key once to " + f + ", grant " + c.user + ":F and SYSTEM:F explicitly, set owner " + c.user + ", and print the result (inheritance is NOT removed yet)",
 		stdin: []byte(line + "\n"),
 		script: `$ErrorActionPreference='Stop'; ` +
 			`function I { icacls @args | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls failed: $args" } }; ` +
 			`$k=[Console]::In.ReadToEnd().Trim(); $d='` + d + `'; $f='` + f + `'; ` +
+			`$denied=$false; try { if (Test-Path -LiteralPath $d) { Get-ChildItem -Force -LiteralPath $d -ErrorAction Stop | Out-Null; ` +
+			`if (Test-Path -LiteralPath $f) { Get-Content -Raw -LiteralPath $f -ErrorAction Stop | Out-Null } } } catch { $denied=$true }; ` +
+			`if ($denied) { 'RECOVER|the administrator had no access to '+$d+'; taking ownership back and resetting its permissions'; ` +
+			`takeown /f $d /r /d y | Out-Null; if ($LASTEXITCODE -ne 0) { throw 'takeown failed' }; I $d /reset /T }; ` +
 			`New-Item -ItemType Directory -Force -Path $d | Out-Null; ` +
-			`if (-not (Test-Path $f)) { New-Item -ItemType File -Path $f | Out-Null }; ` +
-			`$raw=Get-Content -Raw $f; if ($raw -and -not $raw.EndsWith("` + "`n" + `")) { Add-Content -Path $f -Value '' -Encoding ascii }; ` +
-			`Add-Content -Path $f -Value $k -Encoding ascii; ` +
-			`foreach ($p in $d,$f) { I $p /reset; I $p /setowner '` + c.user + `'; I $p /inheritance:r }; ` +
-			`I $d /grant:r '` + c.user + `:(OI)(CI)F' 'SYSTEM:(OI)(CI)F'; ` +
-			`I $f /grant:r '` + c.user + `:F' 'SYSTEM:F'`}
+			`$kb=($k -split '\s+')[1]; $seen=@{}; $out=@(); ` +
+			`if (Test-Path -LiteralPath $f) { foreach ($l in @(Get-Content -LiteralPath $f | Where-Object { $_.Trim() })) { ` +
+			`if ($l.TrimStart().StartsWith('#')) { $out+=$l; continue }; $b=($l -split '\s+')[1]; ` +
+			`if (-not $b) { $out+=$l; continue }; if (-not $seen[$b]) { $seen[$b]=$true; $out+=$l } } }; ` +
+			`if (-not $seen[$kb]) { $out+=$k }; Set-Content -LiteralPath $f -Value $out -Encoding ascii; ` +
+			`I $f /grant:r '` + c.user + `:F' 'SYSTEM:F'; I $f /setowner '` + c.user + `'; ` +
+			`I $d /grant:r '` + c.user + `:(OI)(CI)F' 'SYSTEM:(OI)(CI)F'; I $d /setowner '` + c.user + `'; ` +
+			`foreach ($p in $d,$f) { $a=Get-Acl $p; 'OWNER|'+$p+'|'+$a.Owner; ` +
+			`foreach ($r in $a.Access) { if (-not $r.IsInherited) { 'ACE|'+$p+'|'+$r.IdentityReference.Value+'|'+$r.FileSystemRights+'|'+$r.AccessControlType } } }; ` +
+			`Get-Content -LiteralPath $f | ForEach-Object { 'KEY|'+$_ }`}
 }
 
-func (c config) verify() step {
+// lock removes inheritance, file first and then the directory, once write's
+// result has been checked. Explicit entries exist by then, so nothing but the
+// inherited entries (the administrator's) goes away.
+func (c config) lock() step {
 	d, f := c.dir(), c.dir()+`\authorized_keys`
-	return step{what: "read-only: owner, ACL and keys of " + d, script: `$ErrorActionPreference='Stop'; $d='` + d + `'; $f='` + f + `'; ` +
-		`foreach ($p in $d,$f) { $a=Get-Acl $p; 'OWNER|'+$p+'|'+$a.Owner; 'PROT|'+$p+'|'+$a.AreAccessRulesProtected; ` +
-		`foreach ($r in $a.Access) { 'ACE|'+$p+'|'+$r.IdentityReference.Value+'|'+$r.FileSystemRights+'|'+$r.AccessControlType } }; ` +
-		`Get-Content $f | ForEach-Object { 'KEY|'+$_ }`}
+	return step{what: "remove inheritance from " + f + " and then " + d + " (the administrator loses access; only " + c.user + " and SYSTEM keep it)",
+		script: `$ErrorActionPreference='Stop'; ` +
+			`function I { icacls @args | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls failed: $args" } }; ` +
+			`I '` + f + `' /inheritance:r; 'LOCKED|` + f + `'; I '` + d + `' /inheritance:r; 'LOCKED|` + d + `'`}
 }
 
 // tag returns the values of the lines "TAG|value".
@@ -253,8 +273,9 @@ func (c config) checkInspect(out []byte) error {
 	return nil
 }
 
-// checkVerify confirms what the write did: owner, protected ACL, exactly the
-// user and SYSTEM with full control, and the key present.
+// checkVerify confirms what the write step printed, BEFORE inheritance is
+// removed: owner, exactly the user and SYSTEM as EXPLICIT entries with full
+// control, and the key present exactly once.
 func (c config) checkVerify(out []byte, key ssh.PublicKey) error {
 	paths := []string{c.dir(), c.dir() + `\authorized_keys`}
 	for _, p := range paths {
@@ -264,15 +285,6 @@ func (c config) checkVerify(out []byte, key ssh.PublicKey) error {
 				owners++
 				if account(o) != strings.ToLower(c.user) {
 					return fmt.Errorf("%s is owned by %q, not %q", p, o, c.user)
-				}
-			}
-		}
-		prot := 0
-		for _, v := range tag(out, "PROT") {
-			if path, o, ok := strings.Cut(strings.TrimSpace(v), "|"); ok && path == p {
-				prot++
-				if o != "True" {
-					return fmt.Errorf("%s still inherits permissions", p)
 				}
 			}
 		}
@@ -291,14 +303,24 @@ func (c config) checkVerify(out []byte, key ssh.PublicKey) error {
 			}
 			seen[who] = true
 		}
-		if owners != 1 || prot != 1 || len(seen) != 2 {
-			return fmt.Errorf("%s: ACL not as expected (owner lines %d, protection lines %d, principals %d)", p, owners, prot, len(seen))
+		if owners != 1 || len(seen) != 2 {
+			return fmt.Errorf("%s: ACL not as expected (owner lines %d, explicit principals %d)", p, owners, len(seen))
 		}
 	}
-	if !hasKey(out, key) {
-		return errors.New("the key is not in authorized_keys after the write")
+	if n := countKey(out, key); n != 1 {
+		return fmt.Errorf("the key appears %d times in authorized_keys after the write, want exactly 1", n)
 	}
 	return nil
+}
+
+func countKey(out []byte, key ssh.PublicKey) int {
+	n := 0
+	for _, l := range tag(out, "KEY") {
+		if k, _, _, _, err := ssh.ParseAuthorizedKey([]byte(l)); err == nil && bytes.Equal(k.Marshal(), key.Marshal()) {
+			n++
+		}
+	}
+	return n
 }
 
 func run(ctx context.Context, c config, r runner, out io.Writer) error {
@@ -329,7 +351,11 @@ func run(ctx context.Context, c config, r runner, out io.Writer) error {
 		if c.dryRun {
 			return nil, nil
 		}
-		return r(ctx, c.argv(s.script), s.stdin)
+		o, err := r(ctx, c.argv(s.script), s.stdin)
+		if err != nil && strings.Contains(err.Error(), "Host key verification failed") {
+			err = fmt.Errorf("%w\n  hint: known_hosts may know this VM only under another name; ssh checks the name you give it (--host %s), try --host localhost", err, c.host)
+		}
+		return o, err
 	}
 
 	got, err := do(c.inspect())
@@ -337,9 +363,9 @@ func run(ctx context.Context, c config, r runner, out io.Writer) error {
 		return err
 	}
 	if c.dryRun {
-		fmt.Fprintln(out, "dry run: nothing was sent; the write and the verification would follow if the checks pass")
+		fmt.Fprintln(out, "dry run: nothing was sent; the write, its verification and then the lock would follow if the checks pass")
 		fmt.Fprintf(out, "remote action: %s\n  %s\n", c.write(line).what, c.write(line).script)
-		fmt.Fprintf(out, "remote action: %s\n  %s\n", c.verify().what, c.verify().script)
+		fmt.Fprintf(out, "remote action: %s\n  %s\n", c.lock().what, c.lock().script)
 		return nil
 	}
 	if err := c.checkInspect(got); err != nil {
@@ -349,16 +375,25 @@ func run(ctx context.Context, c config, r runner, out io.Writer) error {
 		fmt.Fprintln(out, "the key is already in authorized_keys: nothing to do")
 		return nil
 	}
-	if _, err := do(c.write(line)); err != nil {
-		return err
-	}
-	got, err = do(c.verify())
+	got, err = do(c.write(line))
 	if err != nil {
 		return err
 	}
+	for _, m := range tag(got, "RECOVER") {
+		fmt.Fprintf(out, "recovered: %s\n", strings.TrimSpace(m))
+	}
+	// The lock is only allowed to run on a result that has been checked: once
+	// inheritance is gone the administrator can no longer read it back.
 	if err := c.checkVerify(got, key); err != nil {
+		return fmt.Errorf("%w (inheritance was NOT removed; nothing was locked)", err)
+	}
+	got, err = do(c.lock())
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "installed: %s\\authorized_keys now holds the key; owner %s, ACL %s and SYSTEM only\n", c.dir(), c.user, c.user)
+	if n := len(tag(got, "LOCKED")); n != 2 {
+		return fmt.Errorf("the lock step confirmed %d of 2 paths", n)
+	}
+	fmt.Fprintf(out, "installed: %s\\authorized_keys holds the key once; owner %s, explicit ACL %s and SYSTEM only, inheritance removed (the administrator can no longer read it, by design)\n", c.dir(), c.user, c.user)
 	return nil
 }

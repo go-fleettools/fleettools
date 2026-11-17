@@ -38,11 +38,12 @@ func keyFile(t *testing.T, content string) string {
 
 const inspectOK = "OS|Win32NT\r\nUSER|std\r\nADMIN|PC\\reader\r\nADMIN|PC\\Administrator\r\nPROFILE|True\r\n"
 
+const lockOut = "LOCKED|C:\\Users\\std\\.ssh\\authorized_keys\r\nLOCKED|C:\\Users\\std\\.ssh\r\n"
+
 func verifyOut(user string, line string) string {
 	var b strings.Builder
 	for _, p := range []string{`C:\Users\` + user + `\.ssh`, `C:\Users\` + user + `\.ssh\authorized_keys`} {
 		b.WriteString("OWNER|" + p + "|PC\\" + user + "\n")
-		b.WriteString("PROT|" + p + "|True\n")
 		b.WriteString("ACE|" + p + "|PC\\" + user + "|FullControl|Allow\n")
 		b.WriteString("ACE|" + p + "|NT AUTHORITY\\SYSTEM|FullControl|Allow\n")
 	}
@@ -75,7 +76,7 @@ func cfg(t *testing.T, content string) config {
 func TestInstall(t *testing.T) {
 	k, line := newKey(t)
 	c := cfg(t, line+"\n")
-	f := &fake{outs: []string{inspectOK, "", verifyOut("std", line)}}
+	f := &fake{outs: []string{inspectOK, verifyOut("std", line), lockOut}}
 	var out bytes.Buffer
 	if err := run(context.Background(), c, f.run, &out); err != nil {
 		t.Fatal(err)
@@ -96,7 +97,7 @@ func TestInstall(t *testing.T) {
 	if string(f.stdin[1]) != line+"\n" {
 		t.Errorf("stdin = %q", f.stdin[1])
 	}
-	for _, s := range []string{"target: reader@127.0.0.1 port 2222", "remote action: append the key", "installed:", ssh.FingerprintSHA256(k)} {
+	for _, s := range []string{"target: reader@127.0.0.1 port 2222", "remote action: recover access", "remote action: remove inheritance", "installed:", ssh.FingerprintSHA256(k)} {
 		if !strings.Contains(out.String(), s) {
 			t.Errorf("output lacks %q:\n%s", s, out.String())
 		}
@@ -211,7 +212,7 @@ func TestRunnerErrors(t *testing.T) {
 		t.Errorf("inspect err = %v", err)
 	}
 	for _, n := range []int{1, 2} {
-		outs := []string{inspectOK, "", verifyOut("std", line)}
+		outs := []string{inspectOK, verifyOut("std", line), lockOut}
 		calls := 0
 		r := func(_ context.Context, _ []string, _ []byte) ([]byte, error) {
 			calls++
@@ -237,14 +238,14 @@ func TestVerifyRefusals(t *testing.T) {
 	file := `C:\Users\std\.ssh\authorized_keys`
 	cases := []struct{ name, out, want string }{
 		{"owner", strings.Replace(good, "OWNER|"+file+"|PC\\std", "OWNER|"+file+"|BUILTIN\\Administrators", 1), "owned by"},
-		{"inherits", strings.Replace(good, "PROT|"+file+"|True", "PROT|"+file+"|False", 1), "still inherits"},
 		{"extra principal", good + "ACE|" + file + "|BUILTIN\\Administrators|FullControl|Allow\n", "grants access to"},
 		{"read only", strings.Replace(good, "PC\\std|FullControl", "PC\\std|ReadAndExecute", 1), "unexpected rule"},
 		{"deny", strings.Replace(good, "SYSTEM|FullControl|Allow", "SYSTEM|FullControl|Deny", 1), "unexpected rule"},
 		{"missing ace", strings.Replace(good, "ACE|"+file+"|NT AUTHORITY\\SYSTEM|FullControl|Allow\n", "", 1), "ACL not as expected"},
 		{"no owner line", strings.Replace(good, "OWNER|"+file+"|PC\\std\n", "", 1), "ACL not as expected"},
 		{"short ace", good + "ACE|x\n", ""},
-		{"no key", strings.Replace(good, "KEY|"+line+"\n", "KEY|garbage\n", 1), "not in authorized_keys"},
+		{"no key", strings.Replace(good, "KEY|"+line+"\n", "KEY|garbage\n", 1), "appears 0 times"},
+		{"duplicate key", good + "KEY|" + line + "\n", "appears 2 times"},
 	}
 	for _, tc := range cases {
 		err := c.checkVerify([]byte(tc.out), k)
@@ -259,9 +260,13 @@ func TestVerifyRefusals(t *testing.T) {
 		}
 	}
 	// A failed verification surfaces from run.
-	f := &fake{outs: []string{inspectOK, "", strings.Replace(good, "PROT|"+file+"|True", "PROT|"+file+"|False", 1)}}
-	if err := run(context.Background(), cfg(t, line), f.run, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "still inherits") {
+	// A failed check stops BEFORE the lock: the lock call must never be made.
+	f := &fake{outs: []string{inspectOK, good + "ACE|" + file + "|BUILTIN\\Administrators|FullControl|Allow\n"}}
+	if err := run(context.Background(), cfg(t, line), f.run, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "grants access to") || !strings.Contains(err.Error(), "NOT removed") {
 		t.Errorf("run err = %v", err)
+	}
+	if len(f.calls) != 2 {
+		t.Errorf("%d calls: the lock ran after a failed check", len(f.calls))
 	}
 }
 
@@ -269,7 +274,7 @@ func TestCobra(t *testing.T) {
 	_, line := newKey(t)
 	old := defaultRunner
 	defer func() { defaultRunner = old }()
-	f := &fake{outs: []string{inspectOK, "", verifyOut("std", line)}}
+	f := &fake{outs: []string{inspectOK, verifyOut("std", line), lockOut}}
 	defaultRunner = f.run
 	root := RootCmd()
 	var out, errb bytes.Buffer
