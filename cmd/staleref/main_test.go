@@ -266,12 +266,18 @@ func TestOnlyDocumentationIsRead(t *testing.T) {
 		"docs/page.html": "<p>go-pkgx/zbk</p>",
 	})
 	c := newClassifier("go-pkgx", "go-zpkg", nil, nil, nil, nil)
-	found, files, err := scanTree(root, c, newAllowList(nil), extSet(nil))
+	found, cov, err := scanTree(root, c, newAllowList(nil), extSet(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if files != 2 {
-		t.Errorf("%d doc file(s) read, want 2 (README.md and docs/page.html)", files)
+	if cov.read != 2 {
+		t.Errorf("%d doc file(s) read, want 2 (README.md and docs/page.html)", cov.read)
+	}
+	// ⛔ AND THE .go IT WALKED PAST IS COUNTED, not merely absent. A file
+	// skipped silently is the whole defect this census exists for: the run
+	// above reports "2 file(s)" and the tree holds a third nobody opened.
+	if cov.unread[".go"] != 1 {
+		t.Errorf("unread census = %v, want one .go walked past", cov.unread)
 	}
 	for _, f := range found {
 		if strings.HasPrefix(f.File, ".git") || strings.HasSuffix(f.File, ".go") {
@@ -290,7 +296,7 @@ func TestATreeWithNoDocumentationSaysSo(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, want 0", code)
 	}
-	if !strings.Contains(out.String(), "0 doc file(s)") {
+	if !strings.Contains(out.String(), "0 of 0 file(s) read") {
 		t.Errorf("the file count is not in the output:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "a tree that was not read reports the same") {
@@ -717,7 +723,7 @@ func TestTheWinningPairIsTheOneThatMatchesTheCase(t *testing.T) {
 func TestOnlyASurprisingExemptionMakesTheTreeUnclean(t *testing.T) {
 	report1 := func(f finding) string {
 		var b strings.Builder
-		report(&b, map[string][]finding{"zbk": {f}}, map[string]int{"zbk": 1}, false, true)
+		report(&b, map[string][]finding{"zbk": {f}}, map[string]coverage{"zbk": {read: 1}}, false, true)
 		return b.String()
 	}
 
@@ -893,7 +899,7 @@ func TestAnExemptedDoubledFindingIsStillCounted(t *testing.T) {
 		Text: "ZzpkgxBin",
 	}}}
 	var b strings.Builder
-	report(&b, byRoot, map[string]int{"zbk": 1}, false, true)
+	report(&b, byRoot, map[string]coverage{"zbk": {read: 1}}, false, true)
 	if !strings.Contains(b.String(), "exempted by --allow") {
 		t.Errorf("the exemption was silent:\n%s", b.String())
 	}
@@ -909,7 +915,7 @@ func TestADoubledFindingSurvivesQuietAndFails(t *testing.T) {
 		Kind: "zpkgx doubled", Text: "ZzpkgxBin", Suggest: "Zpkgx",
 	}}}
 	var b strings.Builder
-	clean := report(&b, byRoot, map[string]int{"zbk": 1}, false, true)
+	clean := report(&b, byRoot, map[string]coverage{"zbk": {read: 1}}, false, true)
 	if clean {
 		t.Error("a doubled finding reported clean")
 	}
@@ -1072,8 +1078,19 @@ func TestExtReadsTheSourcesTheDefaultCannot(t *testing.T) {
 	if code := run(&out, &errb, o, []string{root}); code != 0 {
 		t.Fatalf("exit %d with the default extensions, want 0:\n%s", code, out.String())
 	}
-	if !strings.Contains(out.String(), "1 doc file(s)") {
-		t.Errorf("the default set read something other than README.md:\n%s", out.String())
+	// ⛔⛔ AND THIS IS THE RUN THE CENSUS EXISTS FOR. Before it, the line above
+	// was the whole story: a clean exit 0 over a tree holding two files with
+	// the answer in them. The headline now carries the denominator and the two
+	// unread extensions are named, so "clean" cannot be read as "nothing here".
+	for _, want := range []string{
+		"1 of 3 file(s) read",
+		"2 file(s) NOT read",
+		".go 1",
+		".sh 1",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the default run does not admit what it skipped (%q):\n%s", want, out.String())
+		}
 	}
 
 	// Named, they are read and both are found.
@@ -1083,10 +1100,51 @@ func TestExtReadsTheSourcesTheDefaultCannot(t *testing.T) {
 	if code := run(&out, &errb, o, []string{root}); code != 1 {
 		t.Fatalf("exit %d with --ext, want 1:\n%s", code, out.String())
 	}
-	for _, want := range []string{"main.go", "run.sh", "3 doc file(s)"} {
+	for _, want := range []string{"main.go", "run.sh", "3 of 3 file(s) read"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("--ext did not reach %s:\n%s", want, out.String())
 		}
+	}
+	// ⛔ AND WITH EVERYTHING READ, THE WARNING IS SILENT. A census that fires on
+	// a complete run is a warning nobody reads, which is how the next person
+	// learns to skip the line that matters.
+	if strings.Contains(out.String(), "NOT read") {
+		t.Errorf("the census fired on a run that read every file:\n%s", out.String())
+	}
+}
+
+// ⛔⛔ THE CENSUS IS CAPPED, AND "NOT SHOWN" MUST NOT BECOME "NOT FOUND". A tree
+// of a thousand images would otherwise push the one extension that matters off
+// the end of the line — the defect `bakedpaths --census-limit 0` was added for,
+// in another tool, for the same reason. So the cap announces itself, the total
+// stays whole, and ties break on the NAME rather than on map order, or two runs
+// over one tree print two different lines.
+func TestUnreadCensusCapsItselfAndSaysSo(t *testing.T) {
+	unread := map[string]int{
+		".png": 900, ".hcl": 7, ".go": 7, ".sh": 3,
+		".c": 2, ".h": 2, ".rb": 1, ".pl": 1,
+	}
+	total, line := unreadCensus(unread, 3)
+	if want := 923; total != want {
+		t.Errorf("total = %d, want %d — the cap must not change the count", total, want)
+	}
+	// .hcl before .go on a TIE, because the name decides.
+	if want := ".png 900, .go 7, .hcl 7, … and 5 more kind(s)"; line != want {
+		t.Errorf("census =\n  %s\nwant\n  %s", line, want)
+	}
+	// ⛔ The control: the same data uncapped names every kind and says nothing
+	// about more. Without it, a cap that silently dropped the tail would pass
+	// the assertion above for the wrong reason.
+	if _, full := unreadCensus(unread, 99); strings.Contains(full, "more kind(s)") {
+		t.Errorf("an uncapped census announced a cap: %s", full)
+	}
+	// A tree where everything was read has no line at all.
+	if total, line := unreadCensus(map[string]int{}, 3); total != 0 || line != "" {
+		t.Errorf("an empty census rendered %q (total %d)", line, total)
+	}
+	// A file with no extension is named, not printed as an empty string.
+	if _, line := unreadCensus(map[string]int{"": 2}, 3); line != "(no extension) 2" {
+		t.Errorf("a file without an extension rendered as %q", line)
 	}
 }
 
