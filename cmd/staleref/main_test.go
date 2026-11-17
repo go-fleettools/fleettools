@@ -371,6 +371,58 @@ func TestTrimAroundStillShowsTheMatch(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE RATCHET REFUSES BOTH DIRECTIONS, which is what makes it a ratchet
+// rather than a budget. Measured on go-zpkg/zpkb: 979 UNSURE findings, each
+// needing a per-sentence decision — so the gate could not be switched on at
+// zero, and a ceiling that only refused INCREASES would stop describing the
+// tree within a week.
+func TestTheUnsureCeilingRefusesBothDirections(t *testing.T) {
+	// Two bare names in prose: two UNSURE, nothing else.
+	root := tree(t, map[string]string{
+		"a.md": "go-pkgx was the org\n",
+		"b.md": "another go-pkgx mention\n",
+	})
+	base := opts{old: "go-pkgx", new: "go-zpkg"}
+
+	for _, tc := range []struct {
+		name string
+		max  int
+		want int
+		says string
+	}{
+		{"at the ceiling", 2, 0, ""},
+		{"a regression", 1, 1, "REGRESSION"},
+		{"a stale ceiling", 3, 1, "lower it to 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := base
+			o.maxUnsure = tc.max
+			var out, errb bytes.Buffer
+			if code := run(&out, &errb, o, []string{root}); code != tc.want {
+				t.Fatalf("--max-unsure %d: exit %d, want %d\n%s", tc.max, code, tc.want, errb.String())
+			}
+			if tc.says != "" && !strings.Contains(errb.String(), tc.says) {
+				t.Errorf("--max-unsure %d: message does not say %q:\n%s", tc.max, tc.says, errb.String())
+			}
+		})
+	}
+}
+
+// ⛔ AND IT TOLERATES UNSURE ONLY. A ratchet that swallowed a STALE address
+// would turn the one flag that makes this gate usable into the flag that
+// switches it off — so a stale org PATH still fails AT the stated ceiling.
+func TestTheUnsureCeilingDoesNotExcuseAStaleAddress(t *testing.T) {
+	root := tree(t, map[string]string{
+		"a.md": "go-pkgx was the org\n",        // UNSURE
+		"b.md": "see github.com/go-pkgx/zbk\n", // STALE
+	})
+	o := opts{old: "go-pkgx", new: "go-zpkg", maxUnsure: 1}
+	var out, errb bytes.Buffer
+	if code := run(&out, &errb, o, []string{root}); code != 1 {
+		t.Fatalf("a STALE address must fail at the ceiling: exit %d\n%s%s", code, out.String(), errb.String())
+	}
+}
+
 func TestQuietPrintsCountsAndStillFails(t *testing.T) {
 	root := tree(t, map[string]string{"README.md": "github.com/go-pkgx/zbk\n"})
 	var out, errb bytes.Buffer
