@@ -54,6 +54,7 @@ import (
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/go-fleettools/fleettools/internal/loadgate"
 	"github.com/spf13/cobra"
 )
 
@@ -137,6 +138,30 @@ func gotest(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// ⛔⛔ A BENCHMARK IS A MEASUREMENT, AND THIS FLEET DOES NOT MEASURE ON A BUSY
+	// MACHINE. The rule is old; the gate is here because on 2026-11-16 it was
+	// broken by the session that had written a gate for it the day before — one
+	// that covers two corpus tools and left `go test -bench` guarded by nothing.
+	//
+	// This is the right place for it because every `-run` already comes through
+	// here (guard-bash refuses `go test -run`), and a benchmark run almost always
+	// carries `-run '^$'` to keep the tests out of it.
+	//
+	// ⚠ It fires on -bench ONLY. An ordinary test run is a PASS/FAIL, which load
+	// does not change; refusing those would make this wrapper unusable and teach
+	// everyone to go around it.
+	why, benchesWanted := benchRequested(args)
+	if benchesWanted {
+		load, err := loadgate.Check(why)
+		if err != nil {
+			fmt.Fprintln(stderr, "gotest:", err)
+			return cli.Unanswerable("a benchmark taken here measures the machine. " +
+				"Wait, or pass --under-load '<why>', which is STAMPED into the output")
+		}
+		fmt.Fprintln(stdout, loadgate.Banner(load, why))
+		args = withoutUnderLoad(args) // `go test` has never heard of it
+	}
+
 	pattern, hasRun := runPattern(args)
 	if !hasRun {
 		// Nothing to check: a run with no -run selects everything, and
@@ -170,6 +195,35 @@ func gotest(cmd *cobra.Command, args []string) error {
 	// ⛔ NOTHING RAN AT ALL is reported before the per-alternative verdict: it
 	// is the same defect and a clearer sentence, and `go test` already prints
 	// "[no tests to run]" for it while exiting 0.
+	//
+	// ⛔⛔ UNLESS BENCHMARKS WERE ASKED FOR, and this exception is not a softening
+	// of the rule — it is the rule applied to what was actually selected.
+	// `-run '^$' -bench X` is the DOCUMENTED way to run benchmarks without the
+	// tests: the empty test selection is the point of the command, not an
+	// accident, and `go test` itself prints "[no tests to run]" and exits 0.
+	//
+	// Found by running this very command through itself: every `gotest -run '^$'
+	// -bench …` exited 1 saying the selection was empty. Left alone, routing
+	// benchmarks through this wrapper — which is what the load gate above does —
+	// would make the wrapper hostile to the one kind of run it now exists to
+	// guard, and everyone would go back around it.
+	//
+	// ⚠ The check still applies to the benchmark's OWN pattern in spirit, but this
+	// command cannot see which benchmarks ran: `go test -bench` prints their names
+	// in a format ranNames does not read. Saying so here rather than pretending
+	// the verdict covers them.
+	//
+	// ⛔ THE WHOLE PATTERN VERDICT IS SKIPPED, not just the "nothing ran" half,
+	// and for the same reason: `^$` is an alternative that matches nothing BY
+	// DESIGN, so the per-alternative check fires on it too. This command cannot
+	// tell a deliberately empty selection from a typo once -bench is present, and
+	// the cost of being wrong is asymmetric — a false refusal here drives every
+	// benchmark back to bare `go test`, which is ungated, and the load gate above
+	// is then worth nothing. Stated rather than hidden: in a -bench run, gotest
+	// gates the load and checks no pattern.
+	if benchesWanted {
+		return cli.FromStatus(status)
+	}
 	if len(ran) == 0 {
 		fmt.Fprintf(stderr, "gotest: -run %s selected NO test at all — `ok` above is about nothing\n", pattern)
 		return cli.Found("no test ran")
@@ -216,6 +270,60 @@ func runPattern(args []string) (string, bool) {
 		}
 	}
 	return pattern, found
+}
+
+// benchRequested reports whether these arguments ask for benchmarks, and returns
+// the reason given for measuring anyway.
+//
+// ⚠ `-bench` must be matched as a WHOLE flag. `-benchtime 20x` and `-benchmem`
+// both begin with it and neither asks for a benchmark on its own — a prefix match
+// would gate a run that only sets how long one would take.
+//
+// ⛔ And an EMPTY -bench is not a benchmark run: `go test -bench=` selects none,
+// exactly as `-run=` does. Gating it would refuse a command that measures nothing.
+func benchRequested(args []string) (why string, ok bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-bench" || a == "--bench" || a == "-test.bench" || a == "--test.bench":
+			if i+1 < len(args) && args[i+1] != "" {
+				ok = true
+			}
+		case strings.HasPrefix(a, "-bench="), strings.HasPrefix(a, "--bench="),
+			strings.HasPrefix(a, "-test.bench="), strings.HasPrefix(a, "--test.bench="):
+			if _, v, _ := strings.Cut(a, "="); v != "" {
+				ok = true
+			}
+		case a == "--under-load" || a == "-under-load":
+			if i+1 < len(args) {
+				why = args[i+1]
+			}
+		case strings.HasPrefix(a, "--under-load="):
+			why = strings.TrimPrefix(a, "--under-load=")
+		case strings.HasPrefix(a, "-under-load="):
+			why = strings.TrimPrefix(a, "-under-load=")
+		}
+	}
+	return why, ok
+}
+
+// withoutUnderLoad strips this wrapper's own flag before `go test` sees it.
+// ⛔ Passing it through would make every gated run fail with "flag provided but
+// not defined", which reads as a broken command rather than a working gate.
+func withoutUnderLoad(args []string) []string {
+	out := args[:0:0]
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--under-load" || a == "-under-load" {
+			i++ // its value goes too
+			continue
+		}
+		if strings.HasPrefix(a, "--under-load=") || strings.HasPrefix(a, "-under-load=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // hasVerbose reports whether the arguments already ask for the names.
