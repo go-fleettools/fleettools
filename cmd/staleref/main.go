@@ -924,11 +924,32 @@ func (a *allowList) unused() []string {
 	return out
 }
 
+// coverage is what one tree's scan actually looked at: the files read, and the
+// files WALKED PAST, counted by extension.
+//
+// ⛔⛔ IT EXISTS BECAUSE THE COMMENT ON docExts WAS NOT ENOUGH. That comment has
+// said since 2026-11-10 that a sweep which cannot open a source file "reports
+// their absence as cleanliness", naming the lesson by its memory. On 2026-11-17
+// it happened again, to somebody who had read it: a default run over
+// go-zpkg/recipes reported ONE finding and `237 doc file(s)`, and `--ext hcl`
+// turned the same tree into SEVENTY-TWO — 71 of them in `package.hcl` comments
+// and provenance blocks. 98.6 % false-clean, with every printed line true.
+//
+// A warning in --help is read BEFORE the measurement; the zero arrives after.
+// So the count moves into the headline, where the reassuring number is: never
+// "N file(s)" alone, always "N of M read". That is rule 1 of
+// `a-scan-that-could-not-read-reported-zero` — every sweep prints "N of M" —
+// applied to this tool's own output instead of recommended in its prose.
+type coverage struct {
+	read   int
+	unread map[string]int // extension (or "" for none) → files walked past
+}
+
 // scanTree classifies every file under one directory whose extension is in
-// exts.
-func scanTree(root string, c *classifier, allow *allowList, exts map[string]bool) ([]finding, int, error) {
+// exts, and counts the ones it did not open.
+func scanTree(root string, c *classifier, allow *allowList, exts map[string]bool) ([]finding, coverage, error) {
 	var out []finding
-	files := 0
+	cov := coverage{unread: map[string]int{}}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", p, err)
@@ -940,14 +961,15 @@ func scanTree(root string, c *classifier, allow *allowList, exts map[string]bool
 			}
 			return nil
 		}
-		if !exts[strings.ToLower(filepath.Ext(p))] {
+		if ext := strings.ToLower(filepath.Ext(p)); !exts[ext] {
+			cov.unread[ext]++
 			return nil
 		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			return fmt.Errorf("%s: %w", p, err)
 		}
-		files++
+		cov.read++
 		rel, _ := filepath.Rel(root, p)
 		exempt := allow.match(rel)
 		for i, line := range strings.Split(string(b), "\n") {
@@ -981,7 +1003,48 @@ func scanTree(root string, c *classifier, allow *allowList, exts map[string]bool
 		}
 		return nil
 	})
-	return out, files, err
+	return out, cov, err
+}
+
+// unreadCensus renders the extensions a scan walked past, commonest first, as
+// the suggestion that would open them. Ties break on the name so two runs over
+// one tree print one line.
+//
+// ⛔ It is CAPPED and says so when it caps: a tree of a thousand PNGs must not
+// push the one extension that matters off the top, and "not shown" must never
+// read as "not found" — the same reason `bakedpaths --census-limit 0` exists.
+func unreadCensus(unread map[string]int, limit int) (total int, line string) {
+	type kind struct {
+		ext string
+		n   int
+	}
+	kinds := make([]kind, 0, len(unread))
+	for e, n := range unread {
+		total += n
+		kinds = append(kinds, kind{e, n})
+	}
+	if total == 0 {
+		return 0, ""
+	}
+	sort.Slice(kinds, func(i, j int) bool {
+		if kinds[i].n != kinds[j].n {
+			return kinds[i].n > kinds[j].n
+		}
+		return kinds[i].ext < kinds[j].ext
+	})
+	var parts []string
+	for i, k := range kinds {
+		if i == limit {
+			parts = append(parts, fmt.Sprintf("… and %d more kind(s)", len(kinds)-limit))
+			break
+		}
+		name := k.ext
+		if name == "" {
+			name = "(no extension)"
+		}
+		parts = append(parts, fmt.Sprintf("%s %d", name, k.n))
+	}
+	return total, strings.Join(parts, ", ")
 }
 
 // report prints the verdict, grouped so that the work is visible as work.
@@ -991,7 +1054,7 @@ func scanTree(root string, c *classifier, allow *allowList, exts map[string]bool
 // report printed NOTHING, which reads exactly like "no matches" and is actually
 // "I did not look". The command that produced the data has to be able to
 // summarise it, rather than relying on a filter that can go silent.
-func report(w io.Writer, byRoot map[string][]finding, files map[string]int, showCitations, quiet bool) bool {
+func report(w io.Writer, byRoot map[string][]finding, cov map[string]coverage, showCitations, quiet bool) bool {
 	roots := make([]string, 0, len(byRoot))
 	for r := range byRoot {
 		roots = append(roots, r)
@@ -1036,8 +1099,16 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 				}
 			}
 		}
-		fmt.Fprintf(w, "%s: %d doc file(s), %d DOUBLED, %d STALE, %d DEBT, %d UNSURE, %d CITATION\n",
-			root, files[root], counts[doubled], counts[stale], counts[debt], counts[unsure], counts[citation])
+		// ⛔ "N of M read", never N alone: the headline number is where the
+		// reassurance is, so the denominator belongs there too.
+		unreadN, census := unreadCensus(cov[root].unread, 6)
+		fmt.Fprintf(w, "%s: %d of %d file(s) read, %d DOUBLED, %d STALE, %d DEBT, %d UNSURE, %d CITATION\n",
+			root, cov[root].read, cov[root].read+unreadN,
+			counts[doubled], counts[stale], counts[debt], counts[unsure], counts[citation])
+		if unreadN > 0 {
+			fmt.Fprintf(w, "  ⚠ %d file(s) NOT read, their extension is not in the set: %s\n", unreadN, census)
+			fmt.Fprintln(w, "    user-visible strings live in CODE — add --ext <e> for any of these the answer could be in")
+		}
 		for _, f := range byRoot[root] {
 			if f.Verdict != citation {
 				clean = false
@@ -1096,8 +1167,9 @@ func report(w io.Writer, byRoot map[string][]finding, files map[string]int, show
 		totals[stale] == 0 && totals[unsure] == 0 && totals[debt] == 0 && totals[doubled] == 0 {
 		// ⛔ A tree with no documentation files reports no findings, which is
 		// the same output as a clean one. The file count is what tells them
-		// apart, so it is always printed.
-		fmt.Fprintln(w, "staleref: nothing stale and nothing unsure — check the doc file counts above, because a tree that was not read reports the same")
+		// apart, so it is always printed — as "N of M", because a tree whose
+		// answer lives in an extension nobody passed reports the same too.
+		fmt.Fprintln(w, "staleref: nothing stale and nothing unsure — check the \"N of M file(s) read\" counts above, because a tree that was not read reports the same")
 	}
 	return clean
 }
@@ -1126,7 +1198,7 @@ func RootCmd() *cobra.Command {
 	c.Flags().StringArrayVar(&o.alsoRetired, "retired", nil,
 		"another spelling the rename retired, as was=now (eg. bk=zbk); one rename is never one word, and a stem-only check reports the rest as clean; repeatable")
 	c.Flags().StringArrayVar(&o.exts, "ext", nil,
-		"also read files with this extension, eg. --ext go --ext sh. The default set is documentation only, and user-visible strings live in CODE — help text, usage blocks, warnings, flag names and flag DEFAULTS — so a sweep that cannot open a source file reports their absence as cleanliness; repeatable")
+		"also read files with this extension, eg. --ext go --ext sh. The default set is documentation only, and user-visible strings live in CODE — help text, usage blocks, warnings, flag names and flag DEFAULTS — so a sweep that cannot open a source file reports their absence as cleanliness. Every report names the extensions it walked past, with counts, because this sentence is read BEFORE the measurement and the reassuring zero arrives after it; repeatable")
 	c.Flags().StringArrayVar(&o.allowPats, "allow", nil,
 		"a file on which the old name is the SUBJECT and every occurrence is correct (a filiation page, a CHANGELOG); its findings become citations, which is what lets the exit status gate. A pattern matching no file is an error; repeatable")
 	c.Flags().BoolVar(&o.showCitations, "show-citations", false,
@@ -1203,17 +1275,17 @@ func run(stdout, stderr io.Writer, o opts, dirs []string) int {
 	exts := extSet(o.exts)
 
 	byRoot := map[string][]finding{}
-	files := map[string]int{}
+	cov := map[string]coverage{}
 	for _, d := range dirs {
-		found, n, err := scanTree(d, c, allow, exts)
+		found, seen, err := scanTree(d, c, allow, exts)
 		if err != nil {
 			fmt.Fprintln(stderr, "staleref:", err)
 			return 2
 		}
 		byRoot[d] = found
-		files[d] = n
+		cov[d] = seen
 	}
-	clean := report(stdout, byRoot, files, o.showCitations, o.quiet)
+	clean := report(stdout, byRoot, cov, o.showCitations, o.quiet)
 	// ⛔⛔ "0 DOUBLED" FROM A CHECK THAT WAS NEVER ARMED READS EXACTLY LIKE A
 	// CLEAN TREE — `a-corpus-row-green-because-the-subject-was-absent`. The
 	// doubled form exists only for a `--retired was=now` whose replacement is
