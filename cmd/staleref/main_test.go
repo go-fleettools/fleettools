@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func tree(t *testing.T, files map[string]string) string {
@@ -299,6 +300,77 @@ func TestATreeWithNoDocumentationSaysSo(t *testing.T) {
 
 // TestQuietPrintsCountsAndStillFails: --quiet changes what is printed, never
 // the verdict.
+// ⛔⛔ THE REPORT MUST BE VALID UTF-8, AND THIS IS A PROPERTY RATHER THAN AN
+// EXPECTED WIDTH — which is the whole lesson. trimAround keeps 40 BYTES of
+// context either side, so when a multi-byte rune straddles the cut the slice
+// begins or ends mid-rune and the string is invalid. One such finding makes the
+// WHOLE report invalid, and then `grep` refuses the file: no output, exit 1,
+// which reads exactly like "nothing is stale".
+//
+// That happened twice — 2026-11-12 (three greps read as clean) and 2026-11-17
+// (a 1012-finding run) — and both times the tool was right and the reader was
+// told nothing.
+//
+// The offsets are swept rather than chosen: a single hand-picked position tests
+// one alignment, and the defect only shows when the rune's bytes land across
+// the window edge. Padding the name by one byte at a time walks the match
+// through every alignment relative to the 40-byte context.
+func TestTheReportIsAlwaysValidUTF8(t *testing.T) {
+	// ⛔ THE PADDING RUNE MUST BE 3 BYTES, and the first version of this test
+	// used `é`, which is 2 — so with a 40-byte window every cut landed on an
+	// even offset, which is always a rune boundary for a 2-byte rune. The test
+	// PASSED on the broken code. A control run (snapping removed) is what
+	// exposed it: the unit test below went red and this one stayed green.
+	//
+	// `…` and `⚠` are 3 bytes, are coprime with the window, and are what THIS
+	// tool prints into its own output — so a report quoting our prose is the
+	// common case rather than the exotic one.
+	// ⚠ AND IT MUST BE A BARE NAME, not an org path: trimAround is reached only
+	// by the UNSURE arm (a bare name, where the SENTENCE is the evidence) and by
+	// DOUBLED. A `go-pkgx/zbk` fixture is STALE, which prints the address rather
+	// than its surroundings, so the first version of this test never reached the
+	// function it was written for — the control caught that too.
+	for pad := 0; pad < 64; pad++ {
+		line := strings.Repeat("…", pad) + " go-pkgx is the old name " + strings.Repeat("⚠", pad)
+		root := tree(t, map[string]string{"README.md": line + "\n"})
+		var out, errb bytes.Buffer
+		run(&out, &errb, opts{old: "go-pkgx", new: "go-zpkg"}, []string{root})
+		if !utf8.ValidString(out.String()) {
+			t.Fatalf("pad=%d: the report is not valid UTF-8, so grep will refuse it:\n%q",
+				pad, out.String())
+		}
+	}
+}
+
+// And the same property on the function itself, swept over every byte offset of
+// a line made entirely of multi-byte runes: every window must be valid.
+func TestTrimAroundNeverCutsARune(t *testing.T) {
+	line := strings.Repeat("é⚠…", 40)
+	for lo := 0; lo <= len(line); lo++ {
+		for _, hi := range []int{lo, lo + 1, lo + 7} {
+			if hi > len(line) {
+				continue
+			}
+			got := trimAround(line, lo, hi)
+			if !utf8.ValidString(got) {
+				t.Fatalf("trimAround(lo=%d, hi=%d) = %q, which is not valid UTF-8", lo, hi, got)
+			}
+		}
+	}
+}
+
+// ⚠ THE CONTROL: snapping must not swallow the match. A window that shrank to
+// nothing would also be "valid UTF-8", and the test above would pass on a
+// function that returned "".
+func TestTrimAroundStillShowsTheMatch(t *testing.T) {
+	line := "… prose before go-pkgx/zbk and after ⚠"
+	lo := strings.Index(line, "go-pkgx")
+	got := trimAround(line, lo, lo+len("go-pkgx"))
+	if !strings.Contains(got, "go-pkgx") {
+		t.Errorf("trimAround dropped the match it exists to surround: %q", got)
+	}
+}
+
 func TestQuietPrintsCountsAndStillFails(t *testing.T) {
 	root := tree(t, map[string]string{"README.md": "github.com/go-pkgx/zbk\n"})
 	var out, errb bytes.Buffer

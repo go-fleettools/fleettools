@@ -811,6 +811,31 @@ func allUpper(src string) bool {
 
 // trimAround returns the match with a little of its sentence, which is what
 // makes an UNSURE finding cheap to decide.
+// trimAround keeps ctx bytes of context on each side of a match.
+//
+// ⛔⛔ IT SNAPS TO RUNE BOUNDARIES, AND THE ABSENCE OF THAT COST A DAY. The
+// window is measured in BYTES — which is right, it is a display width, not a
+// character count — but a slice taken at an arbitrary byte offset inside a
+// multi-byte rune produces a string that is not valid UTF-8. Every finding goes
+// into one report, so ONE such cut makes the WHOLE file invalid, and then:
+//
+//	$ staleref … > /tmp/sr.txt        # 12 STALE findings in it
+//	$ grep -c STALE /tmp/sr.txt ; echo "rc=$?"
+//	rc=1                              # no output at all, not even `0`
+//
+// `grep` classifies the file as binary and refuses it. That is not "no matches"
+// — it prints nothing and exits 1, which reads exactly like a clean tree. On
+// 2026-11-12 three greps of this tool's own report were read as "nothing is
+// stale" before `file` was run on it ("Non-ISO extended-ASCII text"), and on
+// 2026-11-17 the same thing happened again to a 1012-finding run.
+//
+// ⛔ THE LINES THAT TRIGGER IT ARE THIS TOOL'S OWN. A report whose context
+// happens to end on `…` or `⚠` — characters this command puts in its own output
+// and which our prose is full of — is the common case, not the exotic one.
+//
+// ⚠ Snapping is deliberately asymmetric: `start` moves FORWARD and `end` moves
+// BACK, so the window only ever shrinks. Growing it to reach a boundary could
+// pull in a byte from outside the context the caller asked for.
 func trimAround(line string, lo, hi int) string {
 	const ctx = 40
 	start, end := lo-ctx, hi+ctx
@@ -819,6 +844,13 @@ func trimAround(line string, lo, hi int) string {
 	}
 	if end > len(line) {
 		end = len(line)
+	}
+	// A continuation byte is never a rune start; walk off it.
+	for start < end && !utf8.RuneStart(line[start]) {
+		start++
+	}
+	for end > start && end < len(line) && !utf8.RuneStart(line[end]) {
+		end--
 	}
 	return line[start:end]
 }
