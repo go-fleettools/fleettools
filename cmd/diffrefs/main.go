@@ -30,6 +30,17 @@
 // never proves a reference right. Every resolved reference is printed WITH ITS
 // TITLE, for a person to compare against what the sentence claims to cite.
 // That half is a report. The refusal is the gate.
+//
+// ⛔⛔ AND IT CANNOT BE RUN AFTER THE FACT. This check has power at exactly one
+// moment: before the commit lands, while the reference still does not resolve.
+// Run over the same diff a day later it comes back GREEN, because by then the
+// pull request exists — which is what the author of the recorded occurrence
+// measured on their own diff the morning after: 1127 added lines, four
+// references, all resolving, titles printed, and nothing reproduced. That run
+// proves the plumbing and says nothing about the catch; only the test fixture,
+// which holds an API that does not have the number yet, proves the catch.
+// A green answer from this command is therefore a statement about NOW, never
+// about the commit's own past.
 package main
 
 import (
@@ -69,6 +80,11 @@ no check that reads a published body can see.
 number almost always lands on something real. Every resolved reference is
 printed with its TITLE so a person can compare it against what the sentence
 claims; that half is a report, not a verdict.
+
+⛔ AND IT CANNOT BE RUN AFTER THE FACT. The check has power at one moment only —
+before the commit lands, while the reference still does not resolve. Over the
+same diff a day later it answers GREEN, because by then the pull request exists.
+A green answer is a statement about NOW, never about the commit's own past.
 
 A number below --min-number (default 4) is ignored: ` + "`#1`" + `, ` + "`#2`" + ` and ` + "`#3`" + ` are
 TeX macro parameters, C preprocessor stringification and shell positional
