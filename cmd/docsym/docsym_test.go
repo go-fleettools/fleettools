@@ -52,6 +52,49 @@ func TestExtractReadsSpansAndGoFencesOnly(t *testing.T) {
 	}
 }
 
+// ⛔⛔ AN UNEXPORTED NAME A README QUOTES IS A REFERENCE. It used to match
+// nothing: bareRE began `[A-Z]`, so `rowGeometry` was not missing, not bare and
+// not counted, and docsym answered `0 MISSING` over a README naming a symbol
+// that had been deleted that morning. #354.
+//
+// ⭐ AND THE SECOND HALF IS WHAT KEEPS THE REPORT READABLE: a lower-case name
+// counts only if it is camelCase. Without that, every `err` and `data` in every
+// README arrives as a reference nothing can confirm.
+func TestALowerCaseCamelNameIsAReferenceAndAPlainWordIsNot(t *testing.T) {
+	readme := strings.Join([]string{
+		"It computed `rowGeometry` and now calls `rowBytes`, bounded by `maxDecodedSize`.",
+		"Ordinary words in spans: `err`, `data`, `nil`, `go`, `main`, `gofmt`, `stdin`.",
+		"Still exported, still found: `LoadGTKTheme` and `toolkit.NewButton`.",
+	}, "\n")
+	got := strings.Join(names(Extract(readme)), " ")
+	want := "rowGeometry rowBytes maxDecodedSize LoadGTKTheme toolkit.NewButton"
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestPlausibleName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+		why  string
+	}{
+		{"rowGeometry", true, "the name #354 was filed for"},
+		{"maxCCITTColumns", true, "capitals inside, lower-case first"},
+		{"Exported", true, "unchanged behaviour"},
+		{"err", false, "a word, not an identifier somebody wrote"},
+		{"data", false, "the same"},
+		{"gofmt", false, "a command in a span"},
+		{"n", false, "one letter has no interior at all"},
+		{"GOOS", false, "all capitals, as before"},
+		{"RGBA_8888", false, "underscore, as before"},
+	} {
+		if got := plausibleName(tc.name); got != tc.want {
+			t.Errorf("plausibleName(%q) = %v, want %v — %s", tc.name, got, tc.want, tc.why)
+		}
+	}
+}
+
 func TestExtractKeepsLineNumbers(t *testing.T) {
 	refs := Extract("one\n\n`toolkit.NewButton`\n")
 	if len(refs) != 1 || refs[0].Line != 3 {
@@ -251,7 +294,7 @@ func TestLoadTypeChecksARealModule(t *testing.T) {
 		}
 	}
 	write("go.mod", "module example.com/m\n\ngo 1.22\n")
-	write("m.go", "package m\n\ntype Window struct{ Title string }\n\nfunc (w *Window) Run() error { return nil }\n")
+	write("m.go", "package m\n\ntype Window struct{ Title string }\n\nfunc (w *Window) Run() error { return nil }\n\nfunc rowBytes() int { return 0 }\n")
 	write("linux.go", "//go:build linux\n\npackage m\n\nfunc OpenWayland() {}\n")
 	write("broken/b.go", "package broken\n\nfunc F() { undefinedThing() }\n")
 
@@ -268,6 +311,27 @@ func TestLoadTypeChecksARealModule(t *testing.T) {
 		{Ref{Pkg: "m", Name: "OpenCocoa"}, Missing},
 		{Ref{Name: "Title"}, Found},
 		{Ref{Pkg: "broken", Name: "G"}, Unreadable},
+
+		// ⛔⛔ #354, and it took THREE changes to make this line pass: the
+		// span had to be extracted (bareRE began [A-Z]), the package had to
+		// be type-checked from SOURCE (NeedTypes alone gives export data,
+		// which holds no unexported object at all — 22 names in scope against
+		// 234), and `resolves` had to stop rejecting every unexported object
+		// outright. Each one alone leaves this Unconfirmed.
+		{Ref{Name: "rowBytes"}, Found},
+
+		// ⛔ But only for the module's OWN packages. Qualified, it must still
+		// not resolve: `m.rowBytes` cannot be written from outside m.
+		{Ref{Pkg: "m", Name: "rowBytes"}, Missing},
+
+		// The control: an unexported name nothing has must NOT come back
+		// Found. ⚠ It is Unreadable rather than Unconfirmed here, and that is
+		// this fixture's own doing, not the change's: it carries a deliberately
+		// broken package, and a bare name that resolves nowhere while some
+		// package failed to type-check is not judged — a miss there would be a
+		// guess. On a module that compiles, this is Unconfirmed, which is what
+		// go-pdfkit/reader's README reports for `rowGeometry`.
+		{Ref{Name: "rowGeometry"}, Unreadable},
 	} {
 		if v, where := ix.Check(c.ref); v != c.want {
 			t.Errorf("%+v: got %v (%s), want %v", c.ref, v, where, c.want)

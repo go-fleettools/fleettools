@@ -69,10 +69,27 @@ func Load(dir string, goos []string) (*Index, error) {
 
 	ix := &Index{byName: map[string][]*types.Package{}, broken: map[string]string{}, version: map[string]string{}, members: map[string]bool{}}
 	for _, g := range goos {
+		// ⛔⛔ NeedSyntax IS WHAT MAKES AN UNEXPORTED NAME VISIBLE, and its
+		// absence was half of #354. With NeedTypes alone a package arrives from
+		// EXPORT DATA, which by construction holds only exported symbols — so
+		// `rowBytes` and `applyPredictor`, which a README names and the package
+		// really has, resolved to nothing. Teaching Extract to read lower-case
+		// spans without this would have reported every one of them as
+		// unconfirmed: 39 false alarms on one README, which is how a report
+		// stops being read.
+		//
+		// ⚠ It costs a type-check from source instead of a read of export data,
+		// once per GOOS. MEASURED on go-pdfkit/reader, four platforms, at a
+		// 1-minute load of 7.9: 0.57s wall before, 1.10s after — roughly
+		// double, and 0.35s of user time against 2.49s, which the cores absorb.
+		// (An earlier draft of this comment said "about 4s to 6s". That was
+		// invented, and timing it took one command.)
 		cfg := &packages.Config{
-			Mode: packages.NeedName | packages.NeedTypes | packages.NeedModule,
-			Dir:  dir,
-			Env:  loadEnv(g, filepath.Join(modfileDir, "go.mod")),
+			Mode: packages.NeedName | packages.NeedTypes | packages.NeedModule |
+				packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports |
+				packages.NeedDeps | packages.NeedSyntax | packages.NeedTypesInfo,
+			Dir: dir,
+			Env: loadEnv(g, filepath.Join(modfileDir, "go.mod")),
 		}
 		pkgs, err := packages.Load(cfg, patterns...)
 		if err != nil {
@@ -197,7 +214,9 @@ func (ix *Index) Check(r Ref) (Verdict, string) {
 		}
 		var paths []string
 		for _, p := range pkgs {
-			if resolves(p, r.Name, r.Member) {
+			// ⛔ A QUALIFIED NAME NEVER ALLOWS AN UNEXPORTED ONE: `pkg.thing`
+			// cannot be written from outside pkg, whoever owns it.
+			if resolves(p, r.Name, r.Member, false) {
 				return Found, ""
 			}
 			path := p.Path()
@@ -225,8 +244,18 @@ func (ix *Index) Check(r Ref) (Verdict, string) {
 	}
 	// A bare name: the module's own packages first, then what it requires
 	// from its organisation (window's README names toolkit's VBox).
+	//
+	// ⛔ THE MODULE'S OWN PACKAGES ALLOW AN UNEXPORTED NAME AND THE OTHERS DO
+	// NOT. A README describing its own internals (`rowBytes`, `applyPredictor`)
+	// is naming something real; the same spelling inside a DEPENDENCY would be
+	// unusable from here, so it must keep resolving to nothing.
+	for _, p := range ix.own {
+		if resolves(p, r.Name, r.Member, true) {
+			return Found, ""
+		}
+	}
 	for _, p := range ix.all {
-		if resolves(p, r.Name, r.Member) {
+		if resolves(p, r.Name, r.Member, false) {
 			return Found, ""
 		}
 	}
@@ -260,11 +289,20 @@ func methodOwner(pkgs []*types.Package, name string) string {
 	return ""
 }
 
-// resolves reports whether p exports name, and when a member is named, whether
-// name's type (or a variable's type) has that field or method.
-func resolves(p *types.Package, name, member string) bool {
+// resolves reports whether p has name — exported, or unexported when the
+// caller allows it — and when a member is named, whether name's type (or a
+// variable's type) has that field or method.
+//
+// ⛔⛔ unexported IS A PARAMETER, NOT A CONSTANT, and that was the third part
+// of #354. This returned false for every unexported object, so even once the
+// spans were extracted and the packages type-checked from source, a README
+// naming its own module's `rowBytes` resolved to nothing. The distinction that
+// matters is WHOSE package: another package's unexported name is unusable and
+// must not resolve, while a module's README naming its own internals is the
+// ordinary case in this fleet.
+func resolves(p *types.Package, name, member string, unexported bool) bool {
 	obj := p.Scope().Lookup(name)
-	if obj == nil || !obj.Exported() {
+	if obj == nil || (!obj.Exported() && !unexported) {
 		return false
 	}
 	if member == "" {

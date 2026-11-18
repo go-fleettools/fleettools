@@ -3,6 +3,7 @@ package main
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // Ref is one Go identifier a README names.
@@ -25,11 +26,19 @@ type Ref struct {
 // and is dropped then, not here.
 var qualifiedRE = regexp.MustCompile(`\b([a-z][a-z0-9]*)\.([A-Z][A-Za-z0-9]*)(?:\.([A-Z][A-Za-z0-9]*))?`)
 
-// bareRE is an inline code span that is exactly one exported name, possibly
-// with a member and a call: `LoadGTKTheme(css)`, `Entry.Text`, `Label.Text()`.
+// bareRE is an inline code span that is exactly one name, possibly with a
+// member and a call: `LoadGTKTheme(css)`, `Entry.Text`, `Label.Text()`.
 // Anything else in a span -- a command, a type expression, a sentence -- is not
 // a reference this tool can check, and is left alone.
-var bareRE = regexp.MustCompile(`^\*?([A-Z][A-Za-z0-9]*)(?:\.([A-Z][A-Za-z0-9]*))?(?:\(.*\))?$`)
+//
+// ⛔⛔ THE FIRST LETTER MAY BE LOWER CASE, AND IT USED TO MAY NOT. This pattern
+// began `[A-Z]`, so an UNEXPORTED name a README quoted matched nothing at all:
+// not missing, not bare, not in any count. go-pdfkit/reader's README named
+// `rowGeometry` in a sentence about having deleted it, and docsym answered
+// `0 MISSING` over that README -- a clean run on stale prose, the one answer a
+// checker must not give. Resolution never needed changing: a package scope
+// holds its unexported objects, so `resolves` finds them already. #354.
+var bareRE = regexp.MustCompile(`^\*?([A-Za-z][A-Za-z0-9]*)(?:\.([A-Z][A-Za-z0-9]*))?(?:\(.*\))?$`)
 
 var spanRE = regexp.MustCompile("`([^`\n]+)`")
 
@@ -121,6 +130,24 @@ func qualified(line int, s string) []Ref {
 // `RGBA_8888`, `GOOS` -- which are not Go identifiers of this module but would
 // otherwise be reported as missing ones. The cost is that an all-capital Go
 // name (`RGBA`) is not checked when it stands alone.
+//
+// ⛔ A LOWER-CASE NAME MUST BE camelCase TO COUNT, and that is the whole
+// defence against a flood. A README's code spans are full of ordinary words
+// -- `err`, `data`, `nil`, `go`, `main`, `stdin` -- and every one of them
+// would otherwise arrive as a reference nothing can confirm, which is how a
+// report stops being read. An interior capital is what distinguishes a Go
+// identifier somebody wrote from a word somebody quoted: `rowGeometry`,
+// `applyPredictor`, `maxDecodedSize` have one; `err` and `gofmt` do not.
+//
+// ⚠ The cost is stated rather than hidden: a single-word unexported name
+// (`lexer`, `builder`) is still not checked. That is the same trade the
+// all-capital rule above already makes, and it errs toward silence.
 func plausibleName(s string) bool {
-	return strings.ToUpper(s) != s && !strings.Contains(s, "_")
+	if strings.ToUpper(s) == s || strings.Contains(s, "_") {
+		return false
+	}
+	if s[0] >= 'a' && s[0] <= 'z' {
+		return strings.IndexFunc(s[1:], unicode.IsUpper) >= 0
+	}
+	return true
 }
