@@ -202,12 +202,30 @@ func run(dir string, flags []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// ⛔ THE SPELLINGS WERE MEASURED ON REAL TREES RATHER THAN GUESSED, after this
+// command refused three projects in a row and each refusal was its pattern and
+// not the project:
+//
+//	libxml2        --with-python   Python bindings (on)          reParen
+//	gcc, glibc     --enable-cet    [default=auto]                reDefault
+//	mpdecimal      --enable-cxx    … (default is yes)            reWords
+//	pcre2, ncurses --enable-jit    enable Just-In-Time …         NONE — those
+//	                                                             two state no
+//	                                                             default at all
+//
+// ⚠ The last row is the one that keeps this honest: a project that states
+// nothing is a fact about the project, and the census says so with "N of M"
+// rather than reporting a clean zero. A spelling this does not know is a fact
+// about THIS FILE, and the only way to tell them apart is to add the spellings
+// as they are met.
 var (
-	// "  --with-python           Python bindings (on)" and the autoconf
-	// "[default=yes]" / "(default: no)" spellings.
 	reHelpLine = regexp.MustCompile(`^\s*--((?:with|enable)-[A-Za-z0-9_.-]+)\b(.*)$`)
 	reParen    = regexp.MustCompile(`\((on|off|yes|no)\)\s*$`)
 	reDefault  = regexp.MustCompile(`(?:\[default[=:]\s*|\(default[=:]\s*)(yes|no|on|off)`)
+	// "(default is yes)", "(default: no)", "[default is off]" — the words
+	// mpdecimal writes, and GNU autoconf macro authors write about as often as
+	// the "=" form.
+	reWords = regexp.MustCompile(`[\[(]\s*default\s+is\s+(yes|no|on|off)\s*[\])]`)
 )
 
 // Documented maps a switch name to the default its help line states, "" when
@@ -225,7 +243,13 @@ func Documented(src string) map[string]string {
 		if _, seen := out[name]; !seen {
 			out[name] = ""
 		}
+		// Tried in order of specificity: an explicit "default" wins over a bare
+		// trailing "(on)", which a description could carry by accident.
 		if d := reDefault.FindStringSubmatch(rest); d != nil {
+			out[name] = normalise(d[1])
+			continue
+		}
+		if d := reWords.FindStringSubmatch(rest); d != nil {
 			out[name] = normalise(d[1])
 			continue
 		}
