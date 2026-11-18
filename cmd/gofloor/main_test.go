@@ -106,7 +106,7 @@ jobs:
 `}})
 	code, out, _ := drive(gh, repos, "o")
 	for _, want := range []string{
-		"go.mod: go 1.27.1 is below the floor 1.27.3",
+		"go.mod: go 1.27.1 is below the floor 1.27.4",
 		"interop/crewjam/go.mod: go 1.27.1 is below the floor",
 		"setup-go hard-coded 1.27.2",
 		"govulncheck cannot fail the build (continue-on-error)",
@@ -126,7 +126,7 @@ jobs:
 
 func TestACleanRepositoryIsClean(t *testing.T) {
 	gh, repos := one("good", fakeRepo{files: map[string]string{
-		"go.mod": "module x\n\ngo 1.27.3\n", ".github/workflows/ci.yml": cleanCI}})
+		"go.mod": "module x\n\ngo 1.27.4\n", ".github/workflows/ci.yml": cleanCI}})
 	code, out, _ := drive(gh, repos, "o")
 	if code != 0 || strings.Contains(out, "FOUND") || !strings.Contains(out, "govulncheck: gates") ||
 		!strings.Contains(out, "go-version-file") {
@@ -231,7 +231,7 @@ jobs:
 		t.Run(name, func(t *testing.T) {
 			f := fakeRepo{
 				files: map[string]string{
-					"go.mod": "module x\n\ngo 1.27.3\n", ".github/workflows/ci.yml": caller,
+					"go.mod": "module x\n\ngo 1.27.4\n", ".github/workflows/ci.yml": caller,
 				},
 				badRemote: tc.bad,
 			}
@@ -264,7 +264,7 @@ jobs:
 func TestACallThatCannotBeParsedIsUnreadable(t *testing.T) {
 	for _, ref := range []string{"nonsense", "org/repo@main", "org/repo/.github/workflows/x.yml@"} {
 		gh, repos := one("c", fakeRepo{files: map[string]string{
-			"go.mod":                   "module x\n\ngo 1.27.3\n",
+			"go.mod":                   "module x\n\ngo 1.27.4\n",
 			".github/workflows/ci.yml": "on: push\njobs:\n  vulns:\n    uses: " + ref + "\n",
 		}})
 		code, out, _ := drive(gh, repos, "o")
