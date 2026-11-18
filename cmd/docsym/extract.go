@@ -131,17 +131,34 @@ func qualified(line int, s string) []Ref {
 // otherwise be reported as missing ones. The cost is that an all-capital Go
 // name (`RGBA`) is not checked when it stands alone.
 //
-// ⛔ A LOWER-CASE NAME MUST BE camelCase TO COUNT, and that is the whole
-// defence against a flood. A README's code spans are full of ordinary words
-// -- `err`, `data`, `nil`, `go`, `main`, `stdin` -- and every one of them
-// would otherwise arrive as a reference nothing can confirm, which is how a
-// report stops being read. An interior capital is what distinguishes a Go
-// identifier somebody wrote from a word somebody quoted: `rowGeometry`,
-// `applyPredictor`, `maxDecodedSize` have one; `err` and `gofmt` do not.
+// ⛔ A LOWER-CASE NAME MUST BE camelCase TO COUNT. A README's code spans are
+// full of ordinary words -- `err`, `data`, `nil`, `go`, `main`, `stdin`,
+// `gofmt`, `stable` -- and every one would otherwise arrive as a reference
+// nothing can confirm, which is how a report stops being read. That half
+// works: those are all still rejected.
 //
-// ⚠ The cost is stated rather than hidden: a single-word unexported name
-// (`lexer`, `builder`) is still not checked. That is the same trade the
-// all-capital rule above already makes, and it errs toward silence.
+// ⛔⛔ BUT THE RULE DOES NOT DO WHAT THIS COMMENT FIRST CLAIMED, AND THE
+// CORPUS SAYS SO. It said "an interior capital is what distinguishes a Go
+// identifier somebody wrote from a word somebody quoted". Measured over
+// 2 584 fleet READMEs, the rule admits 933 distinct names and 12 378
+// occurrences the old one dropped, and the bulk of them are not Go:
+//
+//	LDAP        gidNumber 256, sambaNTPassword 200, uidNumber 106, posixGroup
+//	DOM and JS  localStorage 319, postMessage 225, putImageData, requestAdapter
+//	JSON fields maxTokens, stopReason, inputTokens, additionalModelRequestFields
+//	GraphQL     headRefOid, markPullRequestReadyForReview, deleteIssue
+//	magic       fLaC 195, iTunSMPB 104
+//
+// camelCase separates Go AND JavaScript AND JSON AND LDAP AND GraphQL from
+// English. It is a smaller flood, not no flood: about 4.8 new unconfirmed
+// names per README, concentrated in the LDAP, WebGPU and Bedrock repositories.
+// They are harmless -- an unconfirmed name never fails a run and prints only
+// under --bare -- but the summary's count is noisier than it was, so the
+// lower-case ones are counted separately where the totals are reported.
+//
+// ⚠ And the cost in the other direction, stated rather than hidden: a
+// single-word unexported name (`lexer`, `builder`) is still not checked. That
+// is the same trade the all-capital rule above already makes.
 func plausibleName(s string) bool {
 	if strings.ToUpper(s) == s || strings.Contains(s, "_") {
 		return false

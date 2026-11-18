@@ -78,16 +78,34 @@ func Load(dir string, goos []string) (*Index, error) {
 		// unconfirmed: 39 false alarms on one README, which is how a report
 		// stops being read.
 		//
-		// ⚠ It costs a type-check from source instead of a read of export data,
-		// once per GOOS. MEASURED on go-pdfkit/reader, four platforms, at a
-		// 1-minute load of 7.9: 0.57s wall before, 1.10s after — roughly
-		// double, and 0.35s of user time against 2.49s, which the cores absorb.
-		// (An earlier draft of this comment said "about 4s to 6s". That was
-		// invented, and timing it took one command.)
+		// ⭐ NeedSyntax ALONE, AND THE MEASUREMENT IS WHY. It type-checks the
+		// MATCHED packages from source while their imports still come from
+		// export data — which is exactly what makes an unexported object of
+		// this module visible, and nothing more. Adding NeedDeps extends
+		// source type-checking to the whole import graph, and NeedFiles,
+		// NeedCompiledGoFiles, NeedImports and NeedTypesInfo are read by
+		// nothing here: docsym touches only Types, Name, PkgPath, Module and
+		// Errors.
+		//
+		// Measured on go-pdfkit/reader, four platforms, three adjacent runs at
+		// a 1-minute load of 2.25 — wall, then user:
+		//
+		//	export data only          0.340s   0.33s
+		//	+ NeedSyntax (this)       0.365s   0.45s   +7% wall
+		//	+ NeedDeps and the rest   0.823s   2.46s   2.4x wall, 7.5x user
+		//
+		// All three report the same 85 references and the same 39 unconfirmed,
+		// so the heavy modes bought nothing at all.
+		//
+		// ⚠ Two earlier versions of this comment were wrong, and both in the
+		// same way. The first said "about 4s to 6s", invented. The second said
+		// "0.57s to 1.10s, roughly double" — real numbers, but taken at load
+		// 7.9 against a baseline measured separately, and measuring the heavy
+		// mode this no longer uses. A comparison is a measurement of its
+		// CONDITIONS as much as its subject.
 		cfg := &packages.Config{
 			Mode: packages.NeedName | packages.NeedTypes | packages.NeedModule |
-				packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedImports |
-				packages.NeedDeps | packages.NeedSyntax | packages.NeedTypesInfo,
+				packages.NeedSyntax,
 			Dir: dir,
 			Env: loadEnv(g, filepath.Join(modfileDir, "go.mod")),
 		}
