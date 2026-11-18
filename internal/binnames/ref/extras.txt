@@ -1,0 +1,18 @@
+# list: Tools Debian does not package
+# source: https://kubernetes.io/docs/reference/kubectl/
+# source: https://kubernetes.io/releases/download/
+# source: https://docs.docker.com/reference/cli/docker/
+# source: https://docs.docker.com/reference/cli/dockerd/
+# source: https://docs.oracle.com/en/java/javase/21/docs/specs/man/kinit.html
+# source: https://docs.oracle.com/en/java/javase/21/docs/specs/man/klist.html
+# source: https://docs.oracle.com/en/java/javase/21/docs/specs/man/ktab.html
+# fetched: 2026-11-18
+# each name was found in the page cited
+docker	docker	https://docs.docker.com/reference/cli/docker/
+dockerd	docker	https://docs.docker.com/reference/cli/dockerd/
+kinit	Java bin (JDK tool)	https://docs.oracle.com/en/java/javase/21/docs/specs/man/kinit.html
+klist	Java bin (JDK tool)	https://docs.oracle.com/en/java/javase/21/docs/specs/man/klist.html
+ktab	Java bin (JDK tool)	https://docs.oracle.com/en/java/javase/21/docs/specs/man/ktab.html
+kubeadm	Kubernetes	https://kubernetes.io/releases/download/
+kubectl	kubectl	https://kubernetes.io/docs/reference/kubectl/
+kubelet	Kubernetes	https://kubernetes.io/releases/download/
