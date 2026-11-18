@@ -22,6 +22,9 @@
 //	https://docs.github.com/en/rest/branches/branches      POST /repos/{o}/{r}/merge-upstream, body branch; 200 merge_type, 409 conflict, 422
 //	https://docs.github.com/en/rest/actions/secrets        GET .../actions/secrets/public-key (key_id, key);
 //	                                                       PUT .../actions/secrets/{name}, encrypted_value + key_id; 201 created, 204 updated
+//	https://docs.github.com/en/rest/repos/repos#enable-private-vulnerability-reporting-for-a-repository
+//	                                                       PUT|DELETE|GET /repos/{o}/{r}/private-vulnerability-reporting;
+//	                                                       204 for the writes (admin access), GET 200 {"enabled": bool}; 422
 package main
 
 import (
@@ -63,6 +66,10 @@ const longHelp = `Repository-level GitHub writes, each after showing the reposit
   ghrepo <owner/repo> sync [--branch B]
   ghrepo <owner/repo> secret-set <NAME> (--value-file F | --value-stdin)
   ghrepo <owner/repo> pages <workflow|gh-pages>
+  ghrepo <owner/repo> private-reporting <enable|disable|status>
+
+private-reporting turns GitHub's private vulnerability reporting on or off, or
+reads it; the state is read back after a write. It needs admin access.
 
 pages workflow makes the Pages site publish what a workflow deploys (build type
 "workflow"), creating the site when there is none. A repository named
@@ -114,7 +121,7 @@ type opts struct {
 func RootCmd() *cobra.Command {
 	var o opts
 	cmd := &cobra.Command{
-		Use:          "ghrepo <owner/repo> <fork|edit|rename|archive|delete|sync|secret-set|pages> [arg]",
+		Use:          "ghrepo <owner/repo> <fork|edit|rename|archive|delete|sync|secret-set|pages|private-reporting> [arg]",
 		Short:        "Fork, edit, rename, archive, delete, sync a GitHub repository, or set an Actions secret",
 		Long:         longHelp,
 		Args:         cobra.RangeArgs(2, 3),
@@ -230,8 +237,12 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 			return fmt.Errorf("pages: want \"workflow\" or \"gh-pages\", got %q", arg)
 		}
 		o.pagesMode = arg
+	case "private-reporting":
+		if arg != "enable" && arg != "disable" && arg != "status" {
+			return fmt.Errorf("private-reporting: want enable, disable or status, got %q", arg)
+		}
 	default:
-		return fmt.Errorf("unknown verb %q: want fork, edit, rename, archive, delete, sync, secret-set or pages", verb)
+		return fmt.Errorf("unknown verb %q: want fork, edit, rename, archive, delete, sync, secret-set, pages or private-reporting", verb)
 	}
 	if o.org != "" || o.name != "" {
 		if verb != "fork" {
@@ -302,6 +313,8 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		return doSync(out, c, repoURL, tok, r, o)
 	case "pages":
 		return doPages(out, c, repoURL, tok, r, o)
+	case "private-reporting":
+		return doPrivateReporting(out, c, repoURL, tok, r, o, arg)
 	default:
 		return doSecret(out, c, repoURL, tok, r, o, arg, secret)
 	}
@@ -596,6 +609,59 @@ func doPagesBranch(out io.Writer, c *http.Client, repoURL, tok string, r repoInf
 		return fmt.Errorf("pages: asked for gh-pages, the site says site=%t build_type=%q source=%q", found, bt, src)
 	}
 	fmt.Fprintf(out, "pages: serves gh-pages on %s\n", r.FullName)
+	return nil
+}
+
+// pvrEnabled reads whether private vulnerability reporting is on.
+func pvrEnabled(c *http.Client, repoURL, tok string) (bool, error) {
+	_, b, err := do(c, http.MethodGet, repoURL+"/private-vulnerability-reporting", tok, nil, http.StatusOK)
+	if err != nil {
+		return false, err
+	}
+	var p struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil || p.Enabled == nil {
+		return false, errors.New("private-reporting: the reply carried no \"enabled\", so nothing proves the state")
+	}
+	return *p.Enabled, nil
+}
+
+// doPrivateReporting enables, disables or reads private vulnerability
+// reporting; the state is read back after a write and must match.
+func doPrivateReporting(out io.Writer, c *http.Client, repoURL, tok string, r repoInfo, o opts, action string) error {
+	before, err := pvrEnabled(c, repoURL, tok)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "private-reporting: enabled=%t\n", before)
+	if action == "status" {
+		return nil
+	}
+	want := action == "enable"
+	if before == want {
+		fmt.Fprintln(out, "already so; nothing to do")
+		return nil
+	}
+	if o.dryRun {
+		fmt.Fprintf(out, "would %s private vulnerability reporting\n", action)
+		return nil
+	}
+	method := http.MethodDelete
+	if want {
+		method = http.MethodPut
+	}
+	if _, _, err := do(c, method, repoURL+"/private-vulnerability-reporting", tok, nil, http.StatusNoContent); err != nil {
+		return err
+	}
+	after, err := pvrEnabled(c, repoURL, tok)
+	if err != nil {
+		return err
+	}
+	if after != want {
+		return fmt.Errorf("private-reporting: asked for enabled=%t, the repository says enabled=%t", want, after)
+	}
+	fmt.Fprintf(out, "private-reporting: enabled=%t on %s\n", after, r.FullName)
 	return nil
 }
 
