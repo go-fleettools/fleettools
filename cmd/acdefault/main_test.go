@@ -108,6 +108,45 @@ func TestVerdictIgnoresTheHelpString(t *testing.T) {
 	}
 }
 
+// ⛔⛔ THE SPELLING THAT COST THREE REFUSALS BEFORE IT WAS ADDED. mpdecimal
+// 4.0.1 writes "(default is yes)", and this command reported "documents 6
+// switch(es) and a stated default for NONE of them" — true of its own reading
+// and false of the file. The fixtures are the real lines.
+func TestDocumentedReadsTheWordsSpelling(t *testing.T) {
+	for _, tc := range []struct{ line, flag, want string }{
+		{"  --enable-cxx            enable building libmpdec++ (default is yes)", "enable-cxx", "on"},
+		{"  --enable-doc            enable installing the documentation (default is yes)", "enable-doc", "on"},
+		{"  --with-thing            a thing (default is no)", "with-thing", "off"},
+		{"  --with-other            another [default is off]", "with-other", "off"},
+		{"  --with-colon            punctuation (default: yes)", "with-colon", "on"},
+	} {
+		if got := Documented(tc.line)[tc.flag]; got != tc.want {
+			t.Errorf("Documented(%q)[%s] = %q, want %q", tc.line, tc.flag, got, tc.want)
+		}
+	}
+}
+
+// ⛔ AND THE OTHER HALF, WHICH IS WHAT KEEPS THE CENSUS HONEST: a project that
+// genuinely states no default must still read as stating none. pcre2 and
+// ncurses are both like this, and a pattern loose enough to "find" something
+// here would turn their silence into an invented verdict.
+func TestADescriptionWithNoDefaultStaysUndocumented(t *testing.T) {
+	for _, line := range []string{
+		"  --enable-jit            enable Just-In-Time compiling support",
+		"  --with-shared           generate shared-libraries",
+		"  --enable-pcre2-16       enable 16 bit character support",
+		"  --with-gpm              use Alessandro Rubini's GPM library",
+	} {
+		m := reHelpLine.FindStringSubmatch(line)
+		if m == nil {
+			t.Fatalf("the help line itself was not recognised: %q", line)
+		}
+		if got := Documented(line)[m[1]]; got != "" {
+			t.Errorf("Documented(%q) invented a default %q", line, got)
+		}
+	}
+}
+
 func TestDocumented(t *testing.T) {
 	for _, tc := range []struct{ src, flag, want string }{
 		{srcPython, "with-python", "on"},
