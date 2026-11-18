@@ -121,6 +121,16 @@ It exists because it happened twice in one day, 2026-11-15: a careful relay
 from one session replaced another's landed, mutation-confirmed gate with a
 pending thirty seconds after it was written, and nothing told either of them.
 
+⛔ --hook SCOPES ITS REFUSAL. A recurrence is refused immediately to the session
+that wrote it (the payload's session_id equals the memory's originSessionId),
+and to every other session only once it has gone unaccounted for longer than
+--grace (default 60m, measured from the memory's modified metadata, else its
+mtime); until then the others get a warning naming the lesson and its owner. One
+session's unaccounted lesson once refused gitpush for all ~25 sessions on the
+machine. What the hook cannot read refuses everyone, as before: a memory with no
+originSessionId or no readable age, a payload with no session_id, --grace 0. And
+a ledger or directory it cannot read at all still allows.
+
 Exit status: 0 accounted for, 1 at least one is not, 2 refused to decide — the
 memory directory or the ledger could not be read, or a landed gate would have
 been downgraded without a reason. A directory that would not open is never
@@ -181,6 +191,8 @@ func RootCmd() *cobra.Command {
 		"write everything known right now as untriaged backlog, so the gate starts clean")
 	c.Flags().BoolVar(&o.hook, "hook", false,
 		"read a PreToolUse payload on stdin and answer it: deny a publishing command while a recurrence is unaccounted for")
+	c.Flags().DurationVar(&o.grace, "grace", defaultGrace,
+		"with --hook: a recurrence blocks only the session that wrote it (the payload's session_id == the memory's originSessionId) until it has gone unaccounted for this long, then every session; other sessions are warned meanwhile. 0 refuses everyone at once. A memory with no originSessionId or no readable age refuses everyone, as before")
 	return c
 }
 
@@ -538,6 +550,7 @@ func split(stage string) []string {
 // decide, and a refusal is not a verdict.
 func hookMode(out, errOut io.Writer, o opts, stdin io.Reader) int {
 	var payload struct {
+		SessionID string `json:"session_id"`
 		ToolInput struct {
 			Command string `json:"command"`
 		} `json:"tool_input"`
@@ -556,6 +569,27 @@ func hookMode(out, errOut io.Writer, o opts, stdin io.Reader) int {
 		return 0
 	}
 	if len(open) == 0 {
+		return 0
+	}
+	open, warn := scopeByOwner(open, o, payload.SessionID, clock(), readOrigin)
+	for _, w := range warn {
+		fmt.Fprintf(errOut, "recur: warning: %s %s; owned by session %s, who is refused now. Other sessions are refused after %s unaccounted (%s left).\n",
+			w.lesson, w.why, shortID(w.owner), o.grace, w.left.Round(time.Minute))
+	}
+	if len(open) == 0 {
+		if len(warn) > 0 {
+			var w strings.Builder
+			for _, x := range warn {
+				fmt.Fprintf(&w, "recur: %s %s. It is owned by session %s, who is refused now; other sessions are refused once it has gone unaccounted for %s (%s left). Account for it: recur --memory %s --accept %s --gate <what>.\n",
+					x.lesson, x.why, shortID(x.owner), o.grace, x.left.Round(time.Minute), o.memory, x.lesson)
+			}
+			_ = json.NewEncoder(out).Encode(map[string]any{
+				"hookSpecificOutput": map[string]any{
+					"hookEventName":     "PreToolUse",
+					"additionalContext": w.String(),
+				},
+			})
+		}
 		return 0
 	}
 	var b2 strings.Builder
@@ -590,6 +624,103 @@ type opts struct {
 	downgrade string
 	seed      bool
 	hook      bool
+	grace     time.Duration // --hook: how long a lesson may stay unaccounted before it refuses sessions other than its owner; 0 refuses everyone at once
+}
+
+// defaultGrace is how long another session's unaccounted recurrence leaves the
+// rest of the machine alone. One session's lesson, `grep-c-counts-lines-not-
+// occurrences` (cae751b5), refused gitpush for every one of ~25 sessions until
+// somebody else accounted for it.
+const defaultGrace = 60 * time.Minute
+
+// scoped is a finding that is a warning for this session, not a refusal.
+type scoped struct {
+	finding
+	owner string
+	left  time.Duration // grace remaining
+}
+
+// origin is what a memory says about who wrote it and when.
+type origin struct {
+	session  string
+	modified time.Time
+}
+
+// scopeByOwner splits the open findings into those that refuse THIS session and
+// those that only warn it.
+//
+// A finding refuses when this session is the one that wrote the memory
+// (payload session == originSessionId), or when it has gone unaccounted for
+// longer than o.grace. ⛔ ANYTHING IT CANNOT READ REFUSES, as before: no
+// originSessionId, an age that cannot be read, a payload with no session id, a
+// grace of 0 or less. A gate that cannot read must not turn quietly
+// permissive about what it CAN read; the only allowance is for a finding it read
+// completely and found young and foreign.
+func scopeByOwner(open []finding, o opts, session string, now time.Time, read func(dir, lesson string) (origin, error)) (refuse []finding, warn []scoped) {
+	for _, f := range open {
+		if o.grace <= 0 || session == "" {
+			refuse = append(refuse, f)
+			continue
+		}
+		org, err := read(o.memory, f.lesson)
+		if err != nil || org.session == "" || org.modified.IsZero() || org.session == session {
+			refuse = append(refuse, f)
+			continue
+		}
+		age := now.Sub(org.modified)
+		if age < 0 {
+			age = 0 // a modified stamp from the future is a clock skew, not extra grace
+		}
+		if age >= o.grace {
+			refuse = append(refuse, f)
+			continue
+		}
+		warn = append(warn, scoped{f, org.session, o.grace - age})
+	}
+	return refuse, warn
+}
+
+func shortID(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
+}
+
+// readOrigin reads originSessionId and modified from a memory's frontmatter; when
+// `modified` is missing or not a timestamp the file's mtime stands in for it.
+func readOrigin(dir, lesson string) (origin, error) {
+	path := filepath.Join(dir, lesson+".md")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return origin{}, err
+	}
+	var org origin
+	var stamp string
+	lines := strings.Split(string(b), "\n")
+	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "---" {
+		for _, l := range lines[1:] {
+			t := strings.TrimSpace(l)
+			if t == "---" {
+				break
+			}
+			if v, ok := strings.CutPrefix(t, "originSessionId:"); ok {
+				org.session = strings.Trim(strings.TrimSpace(v), `"'`)
+			} else if v, ok := strings.CutPrefix(t, "modified:"); ok {
+				stamp = strings.Trim(strings.TrimSpace(v), `"'`)
+			}
+		}
+	}
+	if t, err := time.Parse(time.RFC3339, stamp); err == nil {
+		org.modified = t
+		return org, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return origin{}, err
+	}
+	org.modified = info.ModTime()
+	return org, nil
 }
 
 // findings is the reading both the report and the hook are built on: which
