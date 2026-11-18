@@ -90,6 +90,23 @@ label both added and removed, a label to remove that the issue does not carry.
 Adding a label the repository lacks creates it; adding one already present is
 a no-op on GitHub's side.
 
+--comment <id> with --edit changes one existing COMMENT instead of the issue:
+
+  ghissue <owner/repo> --edit --comment <id> --body-file <file>
+
+A comment id is unique within the repository, so no issue number is given and
+one is refused — a line carrying both names two different objects. --body-file
+REPLACES the comment's text; the comment, its author and its current first line
+are shown before anything is sent, and the body the API reports back is compared
+with what was sent, because a 200 says the request was accepted and only the
+text says it landed.
+
+⛔ AN EDIT IS A CORRECTION, NEVER A RETRACTION. GitHub keeps every previous
+version under "edited", so text that should not have been published stays
+readable to anyone who opens that menu. The command says so every time. A
+comment carries no title and no labels, so --title, --add-label and
+--remove-label are refused with it.
+
 --delete destroys an issue PERMANENTLY, which REST cannot do — it is GitHub's
 deleteIssue mutation, and it needs admin rights on the repository:
 
@@ -159,6 +176,7 @@ func RootCmd() *cobra.Command {
 		prior    string
 		priorWv  string
 		parityWv string
+		commentI int64
 	)
 	cmd := &cobra.Command{
 		Use:          "ghissue <owner/repo> <number> | <owner/repo> --new --title <t> --body-file <f>",
@@ -173,6 +191,17 @@ func RootCmd() *cobra.Command {
 				addLabels: addLab, removeLabels: remLab,
 				edit: doEdit, waiver: waiver, confirm: confirm,
 				priorArt: prior, priorWaiver: priorWv, parityWaiver: parityWv,
+				commentID: commentI,
+			}
+			// ⛔ A comment is addressed by its OWN id, so it is dispatched before
+			// the three issue acts rather than folded into --edit's argument
+			// check: --comment with an issue number is a line whose author meant
+			// one of two different objects.
+			if commentI != 0 {
+				if doNew || doDelete {
+					return errors.New("--comment addresses an existing comment; --new opens an issue and --delete destroys one")
+				}
+				return runEditComment(cmd, args, o)
 			}
 			// ⛔ The three acts are named separately and checked against each
 			// other rather than ordered by precedence: --delete beside --edit is
@@ -242,6 +271,8 @@ func RootCmd() *cobra.Command {
 	// text, like the two above.
 	f.StringVar(&parityWv, "parity-waiver", "",
 		"why this text may defer a performance change because it breaks bit identity (STAMPED into the text)")
+	f.Int64Var(&commentI, "comment", 0,
+		"with --edit: the id of an existing comment whose body --body-file REPLACES (no issue number; an edit does not retract)")
 	return cmd
 }
 
@@ -260,6 +291,9 @@ type opts struct {
 	priorArt, priorWaiver string
 	// parityWaiver answers the bit-parity gate; see paritygate.go.
 	parityWaiver string
+	// commentID names one existing comment to edit, by its own id; see
+	// comment.go. Zero means the command is about an issue.
+	commentID int64
 }
 
 // count says how many of the acts were asked for.
