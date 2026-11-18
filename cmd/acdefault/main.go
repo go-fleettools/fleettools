@@ -129,16 +129,26 @@ func run(dir string, flags []string, stdout, stderr io.Writer) int {
 	}
 
 	wanted := flags
+	undocumented := 0
 	if len(wanted) == 0 {
 		for k, v := range help {
 			if v != "" {
 				wanted = append(wanted, k)
+			} else {
+				undocumented++
 			}
 		}
 		sort.Strings(wanted)
 	}
+	// ⛔ "N examined" ALONE IS THE SHAPE THAT HIDES A SCAN THAT READ NOTHING.
+	// Measured on two real trees: pcre2 10.49 printed "3 switch(es) examined"
+	// while walking past 40 more whose help lines state no default, and ncurses
+	// 6.6 printed a bare refusal while documenting 33 switches, none with a
+	// default token. Both numbers are true and both are useless without the
+	// other, so the census says N OF M and names what it walked past.
 	if len(wanted) == 0 {
-		fmt.Fprintf(stderr, "acdefault: %s documents no --with-*/--enable-* switch with a stated default; nothing was examined\n", confPath)
+		fmt.Fprintf(stderr, "acdefault: %s documents %d --with-*/--enable-* switch(es) and a stated default for NONE of them, so there is nothing to compare the code against\n", confPath, undocumented)
+		fmt.Fprintf(stderr, "acdefault: that is a fact about this project, not a failure here — some autoconf macro sets (ncurses' among them) write help lines like `--with-shared  generate shared-libraries` with no (on)/(off)/[default=…] token at all. Name the switches with --flag to read their code anyway.\n")
 		return 2
 	}
 
@@ -177,7 +187,15 @@ func run(dir string, flags []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "%s --%-28s documented %-13s actual %-12s %s\n", mark, v.Flag, doc, eff, v.Why)
 	}
-	fmt.Fprintf(stdout, "%d switch(es) examined, %d disagreeing or undetermined\n", len(out), bad)
+	if len(flags) > 0 {
+		fmt.Fprintf(stdout, "%d switch(es) examined, %d disagreeing or undetermined\n", len(out), bad)
+	} else {
+		fmt.Fprintf(stdout, "%d of %d documented switch(es) examined, %d disagreeing or undetermined\n",
+			len(out), len(out)+undocumented, bad)
+		if undocumented > 0 {
+			fmt.Fprintf(stdout, "⚠ %d switch(es) NOT examined: their help line states no default, so this has nothing to compare the code against (name them with --flag to read the code anyway)\n", undocumented)
+		}
+	}
 	if bad > 0 {
 		return 1
 	}

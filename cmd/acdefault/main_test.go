@@ -152,6 +152,55 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// ⛔⛔ "N examined" ALONE IS THE SHAPE THAT HIDES A SCAN THAT READ NOTHING, and
+// both halves of it were measured on real trees: pcre2 10.49 printed "3
+// switch(es) examined" while walking past forty whose help states no default,
+// and ncurses 6.6 refused outright while documenting thirty-three of them.
+func TestTheCensusSaysHowManyItWalkedPast(t *testing.T) {
+	dir := t.TempDir()
+	// Two switches with a stated default, two without.
+	write(t, filepath.Join(dir, "configure"), srcDocs+srcOutput+`
+  --with-mystery          no default is stated here
+  --enable-enigma         nor here
+if test "$with_mystery" = "yes"; then
+  :
+fi
+`)
+	var out, errBuf bytes.Buffer
+	if got := run(dir, nil, &out, &errBuf); got != 0 {
+		t.Fatalf("status = %d, want 0\n%s%s", got, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "2 of 4 documented switch(es) examined") {
+		t.Errorf("the census must say N OF M, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "2 switch(es) NOT examined") {
+		t.Errorf("it must name what it walked past, got:\n%s", out.String())
+	}
+}
+
+// ⛔ A tree documenting switches but no defaults must say WHICH fact that is —
+// "this project states none", not "nothing is here". ncurses 6.6 is the case.
+func TestATreeWithSwitchesAndNoDefaultsSaysSo(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "configure"), `
+  --with-shared           generate shared-libraries
+  --with-termlib          generate separate terminfo library
+if test "$with_shared" = "yes"; then
+  :
+fi
+`)
+	var out, errBuf bytes.Buffer
+	if got := run(dir, nil, &out, &errBuf); got != 2 {
+		t.Fatalf("status = %d, want 2\n%s%s", got, out.String(), errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "documents 2 ") {
+		t.Errorf("the refusal must count the switches it DID find, got: %s", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "fact about this project") {
+		t.Errorf("the refusal must say it is the project's silence, not a failure here, got: %s", errBuf.String())
+	}
+}
+
 // ⛔ A run that could not read must never look like a clean one.
 func TestRunRefusesWhatItCannotRead(t *testing.T) {
 	var out, errBuf bytes.Buffer
