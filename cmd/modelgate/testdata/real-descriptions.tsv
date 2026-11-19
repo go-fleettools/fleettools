@@ -1,0 +1,534 @@
+claude-haiku-5-5	Check curl CVEs fixed after 8.17.0
+claude-haiku-5-5	Find FreeType's signing key fingerprint
+claude-haiku-5-5	Check flexlexer.org for key fingerprint
+claude-haiku-5-5	Fetch binutils 2.47 announcement
+claude-haiku-5-5	Find GNU gawk 5.3.2 announcement
+claude-haiku-5-5	Find GNU sed 4.10 release announcement
+claude-haiku-5-5	Find GNU make 4.4.1 release announcement
+claude-sonnet-5-5	Build the modfloor gate
+claude-sonnet-5-5	Write the testwhy -skipped gate
+claude-sonnet-5-5	Audit and migrate Jekyll Pages to Hugo
+claude-opus-5	Review replystamp PR #256
+claude-haiku-5-5	Read overleaf-cep feature list
+claude-haiku-5-5	Read tectonic's own documentation
+claude-haiku-5-5	Read OS/2 fsSelection bit definitions
+claude-haiku-5-5	Read the OpenType spec on default instances
+claude-haiku-5-5	Read the TDS and TeX Live packaging specs
+claude-haiku-5-5	Read the OpenType spec on instance naming
+claude-opus-5	TeXLive kernel drift bibliography
+claude-opus-5	Font selection bibliography
+claude-opus-5	Hyphenation and vertical bibliography
+claude-haiku-5-5	Survey filer pieces in go-widgets/wasmdesk
+claude-sonnet-5-5	gofloor --fix, budget-paced groups
+claude-sonnet-5-5	turnd home pages collab/turn
+claude-sonnet-5-5	ghadvisory fleet tool
+claude-sonnet-5-5	S3 keepalive: private_key_jwt + STS + credproc
+claude-sonnet-5-5	SMB chain B: Kerberos acceptor smb + fileshare
+claude-sonnet-5-5	bridge: 7 languages + theme switcher
+claude-sonnet-5-5	Fleet binary-name collision tool
+claude-sonnet-5-5	SMB chain A: KDC interop, TGT mint, Windows tool
+claude-sonnet-5-5	Lab spike: inject foreign TGT into Windows
+claude-opus-5-5	Bibliography: passwordless SMB, non-domain Windows
+claude-sonnet-5-5	bridge: designed pages, neutral theme
+claude-opus-5-5	Design: extract loom-server hosting
+claude-sonnet-5-5	turnd: host handover (#19)
+claude-sonnet-5-5	Repro and fix collaborative undo (toolkit#591)
+claude-sonnet-5-5	turnd: OpenTelemetry traces, metrics, logs
+claude-sonnet-5-5	turnd: relay grace + session renewal
+claude-sonnet-5-5	bridge: self-service passkeys + browser test
+claude-sonnet-5-5	ghrepo verb: private vuln reporting
+claude-sonnet-5-5	Passkeys: go-authn/webauthn + bridge
+claude-sonnet-5-5	Bring go-turn org to fleet conformance
+claude-sonnet-5-5	Add turnd mint-credentials and a probe
+claude-sonnet-5-5	Add local accounts login to bridge
+claude-sonnet-5-5	Implement stun + TURN server
+claude-sonnet-5-5	Implement creds, login, rendezvous, turnd
+claude-sonnet-5-5	gitsafe#149 amend gate
+claude-opus-5-5	Design review: guard-bash shell parsing
+claude-sonnet-5-5	Docs site and landing updates
+claude-sonnet-5-5	Secret-manager PIN/password sources
+claude-sonnet-5-5	theca FIDO2 on Linux and Windows
+claude-sonnet-5-5	Docs+landing: theca v0.2.0, automount
+claude-sonnet-5-5	Write go-fileshare/automount
+claude-sonnet-5-5	theca/share package + GUI Share button
+claude-sonnet-5-5	SMB 3.1.1 and encryption
+claude-sonnet-5-5	theca TPM rollback counter
+claude-opus-5-5	Security review SMB 3.1.1+encryption
+claude-sonnet-5-5	theca perf gaps #8 #9 #10
+claude-sonnet-5-5	New repo go-macos/netfs
+claude-sonnet-5-5	New repo go-freedesktop/gvfs
+claude-sonnet-5-5	Windows WNet mount + port 445
+claude-sonnet-5-5	exfat FormatImage in-process
+claude-haiku-5-5	Inventory: SMB share + automount
+claude-sonnet-5-5	Build Theca GUI v0.1
+claude-sonnet-5-5	Theca docs site and landing
+claude-haiku-5-5	Read CTAP 2.1 getNextAssertion
+claude-opus-5-5	Review H2 (b) change in theca
+claude-opus-5-5	Second review of theca PR #4
+claude-sonnet-5-5	h264 speed vs ffmpeg
+claude-sonnet-5-5	h265#54 blind spots
+claude-sonnet-5-5	h265 v0.22.0 docs pass
+claude-sonnet-5-5	HEVC PR1: CABAC decoding engine
+claude-sonnet-5-5	decode v0.8.0 docs/landing/profile
+claude-sonnet-5-5	AVX2 kernels for go-videodsp on fractal
+claude-opus-5-5	Review h264#78 stack
+claude-sonnet-5-5	HE-AAC v2 speed (decode#77)
+claude-opus-5-5	Review kernels#2 (qpel NEON) + decode#87
+claude-opus-5-5	Review h265#31 CABAC engine
+claude-sonnet-5-5	Review decode#92 sbrPredictor CDotC
+claude-opus-5-5	Design our own HEVC decoder
+claude-sonnet-5-5	H.264 structural speed fixes
+claude-sonnet-5-5	Review decode#89 all-pass unroll
+claude-sonnet-5-5	First kernel: luma qpel MC in go-videodsp/kernels
+claude-sonnet-5-5	Review decode#88 gain interpolation unroll
+claude-sonnet-5-5	PS5: full PS profile (procedure B, IPD/OPD)
+claude-opus-5-5	Review h264#52-57 structural PRs
+claude-opus-5-5	External review of decode#78 (PS4 enable)
+claude-opus-5-5	Design shared video codec kernels + H.264 speed
+claude-sonnet-5-5	Review go-videodsp/kernels#1 scaffold
+claude-opus-5-5	Security review of go-avkit/worker#1
+claude-sonnet-5-5	avkit#123 CENC reader limits
+claude-sonnet-5-5	Decoder sovereignty census for go-avkit
+claude-sonnet-5-5	go-avkit README/landing/docs/brand to fleet standard
+claude-sonnet-5-5	Review go-avkit fleet-docs PRs
+claude-sonnet-5-5	Review decode#82 + floats#60
+claude-opus-5-5	Review decode#79/80/81 + go-simd/floats#59
+claude-sonnet-5-5	Create go-avkit/worker video worker module
+claude-sonnet-5-5	avkit#113 MP4 box-count bound
+claude-sonnet-5-5	PS4: enable Parametric Stereo by default
+claude-opus-5-5	Review decode#76 and verify the s390x compiler finding
+claude-sonnet-5-5	Reduce s390x bad-pointer crash (decode#74)
+claude-sonnet-5-5	Fix avkit#120 Matroska lacing bound
+claude-sonnet-5-5	AAC 5.1 speed parity (decode#35)
+claude-sonnet-5-5	PS3 clean-room implementation
+claude-opus-5-5	External review of decode#69/#71/#72
+claude-opus-5-5	External review of decode#68 (PS3)
+claude-opus-5-5	PS3 decorrelator+mixing clean-room spec
+claude-sonnet-5-5	PS2 hybrid bank clean-room implementation
+claude-opus-5-5	External review of decode#66 (PS2)
+claude-opus-5-5	PS2 hybrid bank clean-room spec
+claude-opus-5-5	External review of decode#64
+claude-sonnet-5-5	decode#53: honour iTunSMPB gapless metadata
+claude-sonnet-5-5	Clean-room rewrite of the PS parser
+claude-opus-5-5	External review of 4 PRs
+claude-sonnet-5-5	AAC-LC decoder in go-avkit/decode
+claude-sonnet-5-5	PS1: bitstream, tables, channel policy
+claude-sonnet-5-5	decode#57: keep exact, document, ffmpeg report
+claude-sonnet-5-5	Finish decode#52 review fixes
+claude-sonnet-5-5	AAC SBR part 2: QMF, HF generation
+claude-opus-5-5	PS (HE-AAC v2) design note
+claude-sonnet-5-5	AAC SBR (HE-AAC v1) in decode
+claude-sonnet-5-5	Build modelgate Agent-call hook
+claude-sonnet-5-5	Smooth agentsync claim gate and recur gate
+claude-sonnet-5-5	Build agentscope live agent graph
+claude-sonnet-5-5	zfs#73 diagnose in the VM
+claude-sonnet-5-5	btrfs multi-core extent decode
+claude-sonnet-5-5	Kernel VM measurements batch
+claude-sonnet-5-5	Add waitload to fleettools
+claude-sonnet-5-5	lzo#9 btrfs LZO gap
+claude-opus-5-5	Review smb#66 Kerberos acceptor
+claude-sonnet-5-5	zfs#71 error order with workers
+claude-sonnet-5-5	zfs#68 zstd single-core gap
+claude-sonnet-5-5	zfs#73 sequential slowdown
+claude-sonnet-5-5	squashfs#66 then zfs#69
+claude-opus-5-5	Review zfs PR 72
+claude-opus-5-5	Review squashfs PR 67
+claude-sonnet-5-5	kerneljudge#7 then zfs parallel reads
+claude-opus-5-5	Review zfs PR 70
+claude-opus-5-5	Review inflight PR 8 cache
+claude-opus-5-5	Review kerneljudge PR 8
+claude-sonnet-5-5	inflight#6 then squashfs#61
+claude-opus-5-5	Review adaptive data cache
+claude-opus-5-5	Review inflight Each/Ordered change
+claude-sonnet-5-5	Edon-R perf: close gap, multi-buffer
+claude-opus-5-5	Independent review of edonr PR branch
+claude-sonnet-5-5	Add edonr and skein docs pages
+claude-sonnet-5-5	Clean-room Edon-R from spec
+claude-opus-5-5	Independent review of edonr PR
+claude-sonnet-5-5	zfs#59 salted checksums
+claude-opus-5-5	Review zfs salted checksum PR
+claude-sonnet-5-5	Multi-core decompression squashfs
+claude-opus-5-5	Review skein and edonr PRs
+claude-opus-5-5	Independent review of squashfs PR 55
+claude-sonnet-5-5	Landing/docs for new releases
+claude-sonnet-5-5	FS data-path profile + fleet inventory
+claude-opus-5-5	Review zfs checksum PR
+claude-opus-5-5	Review btrfs zstd PR
+claude-opus-5-5	Review squashfs codec PR
+claude-opus-5-5	Review lz4 decoder PR
+claude-opus-5-5	Review lzo decoder PR
+claude-opus-5-5	Review fletcher4 PR
+claude-sonnet-5-5	Add ghpr create to fleettools
+claude-opus-5-5	Review ghpr create PR
+claude-sonnet-5-5	Kernel judge in VM for go-filesystems
+claude-opus-5-5	Review exfat directory cache
+claude-opus-5-5	Review iso9660 dir cache
+claude-sonnet-5-5	twofish#2 per-block perf
+claude-opus-5-5	Review kerneljudge perf lookup fix
+claude-opus-5-5	Independent review of twofish PR 8
+claude-opus-5-5	Review squashfs cache key fix
+claude-opus-5-5	Review btrfs findLeaf skip
+claude-sonnet-5-5	clear + zfscrypt to v0.1.0
+claude-opus-5-5	Review squashfs fragment cache
+claude-opus-5-5	Review clear#14 and zfscrypt#19
+claude-opus-5-5	Review btrfs prefix-walk skip
+claude-haiku-5-5	Readiness check clear + zfscrypt
+claude-opus-5-5	Review zfs label and sparse fixes
+claude-opus-5-5	Review exfat alloc perf fix
+claude-opus-5-5	Review squashfs kernel-refusal fixes
+claude-opus-5-5	Review exfat kernel-refusal fixes
+claude-sonnet-5-5	18 patch releases go 1.27.4
+claude-sonnet-5-5	Maintenance go-encryptions + go-fde
+claude-opus-5-5	Review btrfs kernel-refusal fixes
+claude-sonnet-5-5	Implement Theca v0.1
+claude-opus-5-5	Review theca PR 4 container
+claude-sonnet-5-5	Bootstrap go-theca org
+claude-opus-5-5	Review theca PR 3 merkle journal
+claude-opus-5-5	Independent review of kerneljudge PR
+claude-opus-5-5	Review theca PR 3 crypto
+claude-haiku-5-5	go-filesystems capability inventory
+claude-sonnet-5-5	VeraCrypt volume writer
+claude-sonnet-5-5	go-authn/fido hmac-secret + UV token
+claude-opus-5-5	Final review of vcmount
+claude-opus-5-5	Independent review of PR 27
+claude-opus-5-5	YubiKey Bio FIDO2/PIV bibliography
+claude-opus-5-5	Review vcmount driver
+claude-opus-5-5	Independent review of HARDWARE-KEYS.md
+claude-opus-5-5	Theca design document
+claude-opus-5-5	Review vcoracle botan library
+claude-opus-5-5	Crypto review of Theca design
+claude-opus-5-5	Review vcoracle tool
+claude-sonnet-5-5	ZEDFREE seal reverse engineering
+claude-opus-5-5	Independent review of volume writer
+claude-opus-5-5	Independent review of PR 22
+claude-sonnet-5-5	ZEDFREE GUI driver via AX
+claude-opus-5-5	Review writer delta
+claude-opus-5-5	ZED seal bibliography
+claude-opus-5-5	Review accessibility v0.6.0 code
+claude-sonnet-5-5	Whirlpool amd64 vs Botan
+claude-opus-5-5	Independent kernel code review
+claude-sonnet-5-5	Serpent AVX2 bitsliced kernel
+claude-sonnet-5-5	Renovate dependencyDashboard fix x3
+claude-opus-5-5	Review serpent AVX-512 branch
+claude-opus-5-5	Independent review of serpent AVX2 PR
+claude-sonnet-5-5	Botan recipe for serpent amd64
+claude-sonnet-5-5	Whirlpool past Botan perf
+claude-opus-5-5	Independent review of PR 6
+claude-opus-5-5	independent review go-fde/zed#2
+claude-sonnet-5-5	close whirlpool#1 perf gap vs Botan
+claude-sonnet-5-5	ZED reader: go-office/cfb + go-fde/zed
+claude-opus-5-5	independent review whirlpool+streebog PRs
+claude-sonnet-5-5	VeraCrypt system encryption (fde#28)
+claude-sonnet-5-5	Serpent batch path to close serpent#2
+claude-opus-5	Adversarial review of ratewait
+claude-sonnet-5-5	Review collab PR 281
+claude-sonnet-5-5	Review collab PR 280
+claude-opus-5	Review collab PR 279
+claude-sonnet-5-5	Review crdt PR 179
+claude-opus-5	Review fleettools PR 314
+claude-sonnet-5-5	Review crdt PR 178
+claude-sonnet-5-5	Review collab PR 278
+claude-opus-5	Review collab PR 277
+claude-opus-5	Review hostload 298 final
+claude-opus-5	Review viaonly 250 final
+claude-opus-5	Review collab PR 275
+claude-opus-5	Review hostload PR 298
+claude-opus-5	Review recur branch
+claude-opus-5	Review viaonly branch
+claude-opus-5	Independent review of collab#274
+claude-opus-5	Independent review of fleettools#250
+claude-opus-5-5	Review hfsplus#52 replay on write
+claude-sonnet-5-5	Implement hfsplus#45 PR 1 replayer
+claude-opus-5-5	Review fileshare#146 S3 STS
+claude-opus-5-5	Review fileshare#147 SMB Kerberos
+claude-sonnet-5-5	Review docs#52 hfsplus page
+claude-opus-5-5	Review hfsplus#50 journal replayer
+claude-opus-5-5	Review Renovate config fix PR
+claude-opus-5-5	Review docs PRs #49 and #50
+claude-sonnet-5-5	Docs for hfsplus v0.12.3
+claude-opus-5-5	Review hfsplus PR #47
+claude-sonnet-5-5	Implement hfsplus#32 follow-ups
+claude-opus-5-5	Design note for hfsplus#45
+claude-opus-5-5	Review design note hfsplus#46
+claude-opus-5-5	Review PRs #145 and docs #74
+claude-sonnet-5-5	Fix stale HFS+ opt-in reasons
+claude-opus-5-5	Review fileshare PR #144
+claude-opus-5-5	Review docs PR #73 translations
+claude-sonnet-5-5	Docs PR for reload ordering
+claude-sonnet-5-5	Implement fileshare#136 follow-ups
+claude-opus-5-5	Review fileshare PR #142
+claude-opus-5-5	Review fileshare#134 durability option
+claude-sonnet-5-5	Bump fileshare to hfsplus v0.12.0, docs
+claude-opus-5-5	Independent review of hfsplus#34
+claude-sonnet-5-5	hfsplus#35 commit latency (+#39)
+claude-opus-5-5	Independent review of fileshare#125
+claude-sonnet-5-5	fileshare: hfsplus v0.10.0, #129, #107
+claude-sonnet-5-5	hfsplus#33 in-place I/O
+claude-sonnet-5-5	hfsplus#37 crash-test hardening
+claude-sonnet-5-5	HFS+ writable shares + hfsplus docs
+claude-sonnet-5-5	Implement container audio for Quake
+claude-sonnet-5-5	Damage-aware present in webcanvas
+claude-sonnet-5-5	Fix Renovate validate on 3 orgs
+claude-sonnet-5-5	Quake GPU default and render gaps
+claude-sonnet-5-5	Reproduce Quake 134 under Firefox
+claude-sonnet-5-5	Quake container: mouse and menu
+claude-sonnet-5-5	Quake GPU: lightstyles, dlights, clip
+claude-opus-5-5	Design container audio host module
+claude-sonnet-5-5	Fix dashboard multi-select Remove
+claude-sonnet-5-5	Locate gpuworld game-loop gap #97
+claude-sonnet-5-5	quake engine#88 E1-E3
+claude-sonnet-5-5	Fix playground CSP residuals #91
+claude-sonnet-5-5	Repair go-slides/vscode and bump slides
+claude-sonnet-5-5	Docs and landing for v0.26.1
+claude-sonnet-5-5	Fix engine#443 instance cache
+claude-sonnet-5-5	Playground: lazy math font (slides v0.22.0)
+claude-sonnet-5-5	go-slides docs: v0.20.2 → v0.25.0
+claude-sonnet-5-5	Landing: bump to go-slides v0.25.0
+claude-sonnet-5-5	slides: shared scheduler + multi-core table
+claude-sonnet-5-5	Bisect slides PDF/PPTX regression
+claude-sonnet-5-5	Review v0.20.1 sweep PRs #122 #123
+claude-sonnet-5-5	slides#111 font parse bomb test
+claude-opus-5-5	Security review: go-slides git integration
+claude-sonnet-5-5	slides#113 RenderCache provider generation
+claude-sonnet-5-5	Fix insert.cjs FileChooser flake
+claude-sonnet-5-5	slides: emoji and math-font providers
+claude-sonnet-5-5	Playground: embed only used icons
+claude-sonnet-5-5	Update design PR #75 to as-built
+claude-sonnet-5-5	Measure playground wasm split candidates
+claude-sonnet-5-5	Bump playground to landingkit v0.33.0
+claude-sonnet-5-5	Fix landingkit#50 reuse headers
+claude-sonnet-5-5	Measure cache reuse across deploys
+claude-sonnet-5-5	Fix #143 hero CTA and check in CI
+claude-sonnet-5-5	Fix #128 flake and bump landingkit pin
+claude-sonnet-5-5	Fix landingkit#45 wasmcache hardening
+claude-sonnet-5-5	Playground wasm cache + update reload
+claude-sonnet-5-5	Video as an on-demand worker service
+claude-sonnet-5-5	Measure shared code in playground wasm
+claude-sonnet-5-5	Finish go-slides dependency updates
+claude-sonnet-5-5	Triage go-slides dependency PRs
+claude-sonnet-5-5	Extract the forge panel to toolkit + vcs
+claude-opus-5	Revue indépendante de la PR 122
+claude-opus-5	External review of PR 68
+claude-opus-5	Review hint table derivation PR 66
+claude-haiku-5-5	Read qpdf page length check source
+claude-opus-5	Review PR 58 hint table encoder
+claude-haiku-5-5	Fetch qpdf pushInheritedAttributesToPage
+claude-haiku-5-5	Find qpdf's linearization dict padding
+claude-haiku-5-5	Fetch qpdf linearization layout docs
+claude-haiku-5-5	Fetch ISO 32000-1 Annex F tables
+claude-sonnet-5-5	Review the linearization checker
+claude-sonnet-5-5	Review the bentogap repository
+claude-sonnet-5-5	Review failset for false passes
+claude-sonnet-5-5	Review aptneed round four
+claude-opus-5	Review aptneed round 3
+claude-opus-5	Review the failset gate
+claude-haiku-5-5	Read CTAP 2.1 spec sections
+claude-sonnet-5-5	Fix agentsync#27 mem-add/mem-verify
+claude-opus-5-5	Independent review of upstream draft
+claude-sonnet-5-5	Profile authnd refresh, directory#42
+claude-sonnet-5-5	Fix flaky TestSessionStops on Windows
+claude-sonnet-5-5	Adopt go-embedded-julia v0.18.0
+claude-opus-5-5	Independent review of Julia cells PR
+claude-sonnet-5-5	Julia cells run in playground (3rd core)
+claude-sonnet-5-5	landingkit footer shows its version
+claude-sonnet-5-5	Align go-notebook landing with landingkit
+claude-sonnet-5-5	Fix stale editingChecks in page.mjs
+claude-sonnet-5-5	Fix notebook#51 analyzeStmts panic
+claude-sonnet-5-5	Docs+landing for Julia variable crossing
+claude-sonnet-5-5	Julia cells run in go-notebook
+claude-sonnet-5-5	Adopt go-embedded-r v0.17.1 in playground
+claude-sonnet-5-5	Landing + docs for playground v0.13/v0.14
+claude-sonnet-5-5	Playground: run R cells in the browser
+claude-sonnet-5-5	Toolkit minimap+annotations, playground font
+claude-opus-5-5	Independent review of webcanvas#33
+claude-sonnet-5-5	Playground: C cells + C example
+claude-sonnet-5-5	Playground v0.11.0: README, landing, docs
+claude-sonnet-5-5	Playground: code cells on webcanvas editor
+claude-sonnet-5-5	fuzzrun audit + fleet fuzz migration
+claude-haiku-5-5	Extract two pending decisions
+claude-sonnet-5-5	integrate #26: weighted-norm kernel
+claude-sonnet-5-5	Bump playground on landings
+claude-sonnet-5-5	Landing sweep pilot batch
+claude-sonnet-5-5	fleettools modtidy gate
+claude-sonnet-5-5	integrate #26 simd kernels + jac reuse
+claude-sonnet-5-5	replystamp --clock UserPromptSubmit
+claude-sonnet-5-5	integrate #14 ODEPACK LSODA port
+claude-sonnet-5-5	Landing sweep phase 1 audit
+claude-sonnet-5-5	Diagnose replystamp --pretool
+claude-sonnet-5-5	integrate #15 then #13
+claude-opus-5-5	Review go-numerics roadmap PRs
+claude-sonnet-5-5	refbench optimize v0.9.0 vs SciPy
+claude-sonnet-5-5	Docs site: optimize v0.9.0 pages
+claude-sonnet-5-5	Close optimize perf gaps under the bound
+claude-haiku-5-5	Read ruby-augeas close and create
+claude-haiku-5-5	Read ruby-augeas Augeas.open source
+claude-opus-5-5	Review floats#68 and go-fft#174
+claude-sonnet-5-5	DCT-II/III at 64 vs FFTW
+claude-sonnet-5-5	Docs and landing for v0.33.0
+claude-sonnet-5-5	Odd-radix codelet instruction gap
+claude-sonnet-5-5	Zen 4 complex-256 codelet prototype
+claude-sonnet-5-5	go-asmgen#50 odd-radix 512-bit passes
+claude-opus-5-5	Review go-fft#160 and #161
+claude-sonnet-5-5	Diagnose c128 non-pow2 gaps
+claude-sonnet-5-5	Fused DCT-IV(64) arm64 kernel
+claude-opus-5-5	Review go-fft#158 independently
+claude-opus-5-5	Review go-fft#164 independently
+claude-opus-5-5	Creative FFT algorithm design study
+claude-sonnet-5-5	Fact-check go-fft#159 doc claims
+claude-opus-5-5	Review go-fft#157 independently
+claude-opus-5-5	Review paritycheck PRs 251/255
+claude-sonnet-5-5	go-fft#121 oracle + exact option
+claude-sonnet-5-5	go-fft MDCT/IMDCT transform
+claude-opus-5-5	Review go-fft #126/#127 accuracy contract
+claude-sonnet-5-5	GPU FFT crossover pilot (Metal)
+claude-opus-5-5	GPU compute layer design study
+claude-sonnet-5-5	paritycheck fleet tool + gate
+claude-sonnet-5-5	Finish go-llmflow leftovers
+claude-sonnet-5-5	Landingkit ribbon GitHub logo
+claude-sonnet-5-5	Move aiquota docs off landing
+claude-sonnet-5-5	Fix gateway#175, file overrun, chaos v0.45
+claude-opus-5-5	Review gateway pool-capacity guarantee
+claude-opus-5-5	Review gitsafe PR #125
+claude-sonnet-5-5	gitsafe#129 measure =word
+claude-sonnet-5-5	Finish gitsafe#133
+claude-opus-5-5	Review toolkit PR #586
+claude-sonnet-5-5	fleettools#303 recur hubs
+claude-sonnet-5-5	gitsafe#121 zsh oracle
+claude-sonnet-5-5	AppDock becomes a Widget
+claude-sonnet-5-5	toolkit#585 a11y gaps
+claude-opus-5-5	Review fleettools #291
+claude-sonnet-5-5	fleettools #280 + replystamp wording
+claude-opus-5-5	Review toolkit #581
+claude-sonnet-5-5	toolkit#578 remaining items
+claude-opus-5-5	Review gitsafe #120 literaltick
+claude-sonnet-5-5	gitsafe#112 literaltick follow-ups
+claude-opus-5-5	Review fleettools #275 pretool
+claude-sonnet-5-5	Fix replystamp --pretool #277
+claude-sonnet-5-5	toolkit#578 batch 4: big composites
+claude-sonnet-5-5	toolkit#578 batch 3: honour Disabled
+claude-sonnet-5-5	Build replystamp --pretool
+claude-opus-5-5	Review toolkit #577
+claude-sonnet-5-5	toolkit#578 batch 2: honour Disabled
+claude-sonnet-5-5	toolkit#578 batch 1: honour Disabled
+claude-sonnet-5-5	A11y Disabled audit across widgets
+claude-opus-5-5	Review toolkit #570
+claude-sonnet-5-5	Fix toolkit#569 forgepane follow-ups
+claude-sonnet-5-5	Translate docs wasm note
+claude-sonnet-5-5	Docs for FileTree wasm refusal
+claude-sonnet-5-5	Refuse wasm sync vcs status
+claude-sonnet-5-5	Docs and landing for v0.22.0
+claude-sonnet-5-5	Slice 20 linear algebra
+claude-sonnet-5-5	fleetfind: index file names/symbols
+claude-sonnet-5-5	Docs+landing for r v0.17.0
+claude-sonnet-5-5	Bind R stats to go-statistics, v0.21.0
+claude-sonnet-5-5	M3 slice 18, v0.20.0
+claude-sonnet-5-5	M3 slice 17, v0.19.0
+claude-sonnet-5-5	M3 slice 16, v0.18.0
+claude-sonnet-5-5	Fix #42 recursion bound, v0.17.1
+claude-sonnet-5-5	M3 slice 15: deferred base functions
+claude-sonnet-5-5	Blind rewrite of scale and rle
+claude-sonnet-5-5	M3 slice 14: data frames, table
+claude-opus-5-5	Review special PR 91
+claude-opus-5-5	Review special PR 90
+claude-sonnet-5-5	refbench run on special v0.20.0
+claude-opus-5-5	Review special#87 Softmax
+claude-sonnet-5-5	special: Softmax/LogSoftmax speed
+claude-opus-5-5	Review special#86 Jv/Yv mid-x
+claude-sonnet-5-5	special: Jv/Yv mid-x modulus-phase
+claude-sonnet-5-5	special: Jv/Yv fast paths
+claude-opus-5-5	Review special#84 Jv/Yv Hankel
+claude-sonnet-5-5	special: Kv x<1.5 Temme path
+claude-opus-5-5	Review special#83 Kv Temme
+claude-sonnet-5-5	special: Kv fractional small-x path
+claude-opus-5-5	Review special#81 Kv small-x
+claude-opus-5-5	Review special#80 Iv/In/Ive
+claude-sonnet-5-5	special: Iv/In/Ive fast paths
+claude-sonnet-5-5	special: #77 follow-ups
+claude-opus-5-5	Review special#73 Yn/Jn
+claude-haiku-5-5	Wait placeholder
+claude-opus-5-5	Review special#78 Kv/Kve
+claude-sonnet-5-5	special: Kv/Kve port from Bessels.jl
+claude-sonnet-5-5	refbench multi-reference step 1
+claude-sonnet-5-5	special v0.13.0 refbench + publish
+claude-sonnet-5-5	special: mutsweep CI lane + #72
+claude-sonnet-5-5	Review perf publication PRs
+claude-opus-5-5	Review refbench#16
+claude-sonnet-5-5	mutsweep panic verdict + boundary
+claude-opus-5-5	Review mutate#20
+claude-opus-5-5	Design multi-reference refbench
+claude-sonnet-5-5	special: Bessel Yn + Jn recurrence
+claude-opus-5-5	Review special PR #71 (Kn recurrence)
+claude-sonnet-5-5	special: Bessel Kn fast path
+claude-opus-5-5	Review special PR #70 (testbudget, fixtures)
+claude-sonnet-5-5	Fix review findings on special PR #70
+claude-sonnet-5-5	special: BetaInc family + Xlog1py/Factorial/Perm
+claude-opus-5-5	Review agentsync PR #28 (claim gate)
+claude-sonnet-5-5	Build claim gate for publishing commands
+claude-haiku-5-5	Read GCC vector extension spec
+claude-haiku-5-5	Read GCC packed attribute docs
+claude-sonnet-5-5	Implement long double in wasmgen
+claude-sonnet-5-5	#49 atomic image load
+claude-sonnet-5-5	#105 FuzzLoadImage parallel failure
+claude-sonnet-5-5	#46 parser chain second pass
+claude-sonnet-5-5	#40 PRs 1-2: imagewalk, stable ids
+claude-opus-5-5	Design the prebuilt image (#40)
+claude-sonnet-5-5	Landing and docs for M3 v0.13.0
+claude-sonnet-5-5	Profile slow @async comprehension
+claude-sonnet-5-5	Make PR 37 green on windows+riscv
+claude-sonnet-5-5	Dynamic libraries for module inits
+claude-sonnet-5-5	GlobalRef by module identity
+claude-sonnet-5-5	M3: tasks and the event loop
+claude-sonnet-5-5	M3: run the module initializers
+claude-sonnet-5-5	go-blas LAPACK: getrf/getrs, potrf/potrs
+claude-opus-5-5	Review go-blas LAPACK PR 6
+claude-sonnet-5-5	Full perf table run for ndarray#125
+claude-haiku-5-5	Check docs#74 and landing#93 claims
+claude-sonnet-5-5	Docs and landing for ndarray v0.42.0
+claude-opus-5-5	Review ndarray PR 123
+claude-sonnet-5-5	ndarray adopts floats v0.23.0 kernels
+claude-sonnet-5-5	floats Maximum/Minimum kernels
+claude-opus-5-5	Review go-simd/floats PR 62
+claude-haiku-5-5	Fetch ISA manual pages
+claude-haiku-5-5	Find primary source for triangular solve bound
+claude-sonnet-5-5	go-blas level 3 routines
+claude-opus-5-5	Review go-blas level-3 PR 4
+claude-sonnet-5-5	Switch ndarray onto go-blas
+claude-opus-5-5	Review ndarray PR 122
+claude-sonnet-5-5	go-simd/floats rounding and sign kernels
+claude-opus-5-5	Review go-blas/blas PR 2
+claude-haiku-5-5	Wait for guardmut
+claude-sonnet-5-5	Landing page for go-blas org
+claude-haiku-5-5	Check go-blas landing claims
+claude-sonnet-5-5	Extract GEMM into go-blas/blas
+claude-opus-5-5	Review go-blas/blas PR 1
+claude-opus-5-5	Review ndarray PR 121
+claude-opus-5-5	Review PR #112 riscv64 sgemm
+claude-sonnet-5-5	Docs + landing for ndarray v0.39.0
+claude-sonnet-5-5	Link fcells into the playground
+claude-sonnet-5-5	#17 eval loop performance
+claude-sonnet-5-5	M5 part 2: run Fortran cells
+claude-sonnet-5-5	Fortran org site, docs, brand
+claude-sonnet-5-5	M3-A evaluator: run the goldens
+claude-sonnet-5-5	M5 go-notebook Fortran bridge
+claude-sonnet-5-5	Implement M4 runtime I/O
+claude-sonnet-5-5	Implement M2 parts 2 and 3
+claude-sonnet-5-5	Implement M2 semantic analysis
+claude-sonnet-5-5	Build the back-end decision gate
+claude-sonnet-5-5	Implement M1 lexer and parser
+claude-sonnet-5-5	Implement M0 oracle harness
+claude-opus-5-5	Write bib/fortran.md bibliography
+claude-haiku-5-5	Verify Ford dealers near Les Ulis
+claude-haiku-5-5	Read Kuga FHEV AWD vs PHEV specs
+claude-haiku-5-5	Read MG EHS official towing
+claude-haiku-5-5	Read Ford Kuga official towing
+claude-opus-4-8	Third-party review of #430 rework
+claude-sonnet-5-5	Rework caddy-l4 #430 onto merged master
+claude-sonnet-5-5	Rework caddy-l4 #444 into tagged metrics handler
+claude-opus-4-8	Third-party review of #444 hijack fix
+claude-opus-4-8	Adversarial review of #444 rework
+claude-sonnet-5-5	Rework caddy-l4 #423 per vnxme spec
+claude-opus-4-8	Adversarial review of #423 rework
+claude-sonnet-5-5	Implement vnxme round-2 fixes on caddy-l4 #429
+claude-opus-4-8	Adversarial review of #429 round-2 fixes
+claude-sonnet-5-5	Add coarse-clock test-timing gate
+claude-sonnet-5-5	Land gather kernels in go-simd/floats

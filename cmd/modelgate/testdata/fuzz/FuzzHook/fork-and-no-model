@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"tool_name\":\"Agent\",\"tool_input\":{\"description\":\"Review\",\"subagent_type\":\"fork\"}}")
