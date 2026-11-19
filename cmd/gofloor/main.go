@@ -99,6 +99,15 @@ A repository it could not read is UNREADABLE and is never counted clean. So is
 a called workflow that could not be read or parsed; one that calls another in
 turn is reported rather than followed.
 
+Two subcommands change things rather than read them:
+
+  gofloor fix [--max N] ORG   open one PR per repository raising every go
+                              directive below --floor (default 1.27.4); it
+                              clones, edits, builds, pushes, opens, and waits
+                              for nothing
+  gofloor merge ORG           merge those PRs whose checks are green, list the
+                              others with their state
+
 Exit status: 0 clean, 1 findings, 2 something could not be read.`
 
 func main() {
@@ -114,7 +123,7 @@ func command(gh ghFunc, repos reposFunc) *cobra.Command {
 	c := cli.New("gofloor [flags] ORG...", "Go floor, CI toolchain and govulncheck of every repository", longHelp)
 	c.RunE = func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
-			fmt.Fprintln(cli.Err(cmd), "usage: gofloor [--floor 1.27.3] ORG...")
+			fmt.Fprintln(cli.Err(cmd), "usage: gofloor [--floor "+defaultFloor+"] ORG... | gofloor fix ORG | gofloor merge ORG")
 			return cli.FromStatus(2)
 		}
 		if _, ok := parseVersion(floor); !ok {
@@ -123,8 +132,9 @@ func command(gh ghFunc, repos reposFunc) *cobra.Command {
 		}
 		return cli.FromStatus(sweep(cli.Out(cmd), cli.Err(cmd), gh, repos, floor, args))
 	}
-	c.Flags().StringVar(&floor, "floor", "1.27.3",
+	c.Flags().StringVar(&floor, "floor", defaultFloor,
 		"the lowest go directive that is not a finding; move it with the standard library's fixes")
+	addFixCommands(c, realEnv(gh, repos))
 	return c
 }
 
