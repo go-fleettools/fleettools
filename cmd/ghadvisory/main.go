@@ -57,7 +57,12 @@ const longHelp = `Creates, lists and publishes a repository's security advisorie
              --cwe CWE-NNN --package go:MODULE --affected "< v0.3.4" --patched v0.3.4
              [--cve-id CVE-...] [--credit login[:type]]...
   ghadvisory <owner/repo> publish GHSA-xxxx-xxxx-xxxx
+  ghadvisory <owner/repo> edit GHSA-xxxx-xxxx-xxxx --body-file F [--dry-run]
   ghadvisory <owner/repo> list [--state draft|published|closed|triage]
+
+edit REPLACES the description of a DRAFT with the file's text (private-path and
+bit-parity gates as --new), after printing the advisory and a line diff of old
+against new. A published advisory is refused.
 
 --new creates a DRAFT (REST POST /repos/{owner}/{repo}/security-advisories):
 nothing is public until publish, which is a separate act, because publishing
@@ -137,6 +142,11 @@ func RootCmd() *cobra.Command {
 					return errors.New("publish wants a GHSA id: ghadvisory <owner/repo> publish GHSA-xxxx-xxxx-xxxx")
 				}
 				return runPublish(cmd, owner, repo, args[2], o)
+			case "edit":
+				if len(args) != 3 {
+					return errors.New("edit wants a GHSA id: ghadvisory <owner/repo> edit GHSA-... --body-file F")
+				}
+				return runEdit(cmd, owner, repo, args[2], o)
 			case "list":
 				if len(args) != 2 {
 					return errors.New("list takes no argument")
@@ -323,6 +333,7 @@ type advisory struct {
 	HTMLURL         string `json:"html_url"`
 	State           string `json:"state"`
 	Summary         string `json:"summary"`
+	Description     string `json:"description"`
 	Severity        string `json:"severity"`
 	CVEID           string `json:"cve_id"`
 	Vulnerabilities []struct {
@@ -372,6 +383,105 @@ func runList(cmd *cobra.Command, owner, repo string, o opts) error {
 		a.show(out)
 	}
 	return nil
+}
+
+// runEdit replaces the description of a DRAFT advisory. A published advisory is
+// refused: it is public, mirrored and notified, and an edit there is a
+// correction of something already read.
+func runEdit(cmd *cobra.Command, owner, repo, id string, o opts) error {
+	out := cmd.OutOrStdout()
+	if !ghsaRe.MatchString(id) {
+		return fmt.Errorf("%q: want GHSA-xxxx-xxxx-xxxx", id)
+	}
+	if o.bodyFile == "" {
+		return errors.New("edit needs --body-file: the file is the NEW description")
+	}
+	body, err := readBody(o.bodyFile, o.privWaiver, o.parityWaiver)
+	if err != nil {
+		return err
+	}
+	tok, err := readToken(o.tokFile)
+	if err != nil {
+		return err
+	}
+	c := newClient()
+	b, _, err := do(c, http.MethodGet, advURL(o.base, owner, repo, id), tok, nil, 200)
+	if err != nil {
+		return err
+	}
+	var a advisory
+	if err := json.Unmarshal(b, &a); err != nil {
+		return fmt.Errorf("advisory: %w", err)
+	}
+	if a.GHSAID != id {
+		return fmt.Errorf("advisory: asked for %s, the reply is %q", id, a.GHSAID)
+	}
+	a.show(out)
+	if a.State != "draft" {
+		return fmt.Errorf("refused: %s is %s; only a draft is edited", id, a.State)
+	}
+	fmt.Fprintf(out, "\n-- description diff (- old, + new) --\n%s", lineDiff(a.Description, body))
+	if o.dryRun {
+		fmt.Fprintln(out, "NOT sent (--dry-run)")
+		return nil
+	}
+	payload, err := json.Marshal(map[string]string{"description": body})
+	if err != nil {
+		return err
+	}
+	b, _, err = do(c, http.MethodPatch, advURL(o.base, owner, repo, id), tok, payload, 200)
+	if err != nil {
+		return err
+	}
+	var got advisory
+	if err := json.Unmarshal(b, &got); err != nil {
+		return fmt.Errorf("edit: %w", err)
+	}
+	if strings.TrimSpace(got.Description) != strings.TrimSpace(body) {
+		return errors.New("edit: accepted, but the description the API reports is not the one sent")
+	}
+	fmt.Fprintf(out, "edited: %s [%s]\n", got.GHSAID, got.State)
+	if got.State != "draft" {
+		return fmt.Errorf("the API reports state %q after the edit, not draft", got.State)
+	}
+	return nil
+}
+
+// lineDiff is a line diff by longest common subsequence: "- " for a line only
+// in old, "+ " for one only in new, "  " for a shared one.
+func lineDiff(oldS, newS string) string {
+	a := strings.Split(strings.TrimRight(oldS, "\n"), "\n")
+	b := strings.Split(strings.TrimRight(newS, "\n"), "\n")
+	l := make([][]int, len(a)+1)
+	for i := range l {
+		l[i] = make([]int, len(b)+1)
+	}
+	for i := len(a) - 1; i >= 0; i-- {
+		for j := len(b) - 1; j >= 0; j-- {
+			if a[i] == b[j] {
+				l[i][j] = l[i+1][j+1] + 1
+			} else {
+				l[i][j] = max(l[i+1][j], l[i][j+1])
+			}
+		}
+	}
+	var sb strings.Builder
+	i, j := 0, 0
+	for i < len(a) || j < len(b) {
+		switch {
+		case i < len(a) && j < len(b) && a[i] == b[j]:
+			sb.WriteString("  " + a[i] + "\n")
+			i++
+			j++
+		case j < len(b) && (i == len(a) || l[i][j+1] > l[i+1][j]):
+			sb.WriteString("+ " + b[j] + "\n")
+			j++
+		default:
+			sb.WriteString("- " + a[i] + "\n")
+			i++
+		}
+	}
+	return sb.String()
 }
 
 func runPublish(cmd *cobra.Command, owner, repo, id string, o opts) error {
