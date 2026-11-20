@@ -25,6 +25,11 @@
 //	https://docs.github.com/en/rest/repos/repos#enable-private-vulnerability-reporting-for-a-repository
 //	                                                       PUT|DELETE|GET /repos/{o}/{r}/private-vulnerability-reporting;
 //	                                                       204 for the writes (admin access), GET 200 {"enabled": bool}; 422
+//
+// transfer (read 2026-11-20):
+//
+//	https://docs.github.com/en/rest/repos/repos#transfer-a-repository
+//	                                                       POST /repos/{o}/{r}/transfer, body new_owner, new_name?; 202, asynchronous
 package main
 
 import (
@@ -56,6 +61,12 @@ const (
 	apiBase     = "https://api.github.com"
 )
 
+// Transfer polling; tests shorten them.
+var (
+	transferPollEvery = 2 * time.Second
+	transferWait      = 2 * time.Minute
+)
+
 const longHelp = `Repository-level GitHub writes, each after showing the repository.
 
   ghrepo <owner/repo> fork [--org O] [--name N]
@@ -63,10 +74,18 @@ const longHelp = `Repository-level GitHub writes, each after showing the reposit
   ghrepo <owner/repo> rename <new-name> --confirm <owner/repo>
   ghrepo <owner/repo> archive --confirm <owner/repo>
   ghrepo <owner/repo> delete --confirm <owner/repo>
+  ghrepo <owner/repo> transfer <new-owner> [--name N] --confirm <owner/repo>
   ghrepo <owner/repo> sync [--branch B]
   ghrepo <owner/repo> secret-set <NAME> (--value-file F | --value-stdin)
   ghrepo <owner/repo> pages <workflow|gh-pages>
   ghrepo <owner/repo> private-reporting <enable|disable|status>
+
+transfer moves the repository to another user or organization, optionally
+renaming it (--name). It is refused when <new-owner>/<name> already exists. The
+API answers 202 and the move is asynchronous: ghrepo then polls the new address
+until it answers (up to 2 minutes) and prints the new URL; GitHub redirects the
+old URL. A transfer to a user (not an organization) must be accepted by that
+user, so the wait may time out although the request stands.
 
 private-reporting turns GitHub's private vulnerability reporting on or off, or
 reads it; the state is read back after a write. It needs admin access.
@@ -84,7 +103,7 @@ gh-pages is left alone; any other site is refused, never changed.
 
 --topic REPLACES the whole topic set (GitHub's endpoint does); repeat it for
 several, and run edit without it to leave topics alone.
-archive, delete and rename refuse without --confirm repeating owner/repo
+archive, delete, rename and transfer refuse without --confirm repeating owner/repo
 exactly. A secret's value comes only from a file that only its owner may read,
 or from stdin; one trailing newline is removed. It is sealed with the
 repository's Actions public key (libsodium sealed box) and never printed.
@@ -121,7 +140,7 @@ type opts struct {
 func RootCmd() *cobra.Command {
 	var o opts
 	cmd := &cobra.Command{
-		Use:          "ghrepo <owner/repo> <fork|edit|rename|archive|delete|sync|secret-set|pages|private-reporting> [arg]",
+		Use:          "ghrepo <owner/repo> <fork|edit|rename|archive|delete|transfer|sync|secret-set|pages|private-reporting> [arg]",
 		Short:        "Fork, edit, rename, archive, delete, sync a GitHub repository, or set an Actions secret",
 		Long:         longHelp,
 		Args:         cobra.RangeArgs(2, 3),
@@ -138,9 +157,9 @@ func RootCmd() *cobra.Command {
 	f.StringVar(&o.base, "base", apiBase, "API base URL (https)")
 	f.StringVar(&o.tokFile, "token-file", "", "file holding the token (default ~/.github-token)")
 	f.BoolVar(&o.dryRun, "dry-run", false, "send only reads")
-	f.StringVar(&o.confirm, "confirm", "", "owner/repo repeated exactly (archive, delete, rename)")
+	f.StringVar(&o.confirm, "confirm", "", "owner/repo repeated exactly (archive, delete, rename, transfer)")
 	f.StringVar(&o.org, "org", "", "fork into this organization")
-	f.StringVar(&o.name, "name", "", "name of the fork")
+	f.StringVar(&o.name, "name", "", "name of the fork, or the new name after a transfer")
 	f.StringVar(&o.desc, "description", "", "new description")
 	f.StringVar(&o.descFile, "description-file", "", "file holding the new description")
 	f.StringVar(&o.homepage, "homepage", "", "new homepage URL (empty clears it)")
@@ -200,6 +219,10 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		if arg != "" {
 			return fmt.Errorf("%s takes no argument, got %q", verb, arg)
 		}
+	case "transfer":
+		if arg == "" || strings.ContainsAny(arg, "/ \t\r\n") {
+			return errors.New("transfer: want one <new-owner> (no slash, no spaces)")
+		}
 	case "rename":
 		if arg == "" || strings.ContainsAny(arg, "/ \t\r\n") {
 			return errors.New("rename: want one <new-name> (no slash, no spaces)")
@@ -242,22 +265,23 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 			return fmt.Errorf("private-reporting: want enable, disable or status, got %q", arg)
 		}
 	default:
-		return fmt.Errorf("unknown verb %q: want fork, edit, rename, archive, delete, sync, secret-set, pages or private-reporting", verb)
+		return fmt.Errorf("unknown verb %q: want fork, edit, rename, archive, delete, transfer, sync, secret-set, pages or private-reporting", verb)
 	}
-	if o.org != "" || o.name != "" {
-		if verb != "fork" {
-			return errors.New("--org and --name apply to fork only")
-		}
+	if o.org != "" && verb != "fork" {
+		return errors.New("--org applies to fork only")
 	}
-	if verb == "fork" && o.name != "" && strings.ContainsAny(o.name, "/ \t\r\n") {
+	if o.name != "" && verb != "fork" && verb != "transfer" {
+		return errors.New("--name applies to fork and transfer only")
+	}
+	if (verb == "fork" || verb == "transfer") && o.name != "" && strings.ContainsAny(o.name, "/ \t\r\n") {
 		return fmt.Errorf("--name %q: no slash, no spaces", o.name)
 	}
-	if verb == "archive" || verb == "delete" || verb == "rename" {
+	if verb == "archive" || verb == "delete" || verb == "rename" || verb == "transfer" {
 		if o.confirm != args[0] {
 			return fmt.Errorf("%s needs --confirm %s, repeated exactly", verb, args[0])
 		}
 	} else if o.confirm != "" {
-		return fmt.Errorf("--confirm applies to archive, delete and rename, not %s", verb)
+		return fmt.Errorf("--confirm applies to archive, delete, rename and transfer, not %s", verb)
 	}
 	var secret []byte
 	if verb == "secret-set" {
@@ -309,6 +333,8 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		return nil
 	case "delete":
 		return doDelete(out, c, repoURL, tok, r, o)
+	case "transfer":
+		return doTransfer(out, c, o.base, repoURL, tok, r, o, repo, arg)
 	case "sync":
 		return doSync(out, c, repoURL, tok, r, o)
 	case "pages":
@@ -418,6 +444,56 @@ func doDelete(out io.Writer, c *http.Client, repoURL, tok string, r repoInfo, o 
 		fmt.Fprintf(out, "deleted (204) but the repository still answers %d: check it\n", st)
 	}
 	return nil
+}
+
+// doTransfer moves the repository to newOwner (optionally renaming it). The
+// target must not exist; the API answers 202 and the move is asynchronous, so
+// the new address is polled until it answers with the expected full name.
+func doTransfer(out io.Writer, c *http.Client, base, repoURL, tok string, r repoInfo, o opts, repo, newOwner string) error {
+	name := repo
+	if o.name != "" {
+		name = o.name
+	}
+	target := fmt.Sprintf("%s/repos/%s/%s", strings.TrimRight(base, "/"), newOwner, name)
+	want := newOwner + "/" + name
+	st, _, err := do(c, http.MethodGet, target, tok, nil, http.StatusNotFound, http.StatusOK)
+	if err != nil {
+		return err
+	}
+	if st == http.StatusOK {
+		return fmt.Errorf("transfer: %s already exists; nothing sent", want)
+	}
+	if o.dryRun {
+		fmt.Fprintf(out, "would transfer %s to %s\n", r.FullName, want)
+		return nil
+	}
+	m := map[string]string{"new_owner": newOwner}
+	if o.name != "" {
+		m["new_name"] = o.name
+	}
+	payload, _ := json.Marshal(m)
+	if _, _, err := do(c, http.MethodPost, repoURL+"/transfer", tok, payload, http.StatusAccepted); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "transfer accepted (202, asynchronous); waiting for %s\n", want)
+	deadline := time.Now().Add(transferWait)
+	for {
+		st, b, err := do(c, http.MethodGet, target, tok, nil, http.StatusOK, http.StatusNotFound)
+		if err != nil {
+			return err
+		}
+		if st == http.StatusOK {
+			var got repoInfo
+			if json.Unmarshal(b, &got) == nil && strings.EqualFold(got.FullName, want) {
+				fmt.Fprintf(out, "transferred: %s  %s\nGitHub redirects the old URL (%s) to the new one.\n", got.FullName, got.HTMLURL, r.HTMLURL)
+				return nil
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("transfer: %s did not answer 200 within %s; the request was accepted, so check %s later (a transfer to a user must be accepted by that user)", want, transferWait, target)
+		}
+		time.Sleep(transferPollEvery)
+	}
 }
 
 func doSync(out io.Writer, c *http.Client, repoURL, tok string, r repoInfo, o opts) error {
