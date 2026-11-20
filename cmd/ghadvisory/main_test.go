@@ -172,13 +172,18 @@ func TestNewRefusesLocallyBeforeAnyRequest(t *testing.T) {
 
 func TestBodyGoesThroughThePrivatePathGate(t *testing.T) {
 	s := newServer(t)
-	home, _ := os.UserHomeDir()
-	args := newArgs(t, s, "--body-file", file(t, "b.md", "see "+home+"/secret/file", 0o644))
-	if _, err := exec(t, args...); err == nil {
+	// A fixed path, as ghissue's own test uses: the machine's home directory is
+	// not the same on CI, which is how this test first went red there.
+	private := "## Measurement\n\n`/Users/alicia/Documents/fairshare-b300/fairshare-b300.tex`, 36 pages.\n"
+	if _, err := exec(t, newArgs(t, s, "--body-file", file(t, "b.md", private, 0o644))...); err == nil {
 		t.Error("a body naming a home directory was accepted")
 	}
 	if len(s.reqs) != 0 {
 		t.Errorf("requests: %v", s.reqs)
+	}
+	ok := "`/Users/runner/.pkgx` is the runner's home directory.\n"
+	if _, err := exec(t, newArgs(t, s, "--body-file", file(t, "b.md", ok, 0o644))...); err != nil {
+		t.Errorf("a legitimate path was refused: %v", err)
 	}
 }
 
