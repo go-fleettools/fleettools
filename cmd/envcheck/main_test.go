@@ -210,6 +210,20 @@ func TestCommandExpectedExit(t *testing.T) {
 	}
 }
 
+func TestExpectContainsIsHeldBothWays(t *testing.T) {
+	spec := func(want string) string {
+		return "environment: x\ncommands:\n  - {name: rerun, run: [echo], expect_contains: \"" + want + "\"}\n"
+	}
+	// The fake target answers "ok\n" to any other program.
+	if code, _, _, _ := drive(t, okTarget(), spec("ok")); code != 0 {
+		t.Errorf("a present string gave %d", code)
+	}
+	code, out, _, rep := drive(t, okTarget(), spec("changed=0"))
+	if code != 1 || !strings.Contains(out, `output does not contain "changed=0"`) || !strings.Contains(rep, "FAIL rerun") {
+		t.Errorf("an absent string gave %d\n%s\n%s", code, out, rep)
+	}
+}
+
 func TestMissingFileIsExit2(t *testing.T) {
 	var o, e bytes.Buffer
 	if code := run([]string{filepath.Join(t.TempDir(), "absent.yml")}, &o, &e); code != 2 {

@@ -99,6 +99,9 @@ type command struct {
 	Name       string   `yaml:"name"`
 	Run        []string `yaml:"run"`
 	ExpectExit int      `yaml:"expect_exit"`
+	// ExpectContains, when set, must appear in the command's output: a playbook
+	// rerun that exits 0 but reports "changed=1" is not idempotent.
+	ExpectContains string `yaml:"expect_contains"`
 }
 
 // runner runs argv on the target. err is for a command that could not be
@@ -295,6 +298,10 @@ func checkCommand(run runner, c command) (result, error) {
 	r.Output = strings.TrimSpace(stdout + stderr)
 	if code != c.ExpectExit {
 		r.Detail = fmt.Sprintf("exit %d, expected %d", code, c.ExpectExit)
+		return r, nil
+	}
+	if c.ExpectContains != "" && !strings.Contains(stdout+stderr, c.ExpectContains) {
+		r.Detail = fmt.Sprintf("output does not contain %q", c.ExpectContains)
 		return r, nil
 	}
 	r.Pass = true
