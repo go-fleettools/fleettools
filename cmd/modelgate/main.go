@@ -20,6 +20,9 @@
 //	payload cannot be decoded     allow, with a notice (a refusal is not a verdict)
 //	subagent_type "fork"          allow: a fork ignores the model
 //	"model-waiver: <reason>"      allow, the reason echoed as a stamped notice
+//	model missing, subagent_type  the model of that agent's definition
+//	  names a definition with one   (.claude/agents/*.md, project then user)
+//	                              stands in, checked as if passed explicitly
 //	model missing                 REFUSE: the environment default is sonnet,
 //	                              which hides the choice
 //	task unclassified             allow, with any explicit model
@@ -147,6 +150,7 @@ func family(model string) string {
 // payload is the part of a PreToolUse payload that matters here.
 type payload struct {
 	ToolName  string `json:"tool_name"`
+	Cwd       string `json:"cwd"`
 	ToolInput struct {
 		Description  string `json:"description"`
 		Prompt       string `json:"prompt"`
@@ -184,12 +188,22 @@ func decide(p payload, now time.Time) verdict {
 		return verdict{reason: fmt.Sprintf("modelgate: model waived at %s: %s",
 			now.Format("2006-01-02 15:04 MST"), m[1])}
 	}
-	got := family(in.Model)
+	model, viaType, why := in.Model, "", ""
+	if strings.TrimSpace(model) == "" && strings.TrimSpace(in.SubagentType) != "" {
+		// A typed agent whose definition sets a model: Claude Code runs it
+		// on that model, so judge that one exactly as if it had been passed.
+		if am, reason := agentModel(p.Cwd, in.SubagentType); am != "" {
+			model, viaType = am, " (from agent "+strings.TrimSpace(in.SubagentType)+")"
+		} else {
+			why = fmt.Sprintf(" subagent_type %q gives none either: %s.", in.SubagentType, reason)
+		}
+	}
+	got := family(model)
 	m := classify(subject(p))
-	if strings.TrimSpace(in.Model) == "" {
-		hint := ""
+	if strings.TrimSpace(model) == "" {
+		hint := why
 		if m != nil {
-			hint = fmt.Sprintf(" This task is class %s (matched %q), which expects model %q.", m.class.name, m.word, m.class.model)
+			hint += fmt.Sprintf(" This task is class %s (matched %q), which expects model %q.", m.class.name, m.word, m.class.model)
 		}
 		return verdict{deny: true, reason: "modelgate refuses this Agent call: no model given. The environment default is sonnet, which hides the choice; name one." + hint + waiverHelp}
 	}
@@ -202,7 +216,7 @@ func decide(p payload, now time.Time) verdict {
 	}
 	return verdict{deny: true, reason: fmt.Sprintf(
 		"modelgate refuses this Agent call: class %s (matched the word %q) expects model %q, got %q (%s). Relaunch with model: %q.%s",
-		m.class.name, m.word, m.class.model, in.Model, shown, m.class.model, waiverHelp)}
+		m.class.name, m.word, m.class.model, model+viaType, shown, m.class.model, waiverHelp)}
 }
 
 const waiverHelp = ` If the table is wrong for this task, put a line "model-waiver: <reason>" in the prompt; the reason is required and is echoed as a notice.`
@@ -268,8 +282,13 @@ decides, so "Fix review findings" is implement and "Review the fix" is review;
 the prompt's first line is used only when there is no description):
 
 ` + tableHelp() + `
-REFUSED: the model is missing (the environment default is sonnet, which hides the
-choice), or its family is not the class's. Each refusal names the class, the
+A call with no model whose subagent_type names an agent definition
+(.claude/agents/*.md from the hook's cwd upward, then ~/.claude/agents; matched on
+frontmatter name or file name) that sets a haiku/sonnet/opus model runs on that
+model, checked exactly as if passed explicitly; an explicit model wins.
+
+REFUSED: the model is missing (and no agent definition gives one; the environment
+default is sonnet, which hides the choice), or its family is not the class's. Each refusal names the class, the
 matched word and the expected model.
 
 ALLOWED: a task in no class (any explicit model), subagent_type "fork" (it
