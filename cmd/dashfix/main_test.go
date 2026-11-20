@@ -265,14 +265,14 @@ func TestALedgerThatCannotBeWrittenStopsTheRun(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, "ghmerge"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 1 || !strings.Contains(errOut, "STOPPED") {
+	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 1 || !strings.Contains(errOut, "is a directory") {
 		t.Fatalf("status %d: %s", st, errOut)
 	}
 }
 
 func TestAFailedPullRequestReadStopsTheRun(t *testing.T) {
 	e := setup(t, "fail", "", "", "4000")
-	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 1 || !strings.Contains(errOut, "STOPPED at go-x/.github#9") {
+	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 1 || !strings.Contains(errOut, "no such pull request") {
 		t.Fatalf("status %d: %s", st, errOut)
 	}
 }
@@ -304,7 +304,7 @@ func TestAMissingConfigStopsTheRun(t *testing.T) {
 	if err := os.Remove(filepath.Join(d, "config.js")); err != nil {
 		t.Fatal(err)
 	}
-	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 1 || !strings.Contains(errOut, "STOPPED") {
+	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 1 || !strings.Contains(errOut, "no such file") {
 		t.Fatalf("status %d: %s", st, errOut)
 	}
 }
