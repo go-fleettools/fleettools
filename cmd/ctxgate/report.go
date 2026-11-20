@@ -52,6 +52,9 @@ type census struct {
 	groups   map[string]*group
 	files    int
 	oversize int
+	// unreadable counts the paths the walk could not read: a report that skipped
+	// them says so rather than looking complete.
+	unreadable int
 }
 
 func newCensus() *census { return &census{groups: map[string]*group{}} }
@@ -79,14 +82,19 @@ func scan(root string, cutoff time.Time) (*census, error) {
 		return nil, fmt.Errorf("%s is not a readable directory", root)
 	}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
-			return nil // an unreadable subtree is skipped, not fatal
+		if err != nil { // an unreadable subtree is skipped, and counted
+			c.unreadable++
+			return nil
+		}
+		if !strings.HasSuffix(path, ".jsonl") {
+			return nil
 		}
 		if info, ierr := d.Info(); ierr != nil || info.ModTime().Before(cutoff) {
 			return nil
 		}
 		calls, over, rerr := readCalls(path)
 		if rerr != nil {
+			c.unreadable++
 			return nil
 		}
 		c.files++
@@ -140,8 +148,8 @@ func (c *census) render(w io.Writer, since time.Duration) {
 		return
 	}
 	t := all.total()
-	fmt.Fprintf(w, "ctxgate report --since %v: %d calls, %s cache-read tokens (%d files, %d oversize lines skipped)\n",
-		since, t.calls, human(t.cacheRead), c.files, c.oversize)
+	fmt.Fprintf(w, "ctxgate report --since %v: %d calls, %s cache-read tokens (%d files, %d oversize lines skipped, %d unreadable paths)\n",
+		since, t.calls, human(t.cacheRead), c.files, c.oversize, c.unreadable)
 	fmt.Fprintf(w, "%-34s %-9s %8s %7s %10s %7s\n", "group", "context", "calls", "%calls", "cache-read", "%cache")
 	var rest []*group
 	for n, g := range c.groups {

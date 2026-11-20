@@ -48,9 +48,15 @@ var usageKey = []byte(`"usage"`)
 // a synthetic error message with all-zero counters. Never panics, never
 // allocates in proportion to a line it rejects early.
 func decodeLine(line []byte) (call, bool) {
-	if !bytes.Contains(line, usageKey) {
-		return call{}, false
+	// Most lines are tool results that carry no usage: skip the JSON decode of
+	// them (it is what makes a week of transcripts readable in seconds).
+	if bytes.Contains(line, usageKey) {
+		return decodeUsage(line)
 	}
+	return call{}, false
+}
+
+func decodeUsage(line []byte) (call, bool) {
 	var e entry
 	if json.Unmarshal(line, &e) != nil || e.Type != "assistant" || e.Message.Usage == nil {
 		return call{}, false
@@ -96,10 +102,11 @@ func eachLine(r io.Reader, max int, fn func([]byte)) (oversize int, err error) {
 			fn(bytes.TrimRight(buf, "\r\n"))
 		}
 		buf, skipping = buf[:0], false
-		if rerr != nil {
-			if rerr == io.EOF {
-				return oversize, nil
-			}
+		switch rerr {
+		case nil: // a whole line: read on
+		case io.EOF:
+			return oversize, nil
+		default:
 			return oversize, rerr
 		}
 	}
@@ -137,24 +144,20 @@ var errNoUsage = errors.New("no assistant usage found in the tail of the transcr
 // lastContext returns the context size of the LAST API call of a transcript,
 // reading only its tail: the window starts at 1 MiB and doubles up to limit.
 func lastContext(path string, limit int64) (int64, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return 0, err
-	}
 	size := st.Size()
-	for win := int64(1 << 20); ; win *= 2 {
-		if win > limit {
-			win = limit
-		}
-		start := size - win
-		if start < 0 {
-			start = 0
-		}
+	// The loop ends by its own condition: once the previous window already
+	// covered the whole file, or the limit, a larger one reads nothing new.
+	for win, prev := int64(1<<20), int64(0); prev < min(size, limit); prev, win = win, win*2 {
+		start := max(size-min(win, limit), 0)
 		b := make([]byte, size-start)
 		if _, err := f.ReadAt(b, start); err != nil && err != io.EOF {
 			return 0, err
@@ -177,8 +180,6 @@ func lastContext(path string, limit int64) (int64, error) {
 			}
 			b = b[:i]
 		}
-		if start == 0 || win >= limit {
-			return 0, errNoUsage
-		}
 	}
+	return 0, errNoUsage
 }

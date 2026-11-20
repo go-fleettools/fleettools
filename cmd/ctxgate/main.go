@@ -68,22 +68,25 @@ Sections in this order: current goal; decisions awaiting the user; state (PR, br
 // precompactOutput is the text for a PreCompact hook: the fixed text, then the
 // user's own custom_instructions, cut so that the whole stays within the cap.
 func precompactOutput(custom string) string {
-	custom = strings.TrimSpace(custom)
-	if custom == "" {
-		return precompactText
+	custom = strings.ToValidUTF8(strings.TrimSpace(custom), "")
+	if custom != "" {
+		// room is positive: a test pins the base text under half the cap.
+		head := precompactText + "\n\nADDITIONAL INSTRUCTIONS (from the compaction request):\n"
+		return head + cutBytes(custom, precompactCap-len(head))
 	}
-	head := precompactText + "\n\nADDITIONAL INSTRUCTIONS (from the compaction request):\n"
-	room := precompactCap - len(head)
-	if room <= 0 {
-		return precompactText
+	return precompactText
+}
+
+// cutBytes cuts s to at most n bytes, never in the middle of a character.
+func cutBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
-	if len(custom) > room {
-		custom = custom[:room]
-		for len(custom) > 0 && !utf8.ValidString(custom) {
-			custom = custom[:len(custom)-1]
-		}
+	s = s[:n]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
 	}
-	return head + custom
+	return s
 }
 
 type precompactPayload struct {

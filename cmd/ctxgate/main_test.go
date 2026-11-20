@@ -286,6 +286,17 @@ func TestPrecompactStaysUnderTheCap(t *testing.T) {
 	}
 }
 
+func TestPrecompactWithoutCustomIsTheBaseTextExactly(t *testing.T) {
+	for _, c := range []string{"", "  \n\t ", "\xff\xfe"} {
+		if got := precompactOutput(c); got != precompactText {
+			t.Errorf("custom %q: output differs from the base text (%d chars)", c, len(got))
+		}
+	}
+	if got := precompactOutput("a\xffb"); !strings.HasSuffix(got, "\nab") || !utf8.ValidString(got) {
+		t.Errorf("invalid bytes must be dropped, got ...%q", got[len(got)-8:])
+	}
+}
+
 func TestPrecompactNamesWhatToKeepAndDrop(t *testing.T) {
 	for _, w := range []string{"Open decisions", "pull request, issue and tag", "Commit SHAs", "Branch names", "leases", "file:line", "Agent ids", "latest instructions", "Raw tool outputs", "directory listings", "Superseded plans", "hand-back reports"} {
 		if !strings.Contains(precompactText, w) {
@@ -353,6 +364,81 @@ func TestReportCountsBucketsKindsAndTheWindow(t *testing.T) {
 	}
 }
 
+func TestReportIgnoresOtherFilesAndCountsWhatItCouldNotRead(t *testing.T) {
+	root := t.TempDir()
+	ts := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	line := asst("a", "claude-opus-5-5", 1, 450_000, 0, ts)
+	writeLines(t, filepath.Join(root, "p", "s.jsonl"), line)
+	writeLines(t, filepath.Join(root, "p", "s.json"), line)                           // not a transcript
+	writeLines(t, filepath.Join(root, "p", "agent-x.meta.json"), line)                // not a transcript
+	if err := os.MkdirAll(filepath.Join(root, "p", "dir.jsonl"), 0o755); err != nil { // a directory by that name
+		t.Fatal(err)
+	}
+	c, err := scan(root, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.groups["all"].total().calls; got != 1 {
+		t.Errorf("%d calls: a non-.jsonl file was read", got)
+	}
+	if c.unreadable != 1 {
+		t.Errorf("unreadable=%d, want 1 (the directory named .jsonl)", c.unreadable)
+	}
+	if os.Geteuid() == 0 {
+		return
+	}
+	locked := filepath.Join(root, "locked")
+	writeLines(t, filepath.Join(locked, "s.jsonl"), line)
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(locked, 0o755)
+	c, err = scan(root, time.Now().Add(-time.Hour))
+	if err != nil || c.unreadable != 2 || c.groups["all"].total().calls != 1 {
+		t.Fatalf("locked dir: err=%v unreadable=%d", err, c.unreadable)
+	}
+}
+
+func TestRenderEdges(t *testing.T) {
+	var o bytes.Buffer
+	newCensus().render(&o, time.Hour)
+	if !strings.Contains(o.String(), "no API call found") {
+		t.Errorf("empty census: %q", o.String())
+	}
+	// a first call has cache_read 0: shares must be 0.0 %, never NaN
+	c := newCensus()
+	c.add("all", call{ctx: 5000, cacheRead: 0})
+	o.Reset()
+	c.render(&o, time.Hour)
+	if strings.Contains(o.String(), "NaN") || !strings.Contains(o.String(), "0.0%") {
+		t.Errorf("zero cache-read:\n%s", o.String())
+	}
+	if pct(1, 0) != 0 || pct(1, 4) != 25 {
+		t.Errorf("pct(1,0)=%v pct(1,4)=%v", pct(1, 0), pct(1, 4))
+	}
+}
+
+func TestReadFailuresAreErrorsNotEmptyAnswers(t *testing.T) {
+	d := t.TempDir()
+	if _, _, err := readCalls(filepath.Join(d, "gone.jsonl")); err == nil {
+		t.Error("readCalls on a missing file must fail")
+	}
+	if _, err := lastContext(filepath.Join(d, "gone.jsonl"), 1<<20); err == nil {
+		t.Error("lastContext on a missing file must fail")
+	}
+	if os.Geteuid() == 0 {
+		return
+	}
+	p := filepath.Join(d, "locked.jsonl")
+	writeLines(t, p, asst("m", "x", 1, 9, 0, "2026-11-20T09:00:00Z"))
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lastContext(p, 1<<20); err == nil {
+		t.Error("lastContext on an unreadable file must fail")
+	}
+}
+
 func TestReportThroughTheCommand(t *testing.T) {
 	root := t.TempDir()
 	clock = func() time.Time { return time.Now() }
@@ -373,8 +459,9 @@ func TestReportThroughTheCommand(t *testing.T) {
 	if st := run([]string{"report", "--projects", t.TempDir()}, &o, &e); st != 2 {
 		t.Errorf("no transcripts: status %d", st)
 	}
-	if st := run([]string{"report", "--projects", root, "--since", "0s"}, &o, &e); st != 2 {
-		t.Errorf("zero window: status %d", st)
+	e.Reset()
+	if st := run([]string{"report", "--projects", root, "--since", "0s"}, &o, &e); st != 2 || !strings.Contains(e.String(), "must be positive") {
+		t.Errorf("zero window: status %d, %q", st, e.String())
 	}
 }
 
