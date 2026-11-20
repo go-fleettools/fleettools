@@ -42,6 +42,19 @@ func init() { headPollEvery = 0; headPollTries = 3 }
 // ⛔ The race that stopped the first real run: prwait, started the instant after
 // the push, judged the pull request's OLD head — which was red — because GitHub
 // had not yet moved the head to the pushed commit.
+func TestAnUnreadablePushedCommitStopsTheRun(t *testing.T) {
+	e := setup(t, redView, "", "", "4000")
+	clone(t, e, "go-x-.github", "")
+	script := "#!/bin/sh\ncase \"$*\" in *rev-parse*) echo cannot resolve HEAD >&2; exit 1 ;; esac\n"
+	if err := os.WriteFile(filepath.Join(filepath.Dir(e.head), "bin", "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, _, errOut := drive(t, e, nil, "go-x/.github#9")
+	if st != 1 || !strings.Contains(errOut, "cannot resolve HEAD") || strings.Contains(logged(t, e), "prwait") {
+		t.Fatalf("status %d: %s", st, errOut)
+	}
+}
+
 func TestItDoesNotWaitUntilThePullRequestHeadIsThePushedCommit(t *testing.T) {
 	e := setup(t, redView, "", "", "4000")
 	clone(t, e, "go-x-.github", "")
