@@ -22,6 +22,17 @@ type Index struct {
 	broken  map[string]string           // package path -> the first load error seen
 	version map[string]string           // package path -> the module version it was loaded at
 	members map[string]bool             // every exported field and method name of any loaded type
+
+	// ownMembers is every field and method name of the module's OWN types,
+	// unexported included. ⛔ It is a separate set, not more entries in
+	// members, because the two answer different questions: a README naming
+	// its own `seekByte` names something real, while the same spelling on a
+	// DEPENDENCY's type is unusable from here and must stay unresolved.
+	// Review measured why it exists: on go-pdfkit/reader, seven of the twelve
+	// lower-case names reported unconfirmed were real unexported methods —
+	// readHintTables, seekByte, measureShared, getFromObjectStream,
+	// reachFromPage — leaving one true finding in twelve.
+	ownMembers map[string]bool
 }
 
 // Load type-checks the module in dir and the packages it requires from its
@@ -67,7 +78,7 @@ func Load(dir string, goos []string) (*Index, error) {
 		}
 	}
 
-	ix := &Index{byName: map[string][]*types.Package{}, broken: map[string]string{}, version: map[string]string{}, members: map[string]bool{}}
+	ix := &Index{byName: map[string][]*types.Package{}, broken: map[string]string{}, version: map[string]string{}, members: map[string]bool{}, ownMembers: map[string]bool{}}
 	for _, g := range goos {
 		// ⛔⛔ NeedSyntax IS WHAT MAKES AN UNEXPORTED NAME VISIBLE, and its
 		// absence was half of #354. With NeedTypes alone a package arrives from
@@ -127,9 +138,10 @@ func Load(dir string, goos []string) (*Index, error) {
 			}
 			ix.byName[p.Name] = append(ix.byName[p.Name], p.Types)
 			ix.all = append(ix.all, p.Types)
-			addMembers(ix.members, p.Types)
+			addMembers(ix.members, p.Types, false)
 			if p.PkgPath == self || strings.HasPrefix(p.PkgPath, self+"/") {
 				ix.own = append(ix.own, p.Types)
+				addMembers(ix.ownMembers, p.Types, true)
 			}
 		}
 	}
@@ -155,7 +167,11 @@ func orgPrefix(module string) string {
 	return strings.Join(parts[:2], "/") + "/"
 }
 
-func addMembers(set map[string]bool, p *types.Package) {
+// addMembers records the field and method names of p's types into set:
+// exported ones always, unexported ones only when the caller says so — which
+// it does for the module's OWN packages and never for a dependency's. The
+// parameter mirrors the one `resolves` takes, for the same reason.
+func addMembers(set map[string]bool, p *types.Package, unexported bool) {
 	scope := p.Scope()
 	for _, name := range scope.Names() {
 		tn, ok := scope.Lookup(name).(*types.TypeName)
@@ -164,7 +180,7 @@ func addMembers(set map[string]bool, p *types.Package) {
 		}
 		ms := types.NewMethodSet(types.NewPointer(tn.Type()))
 		for i := 0; i < ms.Len(); i++ {
-			if f := ms.At(i).Obj(); f.Exported() {
+			if f := ms.At(i).Obj(); f.Exported() || unexported {
 				set[f.Name()] = true
 			}
 		}
@@ -174,33 +190,33 @@ func addMembers(set map[string]bool, p *types.Package) {
 		// interface itself.
 		if it, ok := tn.Type().Underlying().(*types.Interface); ok {
 			for i := 0; i < it.NumMethods(); i++ {
-				if f := it.Method(i); f.Exported() {
+				if f := it.Method(i); f.Exported() || unexported {
 					set[f.Name()] = true
 				}
 			}
 		}
 		if st, ok := tn.Type().Underlying().(*types.Struct); ok {
-			addFields(set, st, 0)
+			addFields(set, st, 0, unexported)
 		}
 	}
 }
 
-func addFields(set map[string]bool, st *types.Struct, depth int) {
+func addFields(set map[string]bool, st *types.Struct, depth int, unexported bool) {
 	if depth > 4 {
 		return
 	}
 	for i := 0; i < st.NumFields(); i++ {
 		f := st.Field(i)
-		if f.Exported() {
+		if f.Exported() || unexported {
 			set[f.Name()] = true
 		}
 		if f.Embedded() {
 			if inner, ok := f.Type().Underlying().(*types.Struct); ok {
-				addFields(set, inner, depth+1)
+				addFields(set, inner, depth+1, unexported)
 			}
 			if p, ok := f.Type().(*types.Pointer); ok {
 				if inner, ok := p.Elem().Underlying().(*types.Struct); ok {
-					addFields(set, inner, depth+1)
+					addFields(set, inner, depth+1, unexported)
 				}
 			}
 		}
@@ -279,6 +295,13 @@ func (ix *Index) Check(r Ref) (Verdict, string) {
 	}
 	// A bare `Draw` or `SetBounds` names a method, not a top-level name.
 	if r.Member == "" && ix.members[r.Name] {
+		return Found, ""
+	}
+	// ⛔ And a bare `seekByte` names one of this module's OWN unexported
+	// methods. resolves looks only in package scope, which holds no methods
+	// at all, so without this every unexported method a README mentions read
+	// as unconfirmed — seven of twelve on go-pdfkit/reader.
+	if r.Member == "" && ix.ownMembers[r.Name] {
 		return Found, ""
 	}
 	for path := range ix.broken {

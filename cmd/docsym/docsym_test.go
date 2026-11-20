@@ -122,6 +122,7 @@ const trayV14 = `package tray
 type Tray struct{ Tooltip string }
 func New() *Tray { return nil }
 func (t *Tray) Attach() error { return nil }
+func (t *Tray) relayout() {}
 type Menu struct{}
 `
 
@@ -129,23 +130,26 @@ const ownSrc = `package webcanvas
 type App interface { Draw(buf []byte); KeyDown(k string) bool }
 func Run(id string, a App) {}
 type Base struct{ Bounds int }
-type Button struct{ Base; Label string }
+type Button struct{ Base; Label string; hoverState int }
 func (b *Button) SetBounds(x int) {}
+func (b *Button) seekGlyph() {}
 `
 
 func index(t *testing.T) *Index {
 	tray := pkg(t, "github.com/go-widgets/tray", trayV14)
 	own := pkg(t, "github.com/go-widgets/webcanvas", ownSrc)
 	ix := &Index{
-		byName:  map[string][]*types.Package{"tray": {tray}, "webcanvas": {own}},
-		own:     []*types.Package{own},
-		all:     []*types.Package{own, tray},
-		broken:  map[string]string{},
-		version: map[string]string{"github.com/go-widgets/tray": "v0.14.0"},
-		members: map[string]bool{},
+		byName:     map[string][]*types.Package{"tray": {tray}, "webcanvas": {own}},
+		own:        []*types.Package{own},
+		all:        []*types.Package{own, tray},
+		broken:     map[string]string{},
+		version:    map[string]string{"github.com/go-widgets/tray": "v0.14.0"},
+		members:    map[string]bool{},
+		ownMembers: map[string]bool{},
 	}
-	addMembers(ix.members, own)
-	addMembers(ix.members, tray)
+	addMembers(ix.members, own, false)
+	addMembers(ix.members, tray, false)
+	addMembers(ix.ownMembers, own, true) // the module's own types only, as Load does
 	return ix
 }
 
@@ -171,6 +175,18 @@ func TestCheck(t *testing.T) {
 		{Ref{Name: "Button", Member: "Bounds"}, Found, ""},
 		{Ref{Name: "Menu"}, Found, ""}, // a dependency's type, bare
 		{Ref{Name: "NSEvent"}, Unconfirmed, ""},
+
+		// ⛔ The module's OWN unexported method and field resolve: a README
+		// describing its internals names something real. On go-pdfkit/reader
+		// seven of twelve lower-case unconfirmed names were exactly this.
+		{Ref{Name: "seekGlyph"}, Found, ""},
+		{Ref{Name: "hoverState"}, Found, ""},
+
+		// ⛔ But a DEPENDENCY's unexported method does not: it cannot be
+		// called from here, so the set it would come from is never built for
+		// a dependency. This is the line that fails if ownMembers is ever
+		// filled from ix.all instead of ix.own.
+		{Ref{Name: "relayout"}, Unconfirmed, ""},
 	} {
 		v, where := ix.Check(c.ref)
 		if v != c.want || !strings.Contains(where, c.where) {
