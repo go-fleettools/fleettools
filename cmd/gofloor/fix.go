@@ -179,7 +179,10 @@ gitpush, then prbody and paritycheck over the body, then gh pr create.
 It does NOT wait for CI and does NOT merge: gofloor merge does that later.
 
 A repository is skipped, and listed with the reason, when: another session holds
-it; an open pull request from another branch edits a go.mod; a go.mod is
+it; an open pull request from another branch changes a go directive (or
+edits a go.mod whose patch GitHub withheld), or git merge-tree reports one
+that touches a go.mod as conflicting with the floor commit (a Renovate PR
+that only edits require lines does not stop it); a go.mod is
 malformed; a build fails; a workflow pins setup-go to a version under the floor
 that this cannot rewrite (a hard-coded pin under the directive REFUSES in CI,
 because setup-go sets GOTOOLCHAIN=local).
@@ -449,7 +452,7 @@ func (e *fixEnv) fixOne(o fixOpts, r fleet.Repo) outcome {
 	}
 
 	// Open pull requests: REST, so only for a repository that needs a change.
-	conflict, already, err := e.openPRs(r, o)
+	conflict, already, check, err := e.openPRs(r, o)
 	if err != nil {
 		return bad(stUnreadable, "open pull requests: %v", err)
 	}
@@ -515,6 +518,16 @@ func (e *fixEnv) fixOne(o fixOpts, r fleet.Repo) outcome {
 			return failed(stUnreadable, "git %s: %s", g[0], gitWhy(out, err))
 		}
 	}
+	// The pull requests that edit a go.mod without touching the directive are
+	// judged by git, on the commit just made, before anything is pushed.
+	clash, merr := e.mergeConflicts(dir, check)
+	if merr != nil || len(clash) > 0 {
+		e.run(dir, "git", "reset", "--hard", "origin/"+r.DefaultBranch) // our own throwaway commit
+		if merr != nil {
+			return bad(stUnreadable, "merge check: %v", merr)
+		}
+		return bad(stConflict, "%s", strings.Join(clash, "; "))
+	}
 	if out, st, err := e.run(dir, "gitpush", "-u", "origin", o.branch()); err != nil || st != 0 {
 		return failed(stUnreadable, "gitpush: %s", gitWhy(out, err))
 	}
@@ -542,12 +555,22 @@ func prURL(out string) string {
 	return "(no URL in gh's answer: " + lastLine(out) + ")"
 }
 
-// openPRs returns a reason when another branch's open pull request edits a
-// go.mod, and the line to print when this tool's own is already open.
-func (e *fixEnv) openPRs(r fleet.Repo, o fixOpts) (conflict, already string, err error) {
+// directiveEditRe finds a changed `go` directive line in a unified diff.
+var directiveEditRe = regexp.MustCompile(`(?m)^[+-]go\s+\d`)
+
+// openPRs says whether another branch's open pull request collides with the
+// floor change.
+//
+// A pull request that only edits `require` lines (Renovate's) rarely collides
+// textually, so it is NOT a conflict by itself: conflict is set when a go.mod
+// diff changes the `go` directive line, or when its patch is missing (GitHub
+// omits big ones) so that cannot be judged. Every other pull request touching a
+// go.mod is returned in check, to be judged by `git merge-tree` against the
+// real commit. already is the line to print when this tool's own is open.
+func (e *fixEnv) openPRs(r fleet.Repo, o fixOpts) (conflict, already string, check []int, err error) {
 	b, err := e.ghc("api", "repos/"+r.FullName+"/pulls?state=open&per_page=100")
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	var prs []struct {
 		Number  int    `json:"number"`
@@ -557,42 +580,75 @@ func (e *fixEnv) openPRs(r fleet.Repo, o fixOpts) (conflict, already string, err
 		} `json:"head"`
 	}
 	if err := json.Unmarshal(b, &prs); err != nil {
-		return "", "", fmt.Errorf("the pull request list is not JSON: %w", err)
+		return "", "", nil, fmt.Errorf("the pull request list is not JSON: %w", err)
 	}
 	if len(prs) >= 100 {
-		return "", "", errors.New("100 open pull requests or more: the list may be cut")
+		return "", "", nil, errors.New("100 open pull requests or more: the list may be cut")
 	}
 	var found []string
 	for _, p := range prs {
 		if p.Head.Ref == o.branch() {
-			return "", "pull request already open: " + p.HTMLURL, nil
+			return "", "pull request already open: " + p.HTMLURL, nil, nil
 		}
 	}
 	for _, p := range prs {
 		fb, err := e.ghc("api", fmt.Sprintf("repos/%s/pulls/%d/files?per_page=100", r.FullName, p.Number))
 		if err != nil {
-			return "", "", fmt.Errorf("files of #%d: %w", p.Number, err)
+			return "", "", nil, fmt.Errorf("files of #%d: %w", p.Number, err)
 		}
 		var files []struct {
 			Filename string `json:"filename"`
+			Patch    string `json:"patch"`
 		}
 		if err := json.Unmarshal(fb, &files); err != nil {
-			return "", "", fmt.Errorf("files of #%d are not JSON: %w", p.Number, err)
+			return "", "", nil, fmt.Errorf("files of #%d are not JSON: %w", p.Number, err)
 		}
 		if len(files) >= 100 {
-			return "", "", fmt.Errorf("#%d has 100 files or more: the list may be cut", p.Number)
+			return "", "", nil, fmt.Errorf("#%d has 100 files or more: the list may be cut", p.Number)
 		}
+		touches := false
 		for _, f := range files {
-			if path.Base(f.Filename) == "go.mod" {
-				found = append(found, fmt.Sprintf("#%d (%s) edits %s", p.Number, p.Head.Ref, f.Filename))
-				break
+			if path.Base(f.Filename) != "go.mod" {
+				continue
 			}
+			touches = true
+			switch {
+			case f.Patch == "":
+				found = append(found, fmt.Sprintf("#%d (%s) edits %s, patch not available", p.Number, p.Head.Ref, f.Filename))
+			case directiveEditRe.MatchString(f.Patch):
+				found = append(found, fmt.Sprintf("#%d (%s) changes the go directive of %s", p.Number, p.Head.Ref, f.Filename))
+			}
+		}
+		if touches {
+			check = append(check, p.Number)
 		}
 	}
 	if len(found) > 0 {
-		return "open pull request(s) editing go.mod: " + strings.Join(found, "; "), "", nil
+		return "open pull request(s) editing the go directive: " + strings.Join(found, "; "), "", nil, nil
 	}
-	return "", "", nil
+	return "", "", check, nil
+}
+
+// mergeConflicts asks git, against the real commit, whether each pull request
+// that touches a go.mod would merge with it. `git merge-tree --write-tree`
+// exits 1 on a conflict; anything else non-zero is unreadable, never "clean".
+func (e *fixEnv) mergeConflicts(dir string, nums []int) (conflicts []string, err error) {
+	for _, n := range nums {
+		ref := fmt.Sprintf("pull/%d/head", n)
+		if out, st, err := e.run(dir, "git", "fetch", "origin", ref); err != nil || st != 0 {
+			return nil, fmt.Errorf("fetch %s: %s", ref, gitWhy(out, err))
+		}
+		out, st, err := e.run(dir, "git", "merge-tree", "--write-tree", "HEAD", "FETCH_HEAD")
+		switch {
+		case err != nil:
+			return nil, err
+		case st == 1:
+			conflicts = append(conflicts, fmt.Sprintf("#%d conflicts with the floor commit", n))
+		case st != 0:
+			return nil, fmt.Errorf("git merge-tree exit %d: %s", st, lastLine(out))
+		}
+	}
+	return conflicts, nil
 }
 
 // An Edit is one go.mod below the floor.

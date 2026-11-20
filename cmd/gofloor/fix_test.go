@@ -189,6 +189,7 @@ type fixFake struct {
 	buildNo        map[string]bool              // repo whose go build fails
 	pulls          map[string]string            // repo -> JSON of open pulls
 	files          map[string]string            // "repo#N" -> JSON of files
+	mergeStatus    int
 	ratewaitStatus int
 	rates          []int
 	rateErr        error
@@ -277,6 +278,8 @@ func (f *fixFake) run(dir, name string, args ...string) (string, int, error) {
 			return "", 0, nil
 		case "restore":
 			return "", 0, nil
+		case "merge-tree":
+			return "CONFLICT (content): x", f.mergeStatus, nil
 		}
 	case "go":
 		if args[0] == "build" {
@@ -530,6 +533,44 @@ func TestFixUnreadableMeansUnreadable(t *testing.T) {
 	e.repos = func(string) ([]fleet.Repo, error) { return nil, errors.New("HTTP 401") }
 	if code, _, _ := driveFix(e, "o"); code != 2 {
 		t.Errorf("listing: exit %d", code)
+	}
+}
+
+// Renovate edits `require` lines, so its pull request does not stop the floor
+// one: only a changed go directive, or a merge git reports as conflicting.
+func TestFixConflictRule(t *testing.T) {
+	requirePatch := `[{"filename":"go.mod","patch":"@@ -5,3 +5,3 @@ module x\n-\tgithub.com/a/b v1.0.0\n+\tgithub.com/a/b v1.1.0\n"}]`
+	directivePatch := `[{"filename":"go.mod","patch":"@@ -1,3 +1,3 @@\n module x\n-go 1.27.3\n+go 1.27.2\n"}]`
+	cases := map[string]struct {
+		files       string
+		mergeStatus int
+		want        string
+		pushed      bool
+	}{
+		"require-only, merges":      {requirePatch, 0, "OPENED", true},
+		"require-only, git clashes": {requirePatch, 1, "CONFLICT", false},
+		"directive changed":         {directivePatch, 0, "CONFLICT", false},
+		"merge-tree broken":         {requirePatch, 129, "UNREADABLE", false},
+	}
+	for name, c := range cases {
+		f := newFixFake(t)
+		f.clones["o/a"] = map[string]string{"go.mod": "module a\n\ngo 1.27.3\n"}
+		f.pulls["o/a"] = `[{"number":5,"html_url":"u","head":{"ref":"renovate/x"}}]`
+		f.files["o/a#5"] = c.files
+		f.mergeStatus = c.mergeStatus
+		_, out, _ := driveFix(f.env("o/a"), "o")
+		if !strings.HasPrefix(out, c.want) {
+			t.Errorf("%s: want %s\n%s", name, c.want, out)
+		}
+		if pushed := f.logHas("gitpush") >= 0; pushed != c.pushed {
+			t.Errorf("%s: pushed = %v", name, pushed)
+		}
+		if c.want == "OPENED" && f.logHas("merge-tree --write-tree HEAD FETCH_HEAD") < 0 {
+			t.Errorf("%s: git was not asked", name)
+		}
+		if c.mergeStatus != 0 && f.logHas("reset --hard origin/main") < 0 {
+			t.Errorf("%s: commit not undone", name)
+		}
 	}
 }
 
