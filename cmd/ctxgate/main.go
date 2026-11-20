@@ -79,10 +79,7 @@ func precompactOutput(custom string) string {
 
 // cutBytes cuts s to at most n bytes, never in the middle of a character.
 func cutBytes(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	s = s[:n]
+	s = s[:min(n, len(s))]
 	for len(s) > 0 && !utf8.ValidString(s) {
 		s = s[:len(s)-1]
 	}
