@@ -34,7 +34,40 @@ func TestMigrateRefusesAFileWithoutTheKey(t *testing.T) {
 }
 
 type env struct {
-	root, ledger, log string
+	root, ledger, log, head string
+}
+
+func init() { headPollEvery = 0; headPollTries = 3 }
+
+// ⛔ The race that stopped the first real run: prwait, started the instant after
+// the push, judged the pull request's OLD head — which was red — because GitHub
+// had not yet moved the head to the pushed commit.
+func TestAnUnreadablePushedCommitStopsTheRun(t *testing.T) {
+	e := setup(t, redView, "", "", "4000")
+	clone(t, e, "go-x-.github", "")
+	script := "#!/bin/sh\ncase \"$*\" in *rev-parse*) echo cannot resolve HEAD >&2; exit 1 ;; esac\n"
+	if err := os.WriteFile(filepath.Join(filepath.Dir(e.head), "bin", "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st, _, errOut := drive(t, e, nil, "go-x/.github#9")
+	if st != 1 || !strings.Contains(errOut, "cannot resolve HEAD") || strings.Contains(logged(t, e), "prwait") {
+		t.Fatalf("status %d: %s", st, errOut)
+	}
+}
+
+func TestItDoesNotWaitUntilThePullRequestHeadIsThePushedCommit(t *testing.T) {
+	e := setup(t, redView, "", "", "4000")
+	clone(t, e, "go-x-.github", "")
+	if err := os.WriteFile(e.head, []byte("old000"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, _, errOut := drive(t, e, nil, "go-x/.github#9")
+	if st != 1 || !strings.Contains(errOut, "has not moved to the pushed commit") {
+		t.Fatalf("status %d: %s", st, errOut)
+	}
+	if l := logged(t, e); strings.Contains(l, "prwait") || strings.Contains(l, "ghmerge") {
+		t.Fatalf("waited on a stale head:\n%s", l)
+	}
 }
 
 // setup puts fake programs first on PATH. Each appends its argv to one log;
@@ -61,13 +94,19 @@ func setup(t *testing.T, view, claim, prwait, remaining string) env {
 	if view == "fail" {
 		pr = "echo no such pull request >&2; exit 1"
 	}
+	head := filepath.Join(dir, "head")
+	if err := os.WriteFile(head, []byte("abc123"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e.head = head
 	fake("gh", `case "$*" in
   *rate_limit*) `+rate+` ;;
+  *"--json headRefOid"*) echo "{\"headRefOid\":\"$(cat `+head+`)\"}" ;;
   *"pr view"*) `+pr+` ;;
   *) echo "unexpected gh $*" >&2; exit 1 ;;
 esac`)
 	fake("agentsync", claim)
-	fake("git", "")
+	fake("git", `case "$*" in *rev-parse*) echo abc123 ;; esac`)
 	fake("gitpush", "")
 	fake("prwait", prwait)
 	fake("ghmerge", "")

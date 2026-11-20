@@ -319,6 +319,13 @@ func fix(stdout io.Writer, repo, number string, o options) (string, error) {
 			return "", err
 		}
 	}
+	sha, err := call(dir, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	if err := headIs(repo, number, strings.TrimSpace(sha)); err != nil {
+		return "", err
+	}
 	if _, err := call(dir, "prwait", "-repo", repo, number); err != nil {
 		return "", fmt.Errorf("not green, not merging: %v", err)
 	}
@@ -329,6 +336,33 @@ func fix(stdout io.Writer, repo, number string, o options) (string, error) {
 		return "", err
 	}
 	return "", nil
+}
+
+// Overridable by tests.
+var (
+	headPollEvery = 5 * time.Second
+	headPollTries = 24
+)
+
+// headIs waits until the pull request's head is the commit just pushed.
+// ⛔ prwait judges the head it reads, and right after a push GitHub still
+// answers the old one: measured on go-ndarray/.github#25, where prwait judged
+// the previous, red head and the run stopped on a fix that was in fact green.
+func headIs(repo, number, want string) error {
+	for i := 0; i < headPollTries; i++ {
+		out, err := call("", "gh", "pr", "view", number, "-R", repo, "--json", "headRefOid")
+		if err != nil {
+			return err
+		}
+		var v struct {
+			Head string `json:"headRefOid"`
+		}
+		if json.Unmarshal([]byte(out), &v) == nil && v.Head == want {
+			return nil
+		}
+		time.Sleep(headPollEvery)
+	}
+	return fmt.Errorf("the head of %s#%s has not moved to the pushed commit %.7s", repo, number, want)
 }
 
 // pinned reports whether a workflow carries the RENOVATE_VERSION half of the
