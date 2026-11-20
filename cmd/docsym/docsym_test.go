@@ -210,9 +210,16 @@ func TestCheck(t *testing.T) {
 // of this module can use. The rule is now about the object, not the set: an
 // unexported name counts only when it is declared in the package scanned.
 func TestAnEmbeddedDependencyDoesNotLendItsUnexportedNames(t *testing.T) {
+	// Three ways to embed, each a separate path through addMembers/addFields,
+	// and all three verified refused by review before being pinned here: a
+	// value embedding (W), a POINTER embedding (P — addFields' pointer branch),
+	// and an embedded dependency INTERFACE (I — the interface-method loop,
+	// where testing.TB carries an unexported `private`).
 	own := pkg(t, "github.com/go-widgets/webcanvas", `package webcanvas
-import "bytes"
+import ("bytes"; "testing")
 type W struct{ bytes.Buffer; mine int }
+type P struct{ *bytes.Buffer }
+type I interface{ testing.TB }
 func (w *W) ownHelper() {}
 `)
 	ix := &Index{
@@ -236,6 +243,8 @@ func (w *W) ownHelper() {}
 		{"grow", Unconfirmed, "bytes.Buffer's unexported method, promoted through the embedding"},
 		{"buf", Unconfirmed, "bytes.Buffer's unexported field, reached by the embedded-field walk"},
 		{"lastRead", Unconfirmed, "another of bytes.Buffer's unexported fields"},
+		{"readSlice", Unconfirmed, "promoted through the POINTER embedding in P as well as W"},
+		{"private", Unconfirmed, "testing.TB's unexported method, through the embedded interface I"},
 		{"Len", Found, "exported and promoted: callable on W, so it is a real name"},
 	} {
 		if v, where := ix.Check(Ref{Name: c.name}); v != c.want {
