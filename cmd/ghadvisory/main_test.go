@@ -18,6 +18,7 @@ type server struct {
 	tags    map[string]bool
 	state   string
 	patched string
+	desc    string
 	reqs    []string
 	bodies  []string
 	auth    []string
@@ -25,10 +26,11 @@ type server struct {
 
 func newServer(t *testing.T) *server {
 	t.Helper()
-	s := &server{tags: map[string]bool{"v0.3.4": true}, state: "draft", patched: "0.3.4"}
+	s := &server{tags: map[string]bool{"v0.3.4": true}, state: "draft", patched: "0.3.4", desc: "line one\nold workaround\nline three"}
 	mux := http.NewServeMux()
 	adv := func() string {
-		return `{"ghsa_id":"` + ghsa + `","html_url":"https://github.com/o/r/security/advisories/` + ghsa +
+		d, _ := json.Marshal(s.desc)
+		return `{"description":` + string(d) + `,"ghsa_id":"` + ghsa + `","html_url":"https://github.com/o/r/security/advisories/` + ghsa +
 			`","state":"` + s.state + `","summary":"sum","severity":"high","vulnerabilities":[{"package":{"ecosystem":"go","name":"m"},"vulnerable_version_range":"< 0.3.4","patched_versions":"` + s.patched + `"}]}`
 	}
 	mux.HandleFunc("/repos/o/r/security-advisories", func(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +47,14 @@ func newServer(t *testing.T) *server {
 	mux.HandleFunc("/repos/o/r/security-advisories/"+ghsa, func(w http.ResponseWriter, r *http.Request) {
 		s.record(r)
 		if r.Method == http.MethodPatch {
-			s.state = "published"
+			var in map[string]string
+			_ = json.Unmarshal([]byte(s.bodies[len(s.bodies)-1]), &in)
+			if d, ok := in["description"]; ok {
+				s.desc = d
+			}
+			if in["state"] == "published" {
+				s.state = "published"
+			}
 		}
 		_, _ = io.WriteString(w, adv())
 	})
@@ -259,6 +268,66 @@ func TestPublishRefusesAMalformedId(t *testing.T) {
 	s := newServer(t)
 	if _, err := exec(t, "o/r", "publish", "GHSA-1", "--base", s.URL, "--token-file", file(t, "tok", "x", 0o600)); err == nil {
 		t.Fatal("accepted")
+	}
+}
+
+func editArgs(t *testing.T, s *server, body string, extra ...string) []string {
+	return append([]string{"o/r", "edit", ghsa, "--base", s.URL,
+		"--token-file", file(t, "tok", "SEKRIT", 0o600),
+		"--body-file", file(t, "b.md", body, 0o644)}, extra...)
+}
+
+func TestEditShowsTheDiffThenReplacesTheDescription(t *testing.T) {
+	s := newServer(t)
+	out, err := exec(t, editArgs(t, s, "line one\nnew workaround\nline three\n")...)
+	if err != nil {
+		t.Fatal(err, out)
+	}
+	for _, want := range []string{"- old workaround", "+ new workaround", "  line one", "edited: " + ghsa} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	last := len(s.reqs) - 1
+	if !strings.HasPrefix(s.reqs[last], "PATCH ") || s.bodies[last] != `{"description":"line one\nnew workaround\nline three\n"}` {
+		t.Errorf("last request %s %s", s.reqs[last], s.bodies[last])
+	}
+	if strings.Contains(s.bodies[last], "state") {
+		t.Errorf("an edit must not touch the state: %s", s.bodies[last])
+	}
+}
+
+func TestEditRefusesAPublishedAdvisory(t *testing.T) {
+	s := newServer(t)
+	s.state = "published"
+	_, err := exec(t, editArgs(t, s, "new text\n")...)
+	if err == nil || !strings.Contains(err.Error(), "only a draft") || s.wrote() {
+		t.Fatalf("err %v reqs %v", err, s.reqs)
+	}
+}
+
+func TestEditDryRunWritesNothing(t *testing.T) {
+	s := newServer(t)
+	out, err := exec(t, editArgs(t, s, "new text\n", "--dry-run")...)
+	if err != nil || s.wrote() || !strings.Contains(out, "NOT sent") {
+		t.Fatalf("err %v reqs %v\n%s", err, s.reqs, out)
+	}
+}
+
+func TestEditGatesTheBodyBeforeAnyRequest(t *testing.T) {
+	s := newServer(t)
+	private := "`/Users/alicia/Documents/fairshare-b300/fairshare-b300.tex`, 36 pages.\n"
+	if _, err := exec(t, editArgs(t, s, private)...); err == nil || len(s.reqs) != 0 {
+		t.Fatalf("err %v reqs %v", err, s.reqs)
+	}
+	if _, err := exec(t, "o/r", "edit", ghsa, "--base", s.URL, "--token-file", file(t, "tok", "x", 0o600)); err == nil || len(s.reqs) != 0 {
+		t.Fatalf("a missing --body-file was accepted: %v", err)
+	}
+}
+
+func TestLineDiff(t *testing.T) {
+	if got, want := lineDiff("a\nb\nc", "a\nx\nc\nd"), "  a\n- b\n+ x\n  c\n+ d\n"; got != want {
+		t.Errorf("got %q want %q", got, want)
 	}
 }
 
