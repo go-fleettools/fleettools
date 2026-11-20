@@ -418,13 +418,27 @@ func TestRenderEdges(t *testing.T) {
 	}
 }
 
+func TestCutBytesNeverSplitsACharacter(t *testing.T) {
+	for _, c := range []struct {
+		s    string
+		n    int
+		want string
+	}{{"abc", 3, "abc"}, {"abcd", 3, "abc"}, {"abc", 4, "abc"}, {"é€", 3, "é"}, {"é€", 5, "é€"}, {"€", 2, ""}, {"abc", 0, ""}} {
+		if got := cutBytes(c.s, c.n); got != c.want {
+			t.Errorf("cutBytes(%q, %d) = %q, want %q", c.s, c.n, got, c.want)
+		}
+	}
+}
+
 func TestReadFailuresAreErrorsNotEmptyAnswers(t *testing.T) {
 	d := t.TempDir()
-	if _, _, err := readCalls(filepath.Join(d, "gone.jsonl")); err == nil {
-		t.Error("readCalls on a missing file must fail")
+	_, _, err := readCalls(filepath.Join(d, "gone.jsonl"))
+	if err == nil || !strings.Contains(err.Error(), "open") {
+		t.Errorf("readCalls on a missing file must fail at open, got %v", err)
 	}
-	if _, err := lastContext(filepath.Join(d, "gone.jsonl"), 1<<20); err == nil {
-		t.Error("lastContext on a missing file must fail")
+	_, err = lastContext(filepath.Join(d, "gone.jsonl"), 1<<20)
+	if err == nil || !strings.Contains(err.Error(), "stat") {
+		t.Errorf("lastContext on a missing file must fail at stat, got %v", err)
 	}
 	if os.Geteuid() == 0 {
 		return
@@ -434,8 +448,8 @@ func TestReadFailuresAreErrorsNotEmptyAnswers(t *testing.T) {
 	if err := os.Chmod(p, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := lastContext(p, 1<<20); err == nil {
-		t.Error("lastContext on an unreadable file must fail")
+	if _, err := lastContext(p, 1<<20); err == nil || !strings.Contains(err.Error(), "open") {
+		t.Errorf("lastContext on an unreadable file must fail at open, got %v", err)
 	}
 }
 

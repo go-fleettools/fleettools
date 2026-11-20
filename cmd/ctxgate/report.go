@@ -142,12 +142,14 @@ func human(n int64) string {
 // render prints the table: one header, then each group's five buckets. "all",
 // "main" and "sub" come first, then "<kind> <model>" by cache-read, largest first.
 func (c *census) render(w io.Writer, since time.Duration) {
-	all := c.groups["all"]
-	if all == nil {
+	var t cell
+	if all := c.groups["all"]; all != nil {
+		t = all.total()
+	}
+	if t.calls == 0 {
 		fmt.Fprintf(w, "ctxgate report --since %v: no API call found (%d files read)\n", since, c.files)
 		return
 	}
-	t := all.total()
 	fmt.Fprintf(w, "ctxgate report --since %v: %d calls, %s cache-read tokens (%d files, %d oversize lines skipped, %d unreadable paths)\n",
 		since, t.calls, human(t.cacheRead), c.files, c.oversize, c.unreadable)
 	fmt.Fprintf(w, "%-34s %-9s %8s %7s %10s %7s\n", "group", "context", "calls", "%calls", "cache-read", "%cache")
@@ -164,8 +166,8 @@ func (c *census) render(w io.Writer, since time.Duration) {
 		}
 		return rest[i].name < rest[j].name
 	})
-	order := []*group{all}
-	for _, n := range []string{"main", "sub"} {
+	var order []*group
+	for _, n := range []string{"all", "main", "sub"} {
 		if g := c.groups[n]; g != nil {
 			order = append(order, g)
 		}
