@@ -1,0 +1,147 @@
+{
+  "lessons": [
+    {
+      "name": "accounted",
+      "originSessionId": "",
+      "modified": "2026-11-20T10:00:00Z",
+      "recurrences": [
+        {
+          "date": "2026-11-01",
+          "line": "Récidive le 2026-11-01."
+        }
+      ],
+      "ledger": {
+        "decision": "gate",
+        "text": "refused by the pre-push hook",
+        "writtenAt": "2026-11-19T09:00:00Z",
+        "fingerprint": "dd7debde8b82"
+      },
+      "fingerprintMatches": true
+    },
+    {
+      "name": "french",
+      "originSessionId": "",
+      "modified": "2026-11-20T10:00:00Z",
+      "recurrences": [
+        {
+          "date": "2026-11-18",
+          "yearInferred": true,
+          "line": "Récidive le 18-11, la note était sous la main."
+        }
+      ],
+      "ledger": {
+        "decision": "untriaged",
+        "text": "seeded, not triaged",
+        "writtenAt": null,
+        "fingerprint": "f81a599bd287"
+      },
+      "fingerprintMatches": true
+    },
+    {
+      "name": "iso",
+      "originSessionId": "sess-iso",
+      "modified": "2026-11-20T10:00:00Z",
+      "recurrences": [
+        {
+          "date": "2026-11-18",
+          "line": "## ⛔ RÉCURRENCE le 2026-11-18"
+        },
+        {
+          "date": "2026-11-18",
+          "line": "Ce soir, troisième récidive."
+        }
+      ],
+      "ledger": {
+        "decision": "none",
+        "text": "",
+        "writtenAt": null,
+        "fingerprint": ""
+      },
+      "fingerprintMatches": null
+    },
+    {
+      "name": "named",
+      "originSessionId": "sess-named",
+      "modified": "2026-11-20T10:00:00Z",
+      "recurrences": [
+        {
+          "date": "2026-11-07",
+          "line": "Pour la 3e fois, le 7 novembre 2026, j annonce avant de lire."
+        },
+        {
+          "date": "2026-11-12",
+          "yearInferred": true,
+          "line": "It happened again on November 12th."
+        }
+      ],
+      "ledger": {
+        "decision": "none",
+        "text": "",
+        "writtenAt": null,
+        "fingerprint": ""
+      },
+      "fingerprintMatches": null
+    },
+    {
+      "name": "repeated",
+      "originSessionId": "",
+      "modified": "2026-11-20T10:00:00Z",
+      "recurrences": [
+        {
+          "date": "2026-11-02",
+          "line": "Récidive le 2026-11-02."
+        },
+        {
+          "date": "2026-11-19",
+          "line": "Troisième récidive le 2026-11-19."
+        }
+      ],
+      "ledger": {
+        "decision": "no-gate",
+        "text": "none can exist ⛔ DOWNGRADED from gate: the tool was removed",
+        "writtenAt": "2026-11-10T08:00:00Z",
+        "fingerprint": "000000000000",
+        "downgrade": {
+          "from": "gate",
+          "reason": "the tool was removed"
+        }
+      },
+      "fingerprintMatches": false
+    },
+    {
+      "name": "undated",
+      "originSessionId": "",
+      "modified": "2026-11-20T10:00:00Z",
+      "recurrences": [
+        {
+          "date": null,
+          "line": "C est la deuxième fois."
+        }
+      ],
+      "ledger": {
+        "decision": "none",
+        "text": "",
+        "writtenAt": null,
+        "fingerprint": ""
+      },
+      "fingerprintMatches": null
+    }
+  ],
+  "totals": {
+    "lessons": 6,
+    "decisions": {
+      "gate": 1,
+      "no-gate": 1,
+      "none": 3,
+      "pending": 0,
+      "unknown": 0,
+      "untriaged": 1
+    },
+    "recurrences": 9,
+    "recurrencesDated": 8,
+    "recurrencesUndated": 1,
+    "repeatedAfterAccounted": 1,
+    "unreadable": 0
+  },
+  "unreadable": []
+}

@@ -131,6 +131,18 @@ machine. What the hook cannot read refuses everyone, as before: a memory with no
 originSessionId or no readable age, a payload with no session_id, --grace 0. And
 a ledger or directory it cannot read at all still allows.
 
+    recur --memory <dir> --json
+
+prints ONE JSON document instead of the report, for a program to chart whether
+the gates work: "lessons" (one per memory that records a recurrence, with its
+recurrence sentences and their dates, its ledger decision, and
+fingerprintMatches — false when it repeated after it was accounted for),
+"totals", and "unreadable", the files it could not read, so a blind scan is never
+a zero. A recurrence's date is read from its sentence or its section heading and
+is null when neither states one; it is never guessed. A day and month with no
+year take the year of the frontmatter "modified" stamp and are marked
+yearInferred. Exit status as below, and 2 when a file was unreadable.
+
 Exit status: 0 accounted for, 1 at least one is not, 2 refused to decide — the
 memory directory or the ledger could not be read, or a landed gate would have
 been downgraded without a reason. A directory that would not open is never
@@ -191,6 +203,8 @@ func RootCmd() *cobra.Command {
 		"write everything known right now as untriaged backlog, so the gate starts clean")
 	c.Flags().BoolVar(&o.hook, "hook", false,
 		"read a PreToolUse payload on stdin and answer it: deny a publishing command while a recurrence is unaccounted for")
+	c.Flags().BoolVar(&o.json, "json", false,
+		"print one JSON document instead of the text report: every lesson that records a recurrence, with its dated recurrence sentences, its ledger decision and whether it repeated after being accounted for, plus totals and the files that could not be read. Exit status as for the text report, and 2 when a file was unreadable")
 	c.Flags().DurationVar(&o.grace, "grace", defaultGrace,
 		"with --hook: a recurrence blocks only the session that wrote it (the payload's session_id == the memory's originSessionId) until it has gone unaccounted for this long, then every session; other sessions are warned meanwhile. 0 refuses everyone at once. A memory with no originSessionId or no readable age refuses everyone, as before")
 	return c
@@ -624,6 +638,7 @@ type opts struct {
 	downgrade string
 	seed      bool
 	hook      bool
+	json      bool
 	grace     time.Duration // --hook: how long a lesson may stay unaccounted before it refuses sessions other than its owner; 0 refuses everyone at once
 }
 
@@ -644,6 +659,7 @@ type scoped struct {
 type origin struct {
 	session  string
 	modified time.Time
+	stated   bool // modified came from the frontmatter, not from the file's mtime
 }
 
 // scopeByOwner splits the open findings into those that refuse THIS session and
@@ -712,7 +728,7 @@ func readOrigin(dir, lesson string) (origin, error) {
 		}
 	}
 	if t, err := time.Parse(time.RFC3339, stamp); err == nil {
-		org.modified = t
+		org.modified, org.stated = t, true
 		return org, nil
 	}
 	info, err := os.Stat(path)
@@ -859,6 +875,14 @@ func check(out, errOut io.Writer, o opts) int {
 	if err != nil {
 		fmt.Fprintln(errOut, "recur: reading the ledger:", err)
 		return 2
+	}
+
+	if o.json {
+		if o.accept != "" || o.seed {
+			fmt.Fprintln(errOut, "recur: --json only reads; it cannot be combined with --accept or --seed")
+			return 2
+		}
+		return jsonReport(out, errOut, o.memory, known)
 	}
 
 	found, err := scan(o.memory)
@@ -1082,22 +1106,43 @@ func scan(dir string) ([]recorded, error) {
 // and so is a "pointer" whose target is not there: it points at nothing, so it
 // is prose.
 func fingerprint(b []byte, dir, self string) (string, bool) {
-	var hit []string
-	for _, line := range strings.Split(string(b), "\n") {
+	hits := hitLines(b, dir, self)
+	if len(hits) == 0 {
+		return "", false
+	}
+	return markOf(hits), true
+}
+
+// hit is one line that matched a marker: its 0-based index and trimmed text.
+type hit struct {
+	idx  int
+	text string
+}
+
+// hitLines is the ONE reading of which lines record a recurrence; the
+// fingerprint and --json are both built on it.
+func hitLines(b []byte, dir, self string) []hit {
+	var hits []hit
+	for i, line := range strings.Split(string(b), "\n") {
 		for _, re := range markers {
 			if re.MatchString(line) {
 				if !pointer(line, dir, self) {
-					hit = append(hit, strings.TrimSpace(line))
+					hits = append(hits, hit{i, strings.TrimSpace(line)})
 				}
 				break
 			}
 		}
 	}
-	if len(hit) == 0 {
-		return "", false
+	return hits
+}
+
+func markOf(hits []hit) string {
+	texts := make([]string, len(hits))
+	for i, h := range hits {
+		texts[i] = h.text
 	}
-	sum := sha256.Sum256([]byte(strings.Join(hit, "\n")))
-	return hex.EncodeToString(sum[:6]), true
+	sum := sha256.Sum256([]byte(strings.Join(texts, "\n")))
+	return hex.EncodeToString(sum[:6])
 }
 
 // pointerRe finds a line that OPENS, at column 0, with a link to another memory
