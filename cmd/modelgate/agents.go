@@ -74,12 +74,8 @@ func frontmatter(b []byte) (map[string]string, bool) {
 
 // readBounded reads a regular file that is not a symlink, at most maxAgentFile.
 func readBounded(path string) ([]byte, error) {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, errors.New("not a regular file (symlinks are not followed)")
+	if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() {
+		return nil, errors.New("not a readable regular file (symlinks are not followed)")
 	}
 	f, err := os.Open(path)
 	if err != nil {

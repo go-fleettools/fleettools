@@ -52,6 +52,10 @@ func TestTypedAgentModel(t *testing.T) {
 	writeAgent(t, proj, "checker.md", def("checker", "opus")) // project overrides user
 	writeAgent(t, proj, "projonly.md", def("projonly", "sonnet"))
 
+	writeAgent(t, home, "locked.md", def("locked", "haiku"))
+	if err := os.Chmod(filepath.Join(home, ".claude", "agents", "locked.md"), 0); err != nil {
+		t.Fatal(err)
+	}
 	outside := filepath.Join(t.TempDir(), "evil.md")
 	if err := os.WriteFile(outside, []byte(def("evil", "haiku")), 0o644); err != nil {
 		t.Fatal(err)
@@ -88,6 +92,7 @@ func TestTypedAgentModel(t *testing.T) {
 		{"file name does not match a renamed agent", "Check the lanes", "renamed", "", home, true, []string{"no agent definition"}},
 		{"quoted value", "Check the lanes", "quoted", "", home, false, nil},
 		{"bounded read: frontmatter cut off at the limit", "Check the lanes", "huge", "", home, true, []string{"no well-formed frontmatter"}},
+		{"unreadable definition", "Check the lanes", "locked", "", home, true, []string{"is unreadable"}},
 		{"symlink is not followed", "Check the lanes", "evil", "", home, true, []string{"no agent definition"}},
 		{"path-like type refused", "Check the lanes", "../checker", "", home, true, []string{"no usable subagent_type"}},
 		{"relative cwd is ignored", "Check the lanes", "projonly", "", "rel/dir", true, []string{"no agent definition"}},
