@@ -34,6 +34,8 @@ type target struct {
 	probeRC  int
 	mintRC   int
 	startErr error
+	// startErrOn makes only the commands whose line contains it fail to start.
+	startErrOn string
 }
 
 func (t *target) runner(prefix []string, quoteRemote bool) runner {
@@ -41,6 +43,9 @@ func (t *target) runner(prefix []string, quoteRemote bool) runner {
 		t.calls = append(t.calls, argv)
 		if t.startErr != nil {
 			return "", "", -1, t.startErr
+		}
+		if t.startErrOn != "" && strings.Contains(strings.Join(argv, " "), t.startErrOn) {
+			return "", "", -1, errors.New("cannot start " + t.startErrOn)
 		}
 		switch {
 		case argv[0] == "curl":
@@ -181,6 +186,41 @@ func TestACommandThatCannotStartIsExit2(t *testing.T) {
 	code, _, errOut, _ := drive(t, tg, goodSpec)
 	if code != 2 || !strings.Contains(errOut, "no such program") {
 		t.Fatalf("code %d: %s", code, errOut)
+	}
+}
+
+func TestACommandCheckThatCannotStartIsExit2(t *testing.T) {
+	tg := okTarget()
+	tg.startErrOn = "authn-bridge"
+	spec := "environment: x\ncommands:\n  - {name: bridge, run: [authn-bridge, check]}\n"
+	if code, _, errOut, _ := drive(t, tg, spec); code != 2 || !strings.Contains(errOut, "bridge: could not run") {
+		t.Fatalf("code %d: %s", code, errOut)
+	}
+}
+
+// Each TURN step that cannot start is exit 2, and one that fails after the mint
+// still removes the password file.
+func TestTurnStepsThatCannotStartAreExit2(t *testing.T) {
+	turnOnly := `environment: x
+turn:
+  turnd: /usr/local/bin/turnd
+  turnprobe: /usr/local/bin/turnprobe
+  secret_file: /s
+  servers: ["turn:a"]
+`
+	for _, on := range []string{"mint-credentials", "turnprobe"} {
+		tg := okTarget()
+		tg.startErrOn = on
+		code, _, errOut, _ := drive(t, tg, turnOnly)
+		if code != 2 || !strings.Contains(errOut, "cannot start "+on) {
+			t.Errorf("%s: code %d, stderr %q", on, code, errOut)
+		}
+	}
+	tg := okTarget()
+	tg.startErrOn = "turnprobe"
+	drive(t, tg, turnOnly)
+	if c := tg.calls[len(tg.calls)-1]; c[0] != "rm" {
+		t.Errorf("the password file was left after a probe that could not start: %v", tg.calls)
 	}
 }
 

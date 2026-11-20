@@ -181,18 +181,13 @@ func check(stdout, stderr io.Writer, file, outPath, confirm string) int {
 	run := newRunner(s.Exec, s.QuoteRemote)
 
 	var results []result
-	add := func(r result, err error) bool {
+	for _, p := range s.Pages {
+		r, err := checkPage(run, s.CACert, p)
 		if err != nil {
 			fmt.Fprintf(stderr, "envcheck: %s: could not run: %v\n", r.Name, err)
-			return false
-		}
-		results = append(results, r)
-		return true
-	}
-	for _, p := range s.Pages {
-		if !add(checkPage(run, s.CACert, p)) {
 			return 2
 		}
+		results = append(results, r)
 	}
 	if s.Turn != nil {
 		rs, err := checkTurn(run, s.Turn)
@@ -203,9 +198,12 @@ func check(stdout, stderr io.Writer, file, outPath, confirm string) int {
 		results = append(results, rs...)
 	}
 	for _, c := range s.Commands {
-		if !add(checkCommand(run, c)) {
+		r, err := checkCommand(run, c)
+		if err != nil {
+			fmt.Fprintf(stderr, "envcheck: %s: could not run: %v\n", r.Name, err)
 			return 2
 		}
+		results = append(results, r)
 	}
 
 	failed := 0
