@@ -174,6 +174,12 @@ func TestCheck(t *testing.T) {
 		{Ref{Name: "Bounds"}, Found, ""},    // a field promoted from an embedded struct
 		{Ref{Name: "Button", Member: "Bounds"}, Found, ""},
 		{Ref{Name: "Menu"}, Found, ""}, // a dependency's type, bare
+		// ⛔ A DEPENDENCY's exported method, bare. Once ownMembers also held
+		// the module's own exported methods, the `members` lookup kept only
+		// this case — and no test named it, so a mutation sweep deleted that
+		// lookup with the suite green. Window's README writing `Attach` for
+		// tray's method is the ordinary case it serves.
+		{Ref{Name: "Attach"}, Found, ""},
 		{Ref{Name: "NSEvent"}, Unconfirmed, ""},
 
 		// ⛔ The module's OWN unexported method and field resolve: a README
