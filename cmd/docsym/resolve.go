@@ -22,6 +22,17 @@ type Index struct {
 	broken  map[string]string           // package path -> the first load error seen
 	version map[string]string           // package path -> the module version it was loaded at
 	members map[string]bool             // every exported field and method name of any loaded type
+
+	// ownMembers is every field and method name of the module's OWN types,
+	// unexported included. ⛔ It is a separate set, not more entries in
+	// members, because the two answer different questions: a README naming
+	// its own `seekByte` names something real, while the same spelling on a
+	// DEPENDENCY's type is unusable from here and must stay unresolved.
+	// Review measured why it exists: on go-pdfkit/reader, seven of the twelve
+	// lower-case names reported unconfirmed were real unexported methods —
+	// readHintTables, seekByte, measureShared, getFromObjectStream,
+	// reachFromPage — leaving one true finding in twelve.
+	ownMembers map[string]bool
 }
 
 // Load type-checks the module in dir and the packages it requires from its
@@ -67,12 +78,47 @@ func Load(dir string, goos []string) (*Index, error) {
 		}
 	}
 
-	ix := &Index{byName: map[string][]*types.Package{}, broken: map[string]string{}, version: map[string]string{}, members: map[string]bool{}}
+	ix := &Index{byName: map[string][]*types.Package{}, broken: map[string]string{}, version: map[string]string{}, members: map[string]bool{}, ownMembers: map[string]bool{}}
 	for _, g := range goos {
+		// ⛔⛔ NeedSyntax IS WHAT MAKES AN UNEXPORTED NAME VISIBLE, and its
+		// absence was half of #354. With NeedTypes alone a package arrives from
+		// EXPORT DATA, which by construction holds only exported symbols — so
+		// `rowBytes` and `applyPredictor`, which a README names and the package
+		// really has, resolved to nothing. Teaching Extract to read lower-case
+		// spans without this would have reported every one of them as
+		// unconfirmed: 39 false alarms on one README, which is how a report
+		// stops being read.
+		//
+		// ⭐ NeedSyntax ALONE, AND THE MEASUREMENT IS WHY. It type-checks the
+		// MATCHED packages from source while their imports still come from
+		// export data — which is exactly what makes an unexported object of
+		// this module visible, and nothing more. Adding NeedDeps extends
+		// source type-checking to the whole import graph, and NeedFiles,
+		// NeedCompiledGoFiles, NeedImports and NeedTypesInfo are read by
+		// nothing here: docsym touches only Types, Name, PkgPath, Module and
+		// Errors.
+		//
+		// Measured on go-pdfkit/reader, four platforms, three adjacent runs at
+		// a 1-minute load of 2.25 — wall, then user:
+		//
+		//	export data only          0.340s   0.33s
+		//	+ NeedSyntax (this)       0.365s   0.45s   +7% wall
+		//	+ NeedDeps and the rest   0.823s   2.46s   2.4x wall, 7.5x user
+		//
+		// All three report the same 85 references and the same 39 unconfirmed,
+		// so the heavy modes bought nothing at all.
+		//
+		// ⚠ Two earlier versions of this comment were wrong, and both in the
+		// same way. The first said "about 4s to 6s", invented. The second said
+		// "0.57s to 1.10s, roughly double" — real numbers, but taken at load
+		// 7.9 against a baseline measured separately, and measuring the heavy
+		// mode this no longer uses. A comparison is a measurement of its
+		// CONDITIONS as much as its subject.
 		cfg := &packages.Config{
-			Mode: packages.NeedName | packages.NeedTypes | packages.NeedModule,
-			Dir:  dir,
-			Env:  loadEnv(g, filepath.Join(modfileDir, "go.mod")),
+			Mode: packages.NeedName | packages.NeedTypes | packages.NeedModule |
+				packages.NeedSyntax,
+			Dir: dir,
+			Env: loadEnv(g, filepath.Join(modfileDir, "go.mod")),
 		}
 		pkgs, err := packages.Load(cfg, patterns...)
 		if err != nil {
@@ -92,9 +138,10 @@ func Load(dir string, goos []string) (*Index, error) {
 			}
 			ix.byName[p.Name] = append(ix.byName[p.Name], p.Types)
 			ix.all = append(ix.all, p.Types)
-			addMembers(ix.members, p.Types)
+			addMembers(ix.members, p.Types, false)
 			if p.PkgPath == self || strings.HasPrefix(p.PkgPath, self+"/") {
 				ix.own = append(ix.own, p.Types)
+				addMembers(ix.ownMembers, p.Types, true)
 			}
 		}
 	}
@@ -120,7 +167,26 @@ func orgPrefix(module string) string {
 	return strings.Join(parts[:2], "/") + "/"
 }
 
-func addMembers(set map[string]bool, p *types.Package) {
+// addMembers records the field and method names of p's types into set:
+// exported ones always, unexported ones only when the caller says so — which
+// it does for the module's OWN packages and never for a dependency's. The
+// parameter mirrors the one `resolves` takes, for the same reason.
+// admit reports whether a member object belongs in the set: an exported one
+// always, an unexported one only when the caller allows it AND the object is
+// declared in p itself.
+//
+// ⛔⛔ THE SECOND CONDITION IS THE FIX, AND REVIEW FOUND IT BY EMBEDDING. A
+// method set includes methods PROMOTED from embedded types, and a struct's
+// fields recurse into embedded structs, so an own type `type W struct{
+// bytes.Buffer }` carried bytes.Buffer's unexported grow, readSlice, buf and
+// lastRead into ownMembers — names a reader of this module can never use —
+// and docsym answered Found for them. "Allowed to be unexported" was a
+// property of the SET; whose name it is, is a property of the OBJECT.
+func admit(o types.Object, p *types.Package, unexported bool) bool {
+	return o.Exported() || (unexported && o.Pkg() == p)
+}
+
+func addMembers(set map[string]bool, p *types.Package, unexported bool) {
 	scope := p.Scope()
 	for _, name := range scope.Names() {
 		tn, ok := scope.Lookup(name).(*types.TypeName)
@@ -129,7 +195,7 @@ func addMembers(set map[string]bool, p *types.Package) {
 		}
 		ms := types.NewMethodSet(types.NewPointer(tn.Type()))
 		for i := 0; i < ms.Len(); i++ {
-			if f := ms.At(i).Obj(); f.Exported() {
+			if f := ms.At(i).Obj(); admit(f, p, unexported) {
 				set[f.Name()] = true
 			}
 		}
@@ -139,33 +205,33 @@ func addMembers(set map[string]bool, p *types.Package) {
 		// interface itself.
 		if it, ok := tn.Type().Underlying().(*types.Interface); ok {
 			for i := 0; i < it.NumMethods(); i++ {
-				if f := it.Method(i); f.Exported() {
+				if f := it.Method(i); admit(f, p, unexported) {
 					set[f.Name()] = true
 				}
 			}
 		}
 		if st, ok := tn.Type().Underlying().(*types.Struct); ok {
-			addFields(set, st, 0)
+			addFields(set, st, 0, p, unexported) // p: the package being scanned
 		}
 	}
 }
 
-func addFields(set map[string]bool, st *types.Struct, depth int) {
+func addFields(set map[string]bool, st *types.Struct, depth int, pkg *types.Package, unexported bool) {
 	if depth > 4 {
 		return
 	}
 	for i := 0; i < st.NumFields(); i++ {
 		f := st.Field(i)
-		if f.Exported() {
+		if admit(f, pkg, unexported) {
 			set[f.Name()] = true
 		}
 		if f.Embedded() {
 			if inner, ok := f.Type().Underlying().(*types.Struct); ok {
-				addFields(set, inner, depth+1)
+				addFields(set, inner, depth+1, pkg, unexported)
 			}
 			if p, ok := f.Type().(*types.Pointer); ok {
 				if inner, ok := p.Elem().Underlying().(*types.Struct); ok {
-					addFields(set, inner, depth+1)
+					addFields(set, inner, depth+1, pkg, unexported)
 				}
 			}
 		}
@@ -197,7 +263,9 @@ func (ix *Index) Check(r Ref) (Verdict, string) {
 		}
 		var paths []string
 		for _, p := range pkgs {
-			if resolves(p, r.Name, r.Member) {
+			// ⛔ A QUALIFIED NAME NEVER ALLOWS AN UNEXPORTED ONE: `pkg.thing`
+			// cannot be written from outside pkg, whoever owns it.
+			if resolves(p, r.Name, r.Member, false) {
 				return Found, ""
 			}
 			path := p.Path()
@@ -225,13 +293,30 @@ func (ix *Index) Check(r Ref) (Verdict, string) {
 	}
 	// A bare name: the module's own packages first, then what it requires
 	// from its organisation (window's README names toolkit's VBox).
+	//
+	// ⛔ THE MODULE'S OWN PACKAGES ALLOW AN UNEXPORTED NAME AND THE OTHERS DO
+	// NOT. A README describing its own internals (`rowBytes`, `applyPredictor`)
+	// is naming something real; the same spelling inside a DEPENDENCY would be
+	// unusable from here, so it must keep resolving to nothing.
+	for _, p := range ix.own {
+		if resolves(p, r.Name, r.Member, true) {
+			return Found, ""
+		}
+	}
 	for _, p := range ix.all {
-		if resolves(p, r.Name, r.Member) {
+		if resolves(p, r.Name, r.Member, false) {
 			return Found, ""
 		}
 	}
 	// A bare `Draw` or `SetBounds` names a method, not a top-level name.
 	if r.Member == "" && ix.members[r.Name] {
+		return Found, ""
+	}
+	// ⛔ And a bare `seekByte` names one of this module's OWN unexported
+	// methods. resolves looks only in package scope, which holds no methods
+	// at all, so without this every unexported method a README mentions read
+	// as unconfirmed — seven of twelve on go-pdfkit/reader.
+	if r.Member == "" && ix.ownMembers[r.Name] {
 		return Found, ""
 	}
 	for path := range ix.broken {
@@ -260,11 +345,20 @@ func methodOwner(pkgs []*types.Package, name string) string {
 	return ""
 }
 
-// resolves reports whether p exports name, and when a member is named, whether
-// name's type (or a variable's type) has that field or method.
-func resolves(p *types.Package, name, member string) bool {
+// resolves reports whether p has name — exported, or unexported when the
+// caller allows it — and when a member is named, whether name's type (or a
+// variable's type) has that field or method.
+//
+// ⛔⛔ unexported IS A PARAMETER, NOT A CONSTANT, and that was the third part
+// of #354. This returned false for every unexported object, so even once the
+// spans were extracted and the packages type-checked from source, a README
+// naming its own module's `rowBytes` resolved to nothing. The distinction that
+// matters is WHOSE package: another package's unexported name is unusable and
+// must not resolve, while a module's README naming its own internals is the
+// ordinary case in this fleet.
+func resolves(p *types.Package, name, member string, unexported bool) bool {
 	obj := p.Scope().Lookup(name)
-	if obj == nil || !obj.Exported() {
+	if obj == nil || (!obj.Exported() && !unexported) {
 		return false
 	}
 	if member == "" {

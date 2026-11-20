@@ -52,6 +52,49 @@ func TestExtractReadsSpansAndGoFencesOnly(t *testing.T) {
 	}
 }
 
+// ⛔⛔ AN UNEXPORTED NAME A README QUOTES IS A REFERENCE. It used to match
+// nothing: bareRE began `[A-Z]`, so `rowGeometry` was not missing, not bare and
+// not counted, and docsym answered `0 MISSING` over a README naming a symbol
+// that had been deleted that morning. #354.
+//
+// ⭐ AND THE SECOND HALF IS WHAT KEEPS THE REPORT READABLE: a lower-case name
+// counts only if it is camelCase. Without that, every `err` and `data` in every
+// README arrives as a reference nothing can confirm.
+func TestALowerCaseCamelNameIsAReferenceAndAPlainWordIsNot(t *testing.T) {
+	readme := strings.Join([]string{
+		"It computed `rowGeometry` and now calls `rowBytes`, bounded by `maxDecodedSize`.",
+		"Ordinary words in spans: `err`, `data`, `nil`, `go`, `main`, `gofmt`, `stdin`.",
+		"Still exported, still found: `LoadGTKTheme` and `toolkit.NewButton`.",
+	}, "\n")
+	got := strings.Join(names(Extract(readme)), " ")
+	want := "rowGeometry rowBytes maxDecodedSize LoadGTKTheme toolkit.NewButton"
+	if got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
+	}
+}
+
+func TestPlausibleName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+		why  string
+	}{
+		{"rowGeometry", true, "the name #354 was filed for"},
+		{"maxCCITTColumns", true, "capitals inside, lower-case first"},
+		{"Exported", true, "unchanged behaviour"},
+		{"err", false, "a word, not an identifier somebody wrote"},
+		{"data", false, "the same"},
+		{"gofmt", false, "a command in a span"},
+		{"n", false, "one letter has no interior at all"},
+		{"GOOS", false, "all capitals, as before"},
+		{"RGBA_8888", false, "underscore, as before"},
+	} {
+		if got := plausibleName(tc.name); got != tc.want {
+			t.Errorf("plausibleName(%q) = %v, want %v — %s", tc.name, got, tc.want, tc.why)
+		}
+	}
+}
+
 func TestExtractKeepsLineNumbers(t *testing.T) {
 	refs := Extract("one\n\n`toolkit.NewButton`\n")
 	if len(refs) != 1 || refs[0].Line != 3 {
@@ -79,6 +122,7 @@ const trayV14 = `package tray
 type Tray struct{ Tooltip string }
 func New() *Tray { return nil }
 func (t *Tray) Attach() error { return nil }
+func (t *Tray) relayout() {}
 type Menu struct{}
 `
 
@@ -86,23 +130,26 @@ const ownSrc = `package webcanvas
 type App interface { Draw(buf []byte); KeyDown(k string) bool }
 func Run(id string, a App) {}
 type Base struct{ Bounds int }
-type Button struct{ Base; Label string }
+type Button struct{ Base; Label string; hoverState int }
 func (b *Button) SetBounds(x int) {}
+func (b *Button) seekGlyph() {}
 `
 
 func index(t *testing.T) *Index {
 	tray := pkg(t, "github.com/go-widgets/tray", trayV14)
 	own := pkg(t, "github.com/go-widgets/webcanvas", ownSrc)
 	ix := &Index{
-		byName:  map[string][]*types.Package{"tray": {tray}, "webcanvas": {own}},
-		own:     []*types.Package{own},
-		all:     []*types.Package{own, tray},
-		broken:  map[string]string{},
-		version: map[string]string{"github.com/go-widgets/tray": "v0.14.0"},
-		members: map[string]bool{},
+		byName:     map[string][]*types.Package{"tray": {tray}, "webcanvas": {own}},
+		own:        []*types.Package{own},
+		all:        []*types.Package{own, tray},
+		broken:     map[string]string{},
+		version:    map[string]string{"github.com/go-widgets/tray": "v0.14.0"},
+		members:    map[string]bool{},
+		ownMembers: map[string]bool{},
 	}
-	addMembers(ix.members, own)
-	addMembers(ix.members, tray)
+	addMembers(ix.members, own, false)
+	addMembers(ix.members, tray, false)
+	addMembers(ix.ownMembers, own, true) // the module's own types only, as Load does
 	return ix
 }
 
@@ -127,11 +174,81 @@ func TestCheck(t *testing.T) {
 		{Ref{Name: "Bounds"}, Found, ""},    // a field promoted from an embedded struct
 		{Ref{Name: "Button", Member: "Bounds"}, Found, ""},
 		{Ref{Name: "Menu"}, Found, ""}, // a dependency's type, bare
+		// ⛔ A DEPENDENCY's exported method, bare. Once ownMembers also held
+		// the module's own exported methods, the `members` lookup kept only
+		// this case — and no test named it, so a mutation sweep deleted that
+		// lookup with the suite green. Window's README writing `Attach` for
+		// tray's method is the ordinary case it serves.
+		{Ref{Name: "Attach"}, Found, ""},
 		{Ref{Name: "NSEvent"}, Unconfirmed, ""},
+
+		// ⛔ The module's OWN unexported method and field resolve: a README
+		// describing its internals names something real. On go-pdfkit/reader
+		// seven of twelve lower-case unconfirmed names were exactly this.
+		{Ref{Name: "seekGlyph"}, Found, ""},
+		{Ref{Name: "hoverState"}, Found, ""},
+
+		// ⛔ But a DEPENDENCY's unexported method does not: it cannot be
+		// called from here, so the set it would come from is never built for
+		// a dependency. This is the line that fails if ownMembers is ever
+		// filled from ix.all instead of ix.own.
+		{Ref{Name: "relayout"}, Unconfirmed, ""},
 	} {
 		v, where := ix.Check(c.ref)
 		if v != c.want || !strings.Contains(where, c.where) {
 			t.Errorf("%+v: got %v %q, want %v containing %q", c.ref, v, where, c.want, c.where)
+		}
+	}
+}
+
+// ⛔⛔ A DEPENDENCY'S UNEXPORTED NAMES DO NOT BECOME OURS BY EMBEDDING. The
+// `relayout` case in TestCheck proved ownMembers is not filled from ix.all — and
+// could not catch this, because no own type in that fixture embeds anything.
+// Review built the one that does: `type W struct{ bytes.Buffer }`. A method set
+// includes PROMOTED methods and the field walk recurses into embedded structs,
+// so bytes.Buffer's unexported grow and buf resolved as Found — names no reader
+// of this module can use. The rule is now about the object, not the set: an
+// unexported name counts only when it is declared in the package scanned.
+func TestAnEmbeddedDependencyDoesNotLendItsUnexportedNames(t *testing.T) {
+	// Three ways to embed, each a separate path through addMembers/addFields,
+	// and all three verified refused by review before being pinned here: a
+	// value embedding (W), a POINTER embedding (P — addFields' pointer branch),
+	// and an embedded dependency INTERFACE (I — the interface-method loop,
+	// where testing.TB carries an unexported `private`).
+	own := pkg(t, "github.com/go-widgets/webcanvas", `package webcanvas
+import ("bytes"; "testing")
+type W struct{ bytes.Buffer; mine int }
+type P struct{ *bytes.Buffer }
+type I interface{ testing.TB }
+func (w *W) ownHelper() {}
+`)
+	ix := &Index{
+		byName:     map[string][]*types.Package{"webcanvas": {own}},
+		own:        []*types.Package{own},
+		all:        []*types.Package{own},
+		broken:     map[string]string{},
+		version:    map[string]string{},
+		members:    map[string]bool{},
+		ownMembers: map[string]bool{},
+	}
+	addMembers(ix.members, own, false)
+	addMembers(ix.ownMembers, own, true)
+	for _, c := range []struct {
+		name string
+		want Verdict
+		why  string
+	}{
+		{"ownHelper", Found, "the control: this module's own unexported method"},
+		{"mine", Found, "the control: this module's own unexported field"},
+		{"grow", Unconfirmed, "bytes.Buffer's unexported method, promoted through the embedding"},
+		{"buf", Unconfirmed, "bytes.Buffer's unexported field, reached by the embedded-field walk"},
+		{"lastRead", Unconfirmed, "another of bytes.Buffer's unexported fields"},
+		{"readSlice", Unconfirmed, "promoted through the POINTER embedding in P as well as W"},
+		{"private", Unconfirmed, "testing.TB's unexported method, through the embedded interface I"},
+		{"Len", Found, "exported and promoted: callable on W, so it is a real name"},
+	} {
+		if v, where := ix.Check(Ref{Name: c.name}); v != c.want {
+			t.Errorf("%s: got %v (%s), want %v — %s", c.name, v, where, c.want, c.why)
 		}
 	}
 }
@@ -251,7 +368,7 @@ func TestLoadTypeChecksARealModule(t *testing.T) {
 		}
 	}
 	write("go.mod", "module example.com/m\n\ngo 1.22\n")
-	write("m.go", "package m\n\ntype Window struct{ Title string }\n\nfunc (w *Window) Run() error { return nil }\n")
+	write("m.go", "package m\n\ntype Window struct{ Title string }\n\nfunc (w *Window) Run() error { return nil }\n\nfunc rowBytes() int { return 0 }\n")
 	write("linux.go", "//go:build linux\n\npackage m\n\nfunc OpenWayland() {}\n")
 	write("broken/b.go", "package broken\n\nfunc F() { undefinedThing() }\n")
 
@@ -268,6 +385,27 @@ func TestLoadTypeChecksARealModule(t *testing.T) {
 		{Ref{Pkg: "m", Name: "OpenCocoa"}, Missing},
 		{Ref{Name: "Title"}, Found},
 		{Ref{Pkg: "broken", Name: "G"}, Unreadable},
+
+		// ⛔⛔ #354, and it took THREE changes to make this line pass: the
+		// span had to be extracted (bareRE began [A-Z]), the package had to
+		// be type-checked from SOURCE (NeedTypes alone gives export data,
+		// which holds no unexported object at all — 22 names in scope against
+		// 234), and `resolves` had to stop rejecting every unexported object
+		// outright. Each one alone leaves this Unconfirmed.
+		{Ref{Name: "rowBytes"}, Found},
+
+		// ⛔ But only for the module's OWN packages. Qualified, it must still
+		// not resolve: `m.rowBytes` cannot be written from outside m.
+		{Ref{Pkg: "m", Name: "rowBytes"}, Missing},
+
+		// The control: an unexported name nothing has must NOT come back
+		// Found. ⚠ It is Unreadable rather than Unconfirmed here, and that is
+		// this fixture's own doing, not the change's: it carries a deliberately
+		// broken package, and a bare name that resolves nowhere while some
+		// package failed to type-check is not judged — a miss there would be a
+		// guess. On a module that compiles, this is Unconfirmed, which is what
+		// go-pdfkit/reader's README reports for `rowGeometry`.
+		{Ref{Name: "rowGeometry"}, Unreadable},
 	} {
 		if v, where := ix.Check(c.ref); v != c.want {
 			t.Errorf("%+v: got %v (%s), want %v", c.ref, v, where, c.want)
