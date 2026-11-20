@@ -53,9 +53,17 @@ func setup(t *testing.T, view, claim, prwait, remaining string) env {
 			t.Fatal(err)
 		}
 	}
+	rate := `echo '{"resources":{"core":{"remaining":` + remaining + `}}}'`
+	if remaining == "fail" {
+		rate = "echo rate limited >&2; exit 1"
+	}
+	pr := `echo '` + view + `'`
+	if view == "fail" {
+		pr = "echo no such pull request >&2; exit 1"
+	}
 	fake("gh", `case "$*" in
-  *rate_limit*) echo '{"resources":{"core":{"remaining":`+remaining+`}}}' ;;
-  *"pr view"*) echo '`+view+`' ;;
+  *rate_limit*) `+rate+` ;;
+  *"pr view"*) `+pr+` ;;
   *) echo "unexpected gh $*" >&2; exit 1 ;;
 esac`)
 	fake("agentsync", claim)
@@ -224,6 +232,95 @@ func TestABadTargetIsRefused(t *testing.T) {
 	}
 	if st, _, _ := drive(t, e, nil); st != 2 {
 		t.Fatalf("no targets: status %d", st)
+	}
+}
+
+func TestAFailedRateLimitReadStopsTheRun(t *testing.T) {
+	e := setup(t, redView, "", "", "fail")
+	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 2 || !strings.Contains(errOut, "could not read the rate limit") {
+		t.Fatalf("status %d: %s", st, errOut)
+	}
+}
+
+// ⛔ An unreadable ledger is a refusal, not a count of zero.
+func TestAnUnreadableLedgerStopsTheRun(t *testing.T) {
+	e := setup(t, redView, "", "", "4000")
+	if err := os.MkdirAll(e.ledger, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 2 || errOut == "" {
+		t.Fatalf("status %d: %q", st, errOut)
+	}
+	if strings.Contains(logged(t, e), "pr view") {
+		t.Fatal("went on with an unreadable ledger")
+	}
+}
+
+func TestALedgerThatCannotBeWrittenStopsTheRun(t *testing.T) {
+	e := setup(t, redView, "", "", "4000")
+	clone(t, e, "go-x-.github", "")
+	// ghmerge itself plants a directory where the ledger goes
+	bin := filepath.Dir(filepath.Join(e.root, "..", "bin", "ghmerge"))
+	script := "#!/bin/sh\nmkdir -p " + e.ledger + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "ghmerge"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 1 || !strings.Contains(errOut, "STOPPED") {
+		t.Fatalf("status %d: %s", st, errOut)
+	}
+}
+
+func TestAFailedPullRequestReadStopsTheRun(t *testing.T) {
+	e := setup(t, "fail", "", "", "4000")
+	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 1 || !strings.Contains(errOut, "STOPPED at go-x/.github#9") {
+		t.Fatalf("status %d: %s", st, errOut)
+	}
+}
+
+func TestAClosedPullRequestIsNeverTouched(t *testing.T) {
+	e := setup(t, `{"state":"CLOSED","headRefName":"renovate/deps","statusCheckRollup":[{"conclusion":"FAILURE"}]}`, "", "", "4000")
+	st, out, _ := drive(t, e, nil, "go-x/.github#9")
+	if st != 0 || !strings.Contains(out, "not open") || strings.Contains(logged(t, e), "agentsync") {
+		t.Fatalf("status %d: %s\n%s", st, out, logged(t, e))
+	}
+}
+
+func TestDryRunChangesAndClaimsNothing(t *testing.T) {
+	e := setup(t, redView, "", "", "4000")
+	d := clone(t, e, "go-x-.github", "")
+	st, out, _ := drive(t, e, []string{"--dry-run"}, "go-x/.github#9")
+	if st != 0 || !strings.Contains(out, "dry run") {
+		t.Fatalf("status %d: %s", st, out)
+	}
+	b, _ := os.ReadFile(filepath.Join(d, "config.js"))
+	if strings.Contains(string(b), "enabled") || strings.Contains(logged(t, e), "agentsync") {
+		t.Fatal("a dry run acted")
+	}
+}
+
+func TestAMissingConfigStopsTheRun(t *testing.T) {
+	e := setup(t, redView, "", "", "4000")
+	d := clone(t, e, "go-x-.github", "")
+	if err := os.Remove(filepath.Join(d, "config.js")); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, errOut := drive(t, e, nil, "go-x/.github#9"); st != 1 || !strings.Contains(errOut, "STOPPED") {
+		t.Fatalf("status %d: %s", st, errOut)
+	}
+}
+
+func TestAConfigWithoutTheKeyStopsTheRun(t *testing.T) {
+	e := setup(t, redView, "", "", "4000")
+	d := clone(t, e, "go-x-.github", "")
+	if err := os.WriteFile(filepath.Join(d, "config.js"), []byte("module.exports = {};\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, _, errOut := drive(t, e, nil, "go-x/.github#9")
+	if st != 1 || !strings.Contains(errOut, "no `dependencyDashboard: true,` line") {
+		t.Fatalf("status %d: %s", st, errOut)
+	}
+	if strings.Contains(logged(t, e), "gitpush") {
+		t.Fatal("pushed without an edit")
 	}
 }
 
