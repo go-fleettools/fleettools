@@ -171,6 +171,21 @@ func orgPrefix(module string) string {
 // exported ones always, unexported ones only when the caller says so — which
 // it does for the module's OWN packages and never for a dependency's. The
 // parameter mirrors the one `resolves` takes, for the same reason.
+// admit reports whether a member object belongs in the set: an exported one
+// always, an unexported one only when the caller allows it AND the object is
+// declared in p itself.
+//
+// ⛔⛔ THE SECOND CONDITION IS THE FIX, AND REVIEW FOUND IT BY EMBEDDING. A
+// method set includes methods PROMOTED from embedded types, and a struct's
+// fields recurse into embedded structs, so an own type `type W struct{
+// bytes.Buffer }` carried bytes.Buffer's unexported grow, readSlice, buf and
+// lastRead into ownMembers — names a reader of this module can never use —
+// and docsym answered Found for them. "Allowed to be unexported" was a
+// property of the SET; whose name it is, is a property of the OBJECT.
+func admit(o types.Object, p *types.Package, unexported bool) bool {
+	return o.Exported() || (unexported && o.Pkg() == p)
+}
+
 func addMembers(set map[string]bool, p *types.Package, unexported bool) {
 	scope := p.Scope()
 	for _, name := range scope.Names() {
@@ -180,7 +195,7 @@ func addMembers(set map[string]bool, p *types.Package, unexported bool) {
 		}
 		ms := types.NewMethodSet(types.NewPointer(tn.Type()))
 		for i := 0; i < ms.Len(); i++ {
-			if f := ms.At(i).Obj(); f.Exported() || unexported {
+			if f := ms.At(i).Obj(); admit(f, p, unexported) {
 				set[f.Name()] = true
 			}
 		}
@@ -190,33 +205,33 @@ func addMembers(set map[string]bool, p *types.Package, unexported bool) {
 		// interface itself.
 		if it, ok := tn.Type().Underlying().(*types.Interface); ok {
 			for i := 0; i < it.NumMethods(); i++ {
-				if f := it.Method(i); f.Exported() || unexported {
+				if f := it.Method(i); admit(f, p, unexported) {
 					set[f.Name()] = true
 				}
 			}
 		}
 		if st, ok := tn.Type().Underlying().(*types.Struct); ok {
-			addFields(set, st, 0, unexported)
+			addFields(set, st, 0, p, unexported) // p: the package being scanned
 		}
 	}
 }
 
-func addFields(set map[string]bool, st *types.Struct, depth int, unexported bool) {
+func addFields(set map[string]bool, st *types.Struct, depth int, pkg *types.Package, unexported bool) {
 	if depth > 4 {
 		return
 	}
 	for i := 0; i < st.NumFields(); i++ {
 		f := st.Field(i)
-		if f.Exported() || unexported {
+		if admit(f, pkg, unexported) {
 			set[f.Name()] = true
 		}
 		if f.Embedded() {
 			if inner, ok := f.Type().Underlying().(*types.Struct); ok {
-				addFields(set, inner, depth+1, unexported)
+				addFields(set, inner, depth+1, pkg, unexported)
 			}
 			if p, ok := f.Type().(*types.Pointer); ok {
 				if inner, ok := p.Elem().Underlying().(*types.Struct); ok {
-					addFields(set, inner, depth+1, unexported)
+					addFields(set, inner, depth+1, pkg, unexported)
 				}
 			}
 		}

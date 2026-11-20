@@ -195,6 +195,49 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+// ⛔⛔ A DEPENDENCY'S UNEXPORTED NAMES DO NOT BECOME OURS BY EMBEDDING. The
+// `relayout` case in TestCheck proved ownMembers is not filled from ix.all — and
+// could not catch this, because no own type in that fixture embeds anything.
+// Review built the one that does: `type W struct{ bytes.Buffer }`. A method set
+// includes PROMOTED methods and the field walk recurses into embedded structs,
+// so bytes.Buffer's unexported grow and buf resolved as Found — names no reader
+// of this module can use. The rule is now about the object, not the set: an
+// unexported name counts only when it is declared in the package scanned.
+func TestAnEmbeddedDependencyDoesNotLendItsUnexportedNames(t *testing.T) {
+	own := pkg(t, "github.com/go-widgets/webcanvas", `package webcanvas
+import "bytes"
+type W struct{ bytes.Buffer; mine int }
+func (w *W) ownHelper() {}
+`)
+	ix := &Index{
+		byName:     map[string][]*types.Package{"webcanvas": {own}},
+		own:        []*types.Package{own},
+		all:        []*types.Package{own},
+		broken:     map[string]string{},
+		version:    map[string]string{},
+		members:    map[string]bool{},
+		ownMembers: map[string]bool{},
+	}
+	addMembers(ix.members, own, false)
+	addMembers(ix.ownMembers, own, true)
+	for _, c := range []struct {
+		name string
+		want Verdict
+		why  string
+	}{
+		{"ownHelper", Found, "the control: this module's own unexported method"},
+		{"mine", Found, "the control: this module's own unexported field"},
+		{"grow", Unconfirmed, "bytes.Buffer's unexported method, promoted through the embedding"},
+		{"buf", Unconfirmed, "bytes.Buffer's unexported field, reached by the embedded-field walk"},
+		{"lastRead", Unconfirmed, "another of bytes.Buffer's unexported fields"},
+		{"Len", Found, "exported and promoted: callable on W, so it is a real name"},
+	} {
+		if v, where := ix.Check(Ref{Name: c.name}); v != c.want {
+			t.Errorf("%s: got %v (%s), want %v — %s", c.name, v, where, c.want, c.why)
+		}
+	}
+}
+
 func TestABrokenPackageIsNeverJudgedMissing(t *testing.T) {
 	ix := index(t)
 	ix.broken["github.com/go-widgets/tray"] = "linux: undefined: x"
