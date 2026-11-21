@@ -93,6 +93,33 @@ func TestAnEmptySelectionIsNotAPass(t *testing.T) {
 	}
 }
 
+// `-run '^$' -fuzz X` is the documented way to run a fuzz target without running
+// unit tests first: the empty test selection is the point of the command, and
+// `go test` exits 0 with "[no tests to run]". gotest must not exit 1 on it.
+func TestAnEmptySelectionWithFuzzPasses(t *testing.T) {
+	const empty = "testing: warning: no tests to run\nPASS\nok  \texample.com/m\t0.04s [no tests to run]\n"
+	rc, _, errb, _ := gotestRun(t, 0, nil, empty, "-run", "^$", "-fuzz", "FuzzTarget", "./m")
+	if rc != 0 {
+		t.Fatalf("exit %d, want 0 (err: %s)", rc, errb)
+	}
+	if strings.Contains(errb, "selected NO test at all") {
+		t.Errorf("stderr says the selection was empty: %q", errb)
+	}
+}
+
+// `-run '^$' -bench X` is the documented way to run benchmarks without the
+// tests. gotest must not exit 1 on its empty test selection.
+func TestAnEmptySelectionWithBenchPasses(t *testing.T) {
+	const empty = "testing: warning: no tests to run\nPASS\nok  \texample.com/m\t0.04s [no tests to run]\n"
+	rc, _, errb, _ := gotestRun(t, 0, nil, empty, "-run", "^$", "-bench", "BenchmarkTarget", "--under-load", "testing", "./m")
+	if rc != 0 {
+		t.Fatalf("exit %d, want 0 (err: %s)", rc, errb)
+	}
+	if strings.Contains(errb, "selected NO test at all") {
+		t.Errorf("stderr says the selection was empty: %q", errb)
+	}
+}
+
 // Without -run there is nothing to check, and nothing is added.
 func TestWithoutRunItIsAPlainPassThrough(t *testing.T) {
 	rc, _, errb, saw := gotestRun(t, 0, nil, "ok  \texample.com/m\t0.1s\n", "./...")
