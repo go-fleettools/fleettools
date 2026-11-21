@@ -136,10 +136,11 @@ func classify(text string) *match {
 }
 
 // family names the model family of a model string ("claude-opus-5-5" → opus),
-// or "" when it is none of the three.
+// or "" when it is none of the four. "fable" is the tier ABOVE opus
+// (claude-fable-5-2, twice the price of Opus 5.5).
 func family(model string) string {
 	m := strings.ToLower(model)
-	for _, f := range []string{"haiku", "sonnet", "opus"} {
+	for _, f := range []string{"haiku", "sonnet", "opus", "fable"} {
 		if strings.Contains(m, f) {
 			return f
 		}
@@ -209,6 +210,13 @@ func decide(p payload, now time.Time) verdict {
 	}
 	if m == nil || got == m.class.model {
 		return verdict{}
+	}
+	if got == "fable" && m.class.model == "opus" {
+		// The dearer tier on an opus-class task: only a waiver, which was
+		// already looked for above, can accept it.
+		return verdict{deny: true, reason: fmt.Sprintf(
+			"modelgate refuses this Agent call: class %s (matched the word %q) expects model %q; %q is the tier ABOVE opus and twice its price (it has its own Weekly Fable usage window in quotapace). Use opus, or put a line \"model-waiver: <why opus is not enough>\" in the prompt.",
+			m.class.name, m.word, m.class.model, model+viaType)}
 	}
 	shown := got
 	if shown == "" {
@@ -286,6 +294,10 @@ A call with no model whose subagent_type names an agent definition
 (.claude/agents/*.md from the hook's cwd upward, then ~/.claude/agents; matched on
 frontmatter name or file name) that sets a haiku/sonnet/opus model runs on that
 model, checked exactly as if passed explicitly; an explicit model wins.
+
+FABLE (claude-fable-*) is the tier above opus: on an opus-class task it is
+refused unless a model-waiver line states why opus is not enough; on a sonnet or
+haiku class it is refused like opus.
 
 REFUSED: the model is missing (and no agent definition gives one; the environment
 default is sonnet, which hides the choice), or its family is not the class's. Each refusal names the class, the
