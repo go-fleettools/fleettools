@@ -54,6 +54,46 @@ func TestTheBenchGateFiresOnABenchmarkAndNothingElse(t *testing.T) {
 	}
 }
 
+// ⛔ A FUZZ RUN MUST BE RECOGNIZED ACCURATELY.
+//
+// `-fuzz` is the flag; `-fuzztime` and `-fuzzminimizetime` both begin with it and
+// neither asks for a fuzz target on its own.
+func TestFuzzRequestedFiresOnAFuzzTargetAndNothingElse(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"a plain test run", []string{"./..."}, false},
+		{"a filtered test run", []string{"-run", "TestX", "."}, false},
+
+		{"-fuzz with a separate pattern", []string{"-fuzz", "FuzzX", "."}, true},
+		{"-fuzz=", []string{"-fuzz=FuzzX", "."}, true},
+		{"-test.fuzz=", []string{"-test.fuzz=FuzzX", "."}, true},
+		{"--fuzz", []string{"--fuzz", "Fuzz.*", "."}, true},
+
+		// ⛔ The too-wide rows. Each of these starts with -fuzz and asks for no target.
+		{"-fuzztime alone", []string{"-fuzztime", "20s", "."}, false},
+		{"-fuzztime=", []string{"-fuzztime=20s", "."}, false},
+		{"-fuzzminimizetime alone", []string{"-fuzzminimizetime", "10s", "."}, false},
+
+		// ⛔ And an EMPTY selection is not a fuzz run: `-fuzz=` selects none.
+		{"-fuzz= with nothing after it", []string{"-fuzz=", "."}, false},
+		{"-fuzz with an empty value", []string{"-fuzz", "", "."}, false},
+		{"-fuzz as the last argument", []string{".", "-fuzz"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fuzzRequested(c.args); got != c.want {
+				verb := "did not fire"
+				if got {
+					verb = "fired"
+				}
+				t.Errorf("fuzzRequested %s on %v, want fired=%v", verb, c.args, c.want)
+			}
+		})
+	}
+}
+
 // The override is a REASON, never a boolean, and it has to survive being read
 // out of the raw arguments in every spelling an operator will type.
 func TestTheOverrideIsReadAndThenStripped(t *testing.T) {
