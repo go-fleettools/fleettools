@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"tool_name\":\"Bash\",\"cwd\":\"/nonexistent/\\u0000\",\"tool_input\":{\"command\":\"cd .. && >x 2>&1 FOO=1 git -C '' push; gitpush\"}}")
