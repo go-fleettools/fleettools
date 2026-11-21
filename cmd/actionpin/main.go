@@ -36,6 +36,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
 )
 
@@ -190,6 +191,7 @@ func report(w io.Writer, found []Finding) error {
 }
 
 func main() {
+	fleet.WarnIfStale(os.Stderr)
 	cmd := RootCmd()
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "actionpin:", err)
