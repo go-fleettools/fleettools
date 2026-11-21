@@ -138,6 +138,7 @@ func TestFamily(t *testing.T) {
 		"opus": "opus", "sonnet": "sonnet", "haiku": "haiku",
 		"claude-opus-5": "opus", "claude-opus-5-5": "opus", "claude-sonnet-5-5": "sonnet",
 		"claude-haiku-5-5": "haiku", "Claude-Opus-4-8": "opus",
+		"fable": "fable", "claude-fable-5-2": "fable", "Claude-Fable-6": "fable",
 		"": "", "inherit": "", "gpt-5": "",
 	} {
 		if got := family(in); got != want {
@@ -185,6 +186,14 @@ func TestDecide(t *testing.T) {
 		{"full id of the right family", agent("Review PR 5", "", "", "claude-opus-4-8"), false, nil},
 		{"unknown model on a classified task", agent("Review PR 5", "", "", "gpt-5"), true, []string{"unrecognised model"}},
 		{"unknown model, unclassified task", agent("turnd: host handover", "", "", "gpt-5"), false, nil},
+
+		// fable, the tier above opus
+		{"fable on review, no waiver", agent("Review PR 5", "", "", "fable"), true, []string{"class review", "tier ABOVE opus", `"opus"`, "Weekly Fable", "model-waiver"}},
+		{"full fable id on design", agent("Design the API", "", "", "claude-fable-5-2"), true, []string{"tier ABOVE opus"}},
+		{"fable on review, waived", agent("Review PR 5", "model-waiver: opus missed the race twice\n", "", "fable"), false, []string{"waived", "opus missed the race twice"}},
+		{"fable on implement", agent("Fix the parser", "", "", "fable"), true, []string{"class implement", `"sonnet"`, `"fable"`}},
+		{"fable on check", agent("Check the lanes", "", "", "claude-fable-5-2"), true, []string{"class check", `"haiku"`}},
+		{"fable on an unclassified task", agent("turnd: host handover", "", "", "fable"), false, nil},
 
 		// the prompt's first line stands in for a missing description
 		{"prompt fallback, refused", agent("", "Fix the parser\nlong body about review", "", "opus"), true, []string{"class implement"}},

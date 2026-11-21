@@ -122,7 +122,7 @@ func agentModel(cwd, typ string) (model, reason string) {
 				return "", fmt.Sprintf("%s has no well-formed frontmatter", path)
 			}
 			if family(kv["model"]) == "" {
-				return "", fmt.Sprintf("%s sets no haiku, sonnet or opus model (model: %q)", path, kv["model"])
+				return "", fmt.Sprintf("%s sets no haiku, sonnet, opus or fable model (model: %q)", path, kv["model"])
 			}
 			return kv["model"], ""
 		}
