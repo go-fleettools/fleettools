@@ -16,5 +16,8 @@ type Painter interface {
 	FillRoundRect(r Rect, radius int, c RGBA)
 	PutPixel(x, y int, c RGBA)
 	Text(x, y int, s string, ink RGBA)
+	Line(x0, y0, x1, y1 int, c RGBA)
+	Clear(c RGBA)
+	SetPixel(x, y int, c RGBA)
 	Size() (w, h int)
 }

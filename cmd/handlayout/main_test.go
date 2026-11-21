@@ -104,7 +104,7 @@ func TestDetectorsOnFixtures(t *testing.T) {
 		}
 	}
 	for f, m := range got {
-		if f != "pos/pos.go" && !strings.HasPrefix(f, "agentscope/") {
+		if f != "pos/pos.go" && !strings.HasPrefix(f, "agentscope/") && f != "shapes/pos.go" {
 			t.Errorf("%s fired %v: the negatives and test files must stay silent", f, m)
 		}
 	}
@@ -115,12 +115,81 @@ func TestDetectorsOnFixtures(t *testing.T) {
 	}
 }
 
+// ⛔ ONE FIXTURE PER SHAPE of fleettools#387, each with a twin in neg.go. Every
+// `// WANT <detector>` line of shapes/pos.go must report that detector, no other
+// line of the file may report, and neg.go stays silent (TestNegativesStaySilent).
+// Removing a rule turns its WANT line red.
+func TestShapeFixtures(t *testing.T) {
+	out, _, code := drive(t, "", "--repo", "testdata/app")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1:\n%s", code, out)
+	}
+	want := map[int]string{}
+	for i, ln := range fileLines(t, "testdata/app/shapes/pos.go") {
+		if _, d, ok := strings.Cut(ln, "// WANT "); ok && !strings.HasPrefix(ln, "//") {
+			want[i+1] = strings.TrimSpace(d)
+		}
+	}
+	if len(want) != 32 {
+		t.Fatalf("fixture drifted: %d WANT markers, want 32", len(want))
+	}
+	got := lines(out)["shapes/pos.go"]
+	for n, d := range want {
+		if !has(got[n], d) {
+			t.Errorf("shapes/pos.go:%d: want a %s finding, got %v", n, d, got[n])
+		}
+		if len(got[n]) != 1 {
+			t.Errorf("shapes/pos.go:%d: want exactly one finding, got %v (a site reported twice)", n, got[n])
+		}
+	}
+	for n, ds := range got {
+		if _, ok := want[n]; !ok {
+			t.Errorf("shapes/pos.go:%d: unexpected finding %v", n, ds)
+		}
+	}
+}
+
+// The painter-backend exemption by module path, and the names of the primitives.
+func TestBackendPathAndPrimitiveNames(t *testing.T) {
+	for p, want := range map[string]bool{
+		"github.com/go-widgets/gpupainter":     true,
+		"github.com/go-widgets/softpainter":    true,
+		"github.com/go-widgets/painter":        false,
+		"github.com/go-widgets/toolkit":        false,
+		"github.com/other/gpupainter":          false,
+		"github.com/go-widgets/gpupainter/sub": false,
+		"github.com/go-widgets/app":            false,
+	} {
+		if got := isBackendPath(p); got != want {
+			t.Errorf("isBackendPath(%q) = %v, want %v", p, got, want)
+		}
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module github.com/go-widgets/gpupainter\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, why, err := moduleKind(dir); err != nil || !strings.Contains(why, "painter backend") {
+		t.Errorf("moduleKind = %q, %v: want a painter backend exemption", why, err)
+	}
+	for _, n := range []string{"FillRect", "StrokeRect", "DrawImage", "BlitMask", "PutPixel", "Text", "ImageAt", "GlyphRun",
+		"Line", "Lines", "LineTo", "Clear", "SetPixel", "Rect", "Rects", "Arc", "Circle", "Ellipse", "Polygon", "Polyline"} {
+		if !primitiveName.MatchString(n) {
+			t.Errorf("%s is a primitive and does not match", n)
+		}
+	}
+	for _, n := range []string{"LineHeight", "Size", "Bounds", "Rectangle", "Linear", "Contains", "Width"} {
+		if primitiveName.MatchString(n) {
+			t.Errorf("%s matched as a primitive", n)
+		}
+	}
+}
+
 // Each negative on its own, so a mutation that widens a detector names the
 // pattern: none of these may report.
 func TestNegativesStaySilent(t *testing.T) {
 	out, _, _ := drive(t, "", "--repo", "testdata/app")
 	for f := range lines(out) {
-		if strings.HasPrefix(f, "neg/") {
+		if strings.HasPrefix(f, "neg/") || f == "shapes/neg.go" {
 			t.Errorf("negative fixture %s fired:\n%s", f, out)
 		}
 	}
@@ -173,6 +242,8 @@ func TestRepoKinds(t *testing.T) {
 		{"toolkit itself is exempt", "testdata/toolkitself", 0, "exempt: the module is github.com/go-widgets/toolkit itself"},
 		{"not a consumer", "testdata/plain", 0, "not a go-widgets consumer"},
 		{"no go.mod is unread, not clean", "testdata/stubs", 2, "UNREAD: go.mod"},
+		{"a painter backend is exempt", "testdata/backend", 0, "exempt: the module implements painter.Painter (example.com/backend.Soft)"},
+		{"a build-tag-excluded file is unread, not clean", "testdata/tagged", 2, "b.go: excluded by build constraints, not read"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, _, code := drive(t, "", "--repo", tc.dir)

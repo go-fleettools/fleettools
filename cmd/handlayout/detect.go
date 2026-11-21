@@ -6,7 +6,6 @@ package main
 import (
 	"fmt"
 	"go/ast"
-	"go/token"
 	"go/types"
 	"os"
 	"path/filepath"
@@ -41,15 +40,32 @@ const (
 // fields of Rect, a theme's spacing, and the exported metrics (SplitterHandleW,
 // StatusbarH, ...). It is only ever applied to an object that the type checker
 // resolved INTO the toolkit or painter package, never to a bare identifier.
-var metricName = regexp.MustCompile(`^(X|Y|W|H|Min|Max|Pad|Padding|Gap|Spacing|Margin|Width|Height|Left|Right|Top|Bottom)$|(W|H|Pad|Gap|Margin|Spacing|Height|Width|Inset|Radius)$`)
+var metricName = regexp.MustCompile(`^(X|Y|W|H|Min|Max|Pad|Padding|Gap|Spacing|Margin|Width|Height|Left|Right|Top|Bottom|Size|Offset|Cols|Rows|Columns)$|(W|H|Pad|Gap|Margin|Spacing|Height|Width|Inset|Radius)$`)
 
 // metricFunc is a toolkit/painter function or method that answers a font,
-// glyph or density metric.
-var metricFunc = regexp.MustCompile(`^(TextWidth|TextHeight|Measure.*|LineHeight|GlyphW.*|GlyphH.*|FontHeight|TouchTarget|Wrap.*|Preferred.*|Pref.*)$`)
+// glyph, density or geometry metric: the accessors Size() and Bounds() too.
+var metricFunc = regexp.MustCompile(`^(TextWidth|TextHeight|Measure.*|LineHeight|GlyphW.*|GlyphH.*|FontHeight|TouchTarget|Wrap.*|Preferred.*|Pref.*|Size|Bounds|Offset|Inner.*|Content.*|Cols|Rows|Columns)$`)
 
 // primitiveName is a painter drawing primitive: rect fills and strokes,
-// glyph and text draws, image and mask blits, pixels.
-var primitiveName = regexp.MustCompile(`^(Fill|Stroke|Draw|Blit|Put|Text|Image|Mask|Glyph)`)
+// glyph and text draws, image and mask blits, pixels, lines, arcs, clears.
+var primitiveName = regexp.MustCompile(`^(Fill|Stroke|Draw|Blit|Put|Text|Image|Mask|Glyph|SetPixel|Clear|Arc|Circle|Ellipse|Polygon|Polyline)|^(Line|Lines|LineTo|Rect|Rects)$`)
+
+// imageFunc and imageField are the members of image.Rectangle and image.Point
+// that carry geometry.
+var (
+	imageFunc  = regexp.MustCompile(`^(Dx|Dy|Size)$`)
+	imageField = regexp.MustCompile(`^(X|Y|Min|Max)$`)
+)
+
+// geomTypeName names the toolkit/painter geometry structs; for package image
+// only Rectangle and Point count.
+var geomTypeName = regexp.MustCompile(`^(Rect|Point|Size|Insets?|Padding|Margins?|Offset|Edges?|Rectangle)$`)
+
+// geomParam is the name of a function parameter that takes a geometry value.
+var geomParam = regexp.MustCompile(`(?i)^(x|y|w|h|width|height|min|max|pad|padding|gap|spacing|margin|left|right|top|bottom|size|offset)$`)
+
+// hitMethod is a Rect/Point method that is a hit test.
+var hitMethod = regexp.MustCompile(`^(Contains|In|Overlaps)$`)
 
 // Finding is one site a detector refuses.
 type Finding struct {
@@ -92,9 +108,11 @@ func moduleKind(dir string) (consumer bool, exempt string, err error) {
 		return false, "", err
 	}
 	if mf.Module != nil {
-		switch mf.Module.Mod.Path {
-		case toolkitPath, painterPath:
-			return false, "the module is " + mf.Module.Mod.Path + " itself", nil
+		switch mp := mf.Module.Mod.Path; {
+		case mp == toolkitPath || mp == painterPath:
+			return false, "the module is " + mp + " itself", nil
+		case isBackendPath(mp):
+			return false, "the module " + mp + " is a painter backend (its primitives are the painter's own code)", nil
 		}
 	}
 	for _, r := range mf.Require {
@@ -103,6 +121,45 @@ func moduleKind(dir string) (consumer bool, exempt string, err error) {
 		}
 	}
 	return consumer, "", nil
+}
+
+// isBackendPath: a go-widgets module whose name says painter (gpupainter,
+// softpainter...) is a painter backend, not an application.
+func isBackendPath(mp string) bool {
+	rest, ok := strings.CutPrefix(mp, "github.com/go-widgets/")
+	return ok && rest != "painter" && !strings.Contains(rest, "/") && strings.HasSuffix(rest, "painter")
+}
+
+// backendType names a type of the audited packages that implements
+// painter.Painter, or "": such a module is a painter backend whatever it is
+// called.
+func backendType(pkgs []*packages.Package) string {
+	var iface *types.Interface
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		if p.PkgPath == painterPath && p.Types != nil {
+			if o := p.Types.Scope().Lookup("Painter"); o != nil {
+				iface, _ = o.Type().Underlying().(*types.Interface)
+			}
+		}
+	})
+	if iface == nil {
+		return ""
+	}
+	for _, p := range pkgs {
+		if p.Types == nil {
+			continue
+		}
+		for _, name := range p.Types.Scope().Names() {
+			tn, ok := p.Types.Scope().Lookup(name).(*types.TypeName)
+			if !ok || types.IsInterface(tn.Type()) {
+				continue
+			}
+			if types.Implements(tn.Type(), iface) || types.Implements(types.NewPointer(tn.Type()), iface) {
+				return p.PkgPath + "." + name
+			}
+		}
+	}
+	return ""
 }
 
 // auditRepo audits the module rooted at dir.
@@ -140,26 +197,41 @@ func auditRepo(dir string) Audit {
 	if len(pkgs) == 0 {
 		a.Unread = append(a.Unread, "go list: no packages")
 	}
+	if bt := backendType(pkgs); bt != "" {
+		a.Exempt = "the module implements painter.Painter (" + bt + "): a painter backend, its primitives are the painter's own code"
+		return a
+	}
+	rel := func(name string) string {
+		r, err := filepath.Rel(dir, name)
+		if err != nil {
+			r = name
+		}
+		return filepath.ToSlash(r)
+	}
 	for _, p := range pkgs {
 		for _, e := range p.Errors {
 			a.Unread = append(a.Unread, fmt.Sprintf("%s: %s", p.PkgPath, e.Msg))
 		}
+		// ⛔ A file a build constraint leaves out is never loaded: say so, so
+		// that a clean report is not read as covering it.
+		for _, name := range p.IgnoredFiles {
+			if !strings.HasSuffix(name, "_test.go") {
+				a.Unread = append(a.Unread, rel(name)+": excluded by build constraints, not read")
+			}
+		}
 		if p.TypesInfo == nil {
 			continue
 		}
+		an := &analyzer{fset: p.Fset, info: p.TypesInfo, tainted: map[types.Object]bool{}, seen: map[ast.Node]bool{}}
+		var files []srcFile
 		for _, f := range p.Syntax {
 			name := p.Fset.File(f.Pos()).Name()
-			if strings.HasSuffix(name, "_test.go") {
-				continue
+			if !strings.HasSuffix(name, "_test.go") {
+				files = append(files, srcFile{rel(name), f})
 			}
-			rel, err := filepath.Rel(dir, name)
-			if err != nil {
-				rel = name
-			}
-			an := &analyzer{fset: p.Fset, info: p.TypesInfo, file: filepath.ToSlash(rel), tainted: map[types.Object]bool{}}
-			an.run(f)
-			a.Findings = append(a.Findings, an.out...)
 		}
+		an.runPackage(files)
+		a.Findings = append(a.Findings, an.out...)
 	}
 	sort.SliceStable(a.Findings, func(i, j int) bool {
 		x, y := a.Findings[i], a.Findings[j]
@@ -182,196 +254,4 @@ func dedup(s []string) []string {
 		}
 	}
 	return out
-}
-
-// analyzer reads one file with the type information of its package.
-type analyzer struct {
-	fset    *token.FileSet
-	info    *types.Info
-	file    string
-	tainted map[types.Object]bool // numeric locals computed from toolkit geometry
-	out     []Finding
-}
-
-func (a *analyzer) run(f *ast.File) {
-	for _, d := range f.Decls {
-		fd, ok := d.(*ast.FuncDecl)
-		if !ok || fd.Body == nil {
-			continue
-		}
-		// A local gets its taint from earlier statements; three rounds reach a
-		// fixpoint for the straight-line code layout is written in.
-		for range 3 {
-			a.propagate(fd.Body)
-		}
-		a.scan(fd.Body)
-	}
-	// package-level var initialisers
-	for _, d := range f.Decls {
-		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.VAR {
-			a.scan(gd)
-		}
-	}
-}
-
-// metric reports whether obj is a toolkit/painter geometry or metric member.
-func (a *analyzer) metric(obj types.Object) bool {
-	if obj == nil || !inWidgets(obj.Pkg()) {
-		return false
-	}
-	switch o := obj.(type) {
-	case *types.Func:
-		return metricFunc.MatchString(o.Name())
-	case *types.Var:
-		if o.IsField() {
-			return metricName.MatchString(o.Name())
-		}
-		return o.Parent() == o.Pkg().Scope() && o.Exported() && metricName.MatchString(o.Name())
-	case *types.Const:
-		return o.Exported() && metricName.MatchString(o.Name())
-	}
-	return false
-}
-
-func (a *analyzer) use(id *ast.Ident) types.Object {
-	if o := a.info.Uses[id]; o != nil {
-		return o
-	}
-	return a.info.Defs[id]
-}
-
-// geo reports whether e is computed from toolkit geometry: it mentions a
-// metric member, a function that answers one, or a local already computed from
-// them. Composite-literal keys are field names, not uses, and a func literal is
-// another scope.
-func (a *analyzer) geo(e ast.Node) bool {
-	found := false
-	ast.Inspect(e, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.FuncLit:
-			return false
-		case *ast.KeyValueExpr:
-			if a.geo(n.Value) {
-				found = true
-			}
-			return false
-		case *ast.Ident:
-			if o := a.use(n); o != nil && (a.metric(o) || a.tainted[o]) {
-				found = true
-			}
-		}
-		return !found
-	})
-	return found
-}
-
-func (a *analyzer) numeric(e ast.Expr) bool {
-	tv, ok := a.info.Types[e]
-	if !ok || tv.Type == nil {
-		return false
-	}
-	b, ok := tv.Type.Underlying().(*types.Basic)
-	return ok && b.Info()&(types.IsInteger|types.IsFloat) != 0
-}
-
-// propagate marks the numeric locals assigned from geometry.
-func (a *analyzer) propagate(body ast.Node) {
-	mark := func(lhs []ast.Expr, rhs []ast.Expr) {
-		for i, l := range lhs {
-			id, ok := l.(*ast.Ident)
-			if !ok {
-				continue
-			}
-			var r ast.Expr
-			switch {
-			case len(rhs) == len(lhs):
-				r = rhs[i]
-			case len(rhs) == 1:
-				r = rhs[0]
-			default:
-				continue
-			}
-			if o := a.use(id); o != nil && a.geo(r) {
-				if v, ok := o.(*types.Var); ok && !v.IsField() {
-					if b, ok := v.Type().Underlying().(*types.Basic); ok && b.Info()&(types.IsInteger|types.IsFloat) != 0 {
-						a.tainted[o] = true
-					}
-				}
-			}
-		}
-	}
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.AssignStmt:
-			mark(n.Lhs, n.Rhs)
-		case *ast.ValueSpec:
-			ids := make([]ast.Expr, len(n.Names))
-			for i, id := range n.Names {
-				ids[i] = id
-			}
-			mark(ids, n.Values)
-		}
-		return true
-	})
-}
-
-func (a *analyzer) add(n ast.Node, det string) {
-	s := types.ExprString(n.(ast.Expr))
-	if len(s) > 90 {
-		s = s[:87] + "..."
-	}
-	a.out = append(a.out, Finding{
-		File: a.file, Line: a.fset.Position(n.Pos()).Line, EndLine: a.fset.Position(n.End()).Line,
-		Detector: det, Text: s,
-	})
-}
-
-func isCompare(op token.Token) bool {
-	return op == token.LSS || op == token.LEQ || op == token.GTR || op == token.GEQ
-}
-
-func isArith(op token.Token) bool {
-	return op == token.ADD || op == token.SUB || op == token.MUL || op == token.QUO
-}
-
-// comparisons counts the geometry comparisons of a && / || chain.
-func (a *analyzer) comparisons(e ast.Expr) int {
-	e = ast.Unparen(e)
-	b, ok := e.(*ast.BinaryExpr)
-	if !ok {
-		return 0
-	}
-	switch {
-	case b.Op == token.LAND || b.Op == token.LOR:
-		return a.comparisons(b.X) + a.comparisons(b.Y)
-	case isCompare(b.Op) && (a.geo(b.X) || a.geo(b.Y)):
-		return 1
-	}
-	return 0
-}
-
-// scan walks a body and records each site once: the outermost expression.
-func (a *analyzer) scan(root ast.Node) {
-	ast.Inspect(root, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.CallExpr:
-			if sel, ok := n.Fun.(*ast.SelectorExpr); ok {
-				if f, ok := a.info.Uses[sel.Sel].(*types.Func); ok && f.Pkg() != nil &&
-					f.Pkg().Path() == painterPath && primitiveName.MatchString(f.Name()) {
-					a.add(n, detPainter)
-				}
-			}
-		case *ast.BinaryExpr:
-			if n.Op == token.LAND || n.Op == token.LOR {
-				if a.comparisons(n) >= 2 {
-					a.add(n, detHit)
-					return false
-				}
-			} else if isArith(n.Op) && a.numeric(n) && a.geo(n) {
-				a.add(n, detArith)
-				return false
-			}
-		}
-		return true
-	})
 }

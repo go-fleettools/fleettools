@@ -17,6 +17,23 @@ func TouchTarget(n int) int     { return n }
 func Describe(n int) string     { return "n" }
 func Count(items []string) int  { return len(items) }
 
+// DrawFrame is a toolkit drawing function: it takes a painter.
+func DrawFrame(p painter.Painter, r Rect) {}
+
+func LineHeight() int { return 14 }
+
+// NewSplitPane takes a width: a geometry-named parameter.
+func NewSplitPane(name string, w int) *SplitPane { return &SplitPane{Name: name, Default: w} }
+
+// Win answers its size through an accessor.
+type Win struct{}
+
+func (Win) Size() (int, int) { return 800, 600 }
+
+type Grid struct{ Cols, Rows int }
+
+type Scroll struct{ Offset int }
+
 type Widget interface {
 	Bounds() Rect
 	SetBounds(Rect)
