@@ -13,12 +13,18 @@
 // `go get module@latest` resolves -- read with `git ls-remote`, one call per
 // module and none against the REST budget Renovate shares.
 //
+// A prose claim may also source the version it states -- the date it was read,
+// the tag, the commit the tag resolved to -- and all of that moves with the
+// version or none of it does: see Rewrite. A claim this command cannot move
+// whole is left stale and named, which is exit 2.
+//
 // Written 2026-10-11, after the same five tag cells had been edited by hand in
 // four languages and a hugo.toml five times in two days -- the first four with
 // perl one-liners, which is how a cell in one language gets missed and nothing
 // says so. Exit status: 0 every cell current (or rewritten), 1 a cell is stale
-// and -write was not given, 2 a tag could not be read or no cell was found at
-// all -- a page with no cells is not an up-to-date page.
+// and -write was not given, 2 a tag could not be read, a claim could not be
+// moved whole, or no cell was found at all -- a page with no cells is not an
+// up-to-date page.
 package main
 
 import (
@@ -28,6 +34,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -49,9 +56,14 @@ The latest release is the highest vX.Y.Z tag with no prerelease — what
 ` + "`go get module@latest`" + ` resolves — read with ` + "`git ls-remote`" + `,
 one call per module and none against the REST budget Renovate shares.
 
+A prose claim may also source the version it states — the date it was read, the
+tag, the commit the tag resolved to. All of that moves with the version or none
+of it does: a claim this command cannot move whole is left stale and named,
+never half-rewritten.
+
 Exit status: 0 every cell current (or rewritten), 1 a cell is stale and --write
-was not given, 2 a tag could not be read or no cell was found at all — a page
-with no cells is not an up-to-date page.`
+was not given, 2 a tag could not be read, a claim could not be moved whole, or
+no cell was found at all — a page with no cells is not an up-to-date page.`
 
 func main() {
 	fleet.WarnIfStale(os.Stderr)
@@ -180,10 +192,10 @@ func parseArgs(args []string, stderr io.Writer) (options, int, bool) {
 	return o, code, code == 0 && !cli.HelpRequested(c)
 }
 
-func run(o options, stdout, stderr io.Writer, latest func(org, repo string) (string, error)) int {
-	known := map[string]string{}
+func run(o options, stdout, stderr io.Writer, latest func(org, repo string) (Release, error)) int {
+	known := map[string]Release{}
 	var unread []string
-	lookup := func(repo string) string {
+	lookup := func(repo string) Release {
 		if t, ok := known[repo]; ok {
 			return t
 		}
@@ -199,7 +211,7 @@ func run(o options, stdout, stderr io.Writer, latest func(org, repo string) (str
 	if today == "" {
 		today = time.Now().Format("2006-01-02")
 	}
-	cellsSeen, stale := 0, 0
+	cellsSeen, stale, refused := 0, 0, 0
 	for _, f := range o.files {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -214,35 +226,43 @@ func run(o options, stdout, stderr io.Writer, latest func(org, repo string) (str
 			// speak for, and that is a different thing from a file it checked.
 			fmt.Fprintf(stdout, "%s  no version claim of %s found on this page\n", f, o.org)
 		}
-		want := map[string]string{}
+		want := map[string]Release{}
 		for _, c := range cells {
 			t := lookup(c.Module)
 			want[c.Module] = t
-			if t != "" && t != c.Tag {
+			if t.Tag != "" && t.Tag != c.Tag {
 				stale++
 				verb := "stale"
 				if o.write {
 					verb = "rewritten"
 				}
-				fmt.Fprintf(stdout, "%s:%d  %s: page says %s, latest is %s (%s)\n", f, c.Line, c.Module, c.Tag, t, verb)
+				fmt.Fprintf(stdout, "%s:%d  %s: page says %s, latest is %s (%s)\n", f, c.Line, c.Module, c.Tag, t.Tag, verb)
 			}
 		}
-		if o.write {
-			if out := Rewrite(src, cells, want, today); out != src {
-				if err := writeAtomic(f, []byte(out)); err != nil {
-					fmt.Fprintln(stderr, "tagcells:", err)
-					return 2
-				}
+		// ⛔ THE REWRITE IS COMPUTED EVEN WITHOUT --write, for its refusals.
+		// A claim this command cannot move whole is a claim --write will not
+		// fix, and the run that reports the staleness is the one a reader acts
+		// on: saying "stale" there and "I will not touch it" only on the next
+		// invocation is how a page waits for a rewrite that never comes.
+		out, unproven := Rewrite(src, cells, want, today)
+		for _, u := range unproven {
+			refused++
+			fmt.Fprintf(stderr, "tagcells: %s:%d  %s: left alone -- %s\n", f, u.Line, u.Module, u.Why)
+		}
+		if o.write && out != src {
+			if err := writeAtomic(f, []byte(out)); err != nil {
+				fmt.Fprintln(stderr, "tagcells:", err)
+				return 2
 			}
 		}
 	}
 	for _, u := range unread {
 		fmt.Fprintln(stderr, "tagcells: could not read the tags of", u)
 	}
-	fmt.Fprintf(stdout, "\n%d file(s), %d cell(s), %d module(s), %d stale, %d unread\n",
-		len(o.files), cellsSeen, len(known), stale, len(unread))
+	fmt.Fprintf(stdout, "\n%d file(s), %d cell(s), %d module(s), %d stale, %d unread, %d left alone\n",
+		len(o.files), cellsSeen, len(known), stale, len(unread), refused)
 	switch {
-	case cellsSeen == 0 || len(unread) > 0:
+	case cellsSeen == 0 || len(unread) > 0 || refused > 0:
 		return 2
 	case cellsSeen < o.minCells:
 		fmt.Fprintf(stderr, "tagcells: %d cell(s) read, --min-cells says %d: a claim these pages used to state is gone,"+
@@ -264,7 +284,7 @@ var lsRemote = func(url string) ([]byte, error) {
 }
 
 // latestTag asks git, not the REST API, for the repository's tags.
-func latestTag(org, repo string) (string, error) {
+func latestTag(org, repo string) (Release, error) {
 	out, err := lsRemote("https://github.com/" + org + "/" + repo)
 	if err != nil {
 		// ⛔ "I COULD NOT ASK" IS NOT "THERE IS NO RELEASE". Without this
@@ -273,16 +293,28 @@ func latestTag(org, repo string) (string, error) {
 		// down -- a page would then be reported current because nothing could
 		// contradict it. The two answers travel apart: this one is counted as
 		// unread, which is exit 2.
-		return "", fmt.Errorf("git ls-remote: %w", err)
+		return Release{}, fmt.Errorf("git ls-remote: %w", err)
 	}
 	return highest(string(out))
 }
 
+// oidRE is a full git object id, which is the only thing allowed to become the
+// commit of a Release: the line's left-hand field is taken from `git ls-remote
+// --tags --refs`, and anything else there -- a peeled `^{}` marker, a truncated
+// line, a message on stdout -- yields no commit rather than a plausible one.
+var oidRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
 // highest picks the highest release tag from ls-remote output: vX.Y.Z only,
 // no prerelease, no build, compared as semver and never as text (v0.10.0 is
 // above v0.9.0). A module with no release tag at all is an error, not "".
-func highest(lsRemote string) (string, error) {
-	best := ""
+//
+// ⛔ AND IT KEEPS THE COMMIT OF THE TAG IT PICKED. It used to parse the object
+// id and drop it, which is why `--write` could move a version number past the
+// commit that sourced it; the commit of the LINE that won is the only one that
+// belongs to the answer -- never the one of a neighbouring tag, and never one
+// carried over from the number the page had before.
+func highest(lsRemote string) (Release, error) {
+	best := Release{}
 	for _, line := range strings.Split(lsRemote, "\n") {
 		i := strings.Index(line, "refs/tags/")
 		if i < 0 {
@@ -292,12 +324,15 @@ func highest(lsRemote string) (string, error) {
 		if !semver.IsValid(t) || semver.Prerelease(t) != "" || semver.Build(t) != "" || semver.Canonical(t) != t {
 			continue
 		}
-		if best == "" || semver.Compare(t, best) > 0 {
-			best = t
+		if best.Tag == "" || semver.Compare(t, best.Tag) > 0 {
+			best = Release{Tag: t}
+			if oid := strings.TrimSpace(line[:i]); oidRE.MatchString(oid) {
+				best.Commit = oid
+			}
 		}
 	}
-	if best == "" {
-		return "", errors.New("no vX.Y.Z release tag")
+	if best.Tag == "" {
+		return Release{}, errors.New("no vX.Y.Z release tag")
 	}
 	return best, nil
 }

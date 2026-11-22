@@ -27,9 +27,9 @@ func TestAModuleNamedOnTwoPagesIsAskedForOnce(t *testing.T) {
 		files = append(files, p)
 	}
 	asked := 0
-	counting := func(_, _ string) (string, error) {
+	counting := func(_, _ string) (Release, error) {
 		asked++
-		return "v0.89.0", nil
+		return rel("window", "v0.89.0")["window"], nil
 	}
 	var out, errb bytes.Buffer
 	if rc := run(options{org: "go-widgets", files: files}, &out, &errb, counting); rc != 0 {
@@ -70,8 +70,8 @@ func TestAFailedLsRemoteIsNotReportedAsNoRelease(t *testing.T) {
 	lsRemote = func(string) ([]byte, error) {
 		return []byte("deadbeef\trefs/tags/v0.9.0\nfeedface\trefs/tags/v0.10.0\n"), nil
 	}
-	if got, err := latestTag("go-widgets", "window"); err != nil || got != "v0.10.0" {
-		t.Fatalf("got %q, %v; want v0.10.0 (semver, not text)", got, err)
+	if got, err := latestTag("go-widgets", "window"); err != nil || got.Tag != "v0.10.0" {
+		t.Fatalf("got %+v, %v; want v0.10.0 (semver, not text)", got, err)
 	}
 }
 
@@ -83,7 +83,7 @@ func TestAnUnreadableFileIsNamedAndNotMistakenForAnEmptyPage(t *testing.T) {
 	var out, errb bytes.Buffer
 	missing := filepath.Join(t.TempDir(), "gone.md")
 	rc := run(options{org: "go-widgets", files: []string{missing}}, &out, &errb,
-		func(string, string) (string, error) { return "v1.0.0", nil })
+		func(string, string) (Release, error) { return rel("window", "v1.0.0")["window"], nil })
 	if rc != 2 {
 		t.Fatalf("rc %d, want 2", rc)
 	}
