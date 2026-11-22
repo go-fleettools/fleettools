@@ -250,7 +250,3 @@ func RootCmd() *cobra.Command {
 	c.Flags().StringVar(&dir, "dir", "", "the repository for --diff (default: the current directory)")
 	return c
 }
-
-func run(args []string, out, errOut io.Writer) int {
-	return cli.Drive(RootCmd(), args, out, errOut)
-}
