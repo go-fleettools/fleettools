@@ -112,9 +112,6 @@ type client struct {
 func (c *client) low() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.stopped {
-		return true
-	}
 	if c.remaining >= 0 && c.remaining < c.reserve {
 		c.stopped = true
 	}

@@ -292,3 +292,133 @@ func TestListingFailureIsExit2(t *testing.T) {
 		t.Fatalf("code %d, out %q", code, o.String())
 	}
 }
+
+// driveH is drive for a hand-written handler, for answers the fake cannot give.
+func driveH(t *testing.T, h http.Handler, args ...string) (code int, out, errOut string) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return driveAt(t, srv.URL, args...)
+}
+
+func driveAt(t *testing.T, base string, args ...string) (code int, out, errOut string) {
+	t.Helper()
+	sweepBase = base
+	old := readToken
+	readToken = func(string) (string, error) { return "test-token", nil }
+	t.Cleanup(func() { sweepBase = ""; readToken = old })
+	var o, e bytes.Buffer
+	code = cli.Drive(RootCmd(), args, &o, &e)
+	return code, o.String(), e.String()
+}
+
+var oneOrg = []string{"--orgs", "a", "--file", "config.js", "--contains", "x"}
+
+func TestAnUnreachableServerIsUnreadNotNofile(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	code, out, _ := driveAt(t, url, oneOrg...)
+	if code != 1 || !strings.Contains(out, "unread   a") || !strings.Contains(out, "unread 1") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestAnInvalidRequestIsUnread(t *testing.T) {
+	code, out, _ := driveAt(t, "http://[::1", oneOrg...)
+	if code != 1 || !strings.Contains(out, "unread   a") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestATruncatedBodyIsUnread(t *testing.T) {
+	code, out, _ := driveH(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.Write([]byte("abc"))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}), oneOrg...)
+	if code != 1 || !strings.Contains(out, "unread   a") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestAnOversizedBodyIsUnread(t *testing.T) {
+	code, out, _ := driveH(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(bytes.Repeat([]byte("x"), maxBody+2))
+	}), oneOrg...)
+	if code != 1 || !strings.Contains(out, "unread   a") || !strings.Contains(out, "over") || strings.Contains(out, "match    a") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestListingRefusals(t *testing.T) {
+	for name, h := range map[string]http.HandlerFunc{
+		"401 with a valid body": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(401)
+			w.Write([]byte(`[{"login":"x"}]`))
+		},
+		"200 with garbage": func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("<html>")) },
+	} {
+		code, out, errOut := driveH(t, h, "--file", "config.js", "--contains", "x")
+		if code != 2 || out != "" || !strings.Contains(errOut, "could not list organisations") {
+			t.Errorf("%s: code %d out %q err %q", name, code, out, errOut)
+		}
+	}
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close()
+	if code, _, errOut := driveAt(t, url, "--file", "config.js", "--contains", "x"); code != 2 || !strings.Contains(errOut, "could not list organisations") || strings.Contains(errOut, "HTTP 0") {
+		t.Errorf("unreachable: code %d err %q", code, errOut)
+	}
+}
+
+func TestListingPagesUntilAShortPage(t *testing.T) {
+	var pages atomic.Int64
+	_, out, _ := driveH(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user/orgs" {
+			http.NotFound(w, r)
+			return
+		}
+		pages.Add(1)
+		n := 100
+		if r.URL.Query().Get("page") == "2" {
+			n = 1
+		}
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = fmt.Sprintf(`{"login":"o%d-%s"}`, i, r.URL.Query().Get("page"))
+		}
+		fmt.Fprintf(w, "[%s]", strings.Join(parts, ","))
+	}), "--file", "config.js", "--contains", "x")
+	if pages.Load() != 2 || !strings.Contains(out, "101 organisations") {
+		t.Fatalf("%d pages\n%s", pages.Load(), out)
+	}
+}
+
+func TestAMissingTokenIsExit2(t *testing.T) {
+	old := readToken
+	readToken = func(string) (string, error) { return "", fmt.Errorf("token file: absent") }
+	defer func() { readToken = old }()
+	var o, e bytes.Buffer
+	if code := cli.Drive(RootCmd(), oneOrg, &o, &e); code != 2 || !strings.Contains(e.String(), "absent") {
+		t.Fatalf("code %d %q", code, e.String())
+	}
+}
+
+func TestFilePathBounds(t *testing.T) {
+	if validPath("") || validPath(strings.Repeat("a", 301)) || !validPath(strings.Repeat("a", 300)) || !validPath("a/b.js") {
+		t.Fatal("validPath bounds moved")
+	}
+}
+
+func TestTheReserveLatches(t *testing.T) {
+	c := &client{reserve: 10, remaining: 5}
+	if !c.low() {
+		t.Fatal("below the reserve is not low")
+	}
+	c.remaining = 5000 // a quota that comes back mid-run does not un-stop the run
+	if !c.low() {
+		t.Fatal("the stop did not latch")
+	}
+}
