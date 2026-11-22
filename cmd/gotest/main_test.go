@@ -6,6 +6,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/go-fleettools/fleettools/internal/loadgate"
 )
 
 // gotestRun drives the command with a canned `go test`, and returns the exit
@@ -117,6 +119,138 @@ func TestAFailingRunKeepsItsStatus(t *testing.T) {
 	}
 	if strings.Contains(errb, "matched no test") {
 		t.Errorf("a real failure was reported as a selection problem: %q", errb)
+	}
+}
+
+// ⛔⛔ The other half of TestAFailingRunKeepsItsStatus, and the hole it left: a
+// `go test` that failed BEFORE any test ran. Nothing is then known about the
+// pattern, and the old verdict pointed at an `ok` that was never printed.
+//
+// The output is the one measured on 2026-11-22 from
+// `gotest -run TestJSONGolden -update ./cmd/recur`, where cmd/go read
+// `./cmd/recur` as an argument for the test binary because it came after an
+// unknown flag, and the package defaulted to a directory with no Go file.
+func TestASetupFailureIsNotAnEmptySelection(t *testing.T) {
+	const setupFailed = "# .\nno Go files in /tmp/clone\nFAIL\t. [setup failed]\n"
+	rc, _, errb, _ := gotestRun(t, 1, nil, setupFailed, "-run", "TestJSONGolden", "./cmd/recur")
+	if rc != 1 {
+		t.Fatalf("exit %d, want 1 — go test's own status", rc)
+	}
+	if strings.Contains(errb, "selected NO test at all") {
+		t.Errorf("a run that never selected was reported as an empty selection: %q", errb)
+	}
+	if strings.Contains(errb, "`ok` above") {
+		t.Errorf("stderr points at an `ok` that was never printed: %q", errb)
+	}
+	if !strings.Contains(errb, "FAILED before any test ran") {
+		t.Errorf("stderr does not say the selection was never checked: %q", errb)
+	}
+}
+
+// ⛔ And the control on that distinction: when `go test` EXITS 0 and nothing
+// ran, the empty-selection verdict is exactly what this command is for, so the
+// fix above must not have bought its silence. TestAnEmptySelectionIsNotAPass
+// holds the same case; this one holds the pair, because the two differ only in
+// the status and a guard keyed on the wrong one would pass one and fail the
+// other.
+func TestTheEmptySelectionVerdictSurvivesForAPassingRun(t *testing.T) {
+	const empty = "testing: warning: no tests to run\nPASS\nok  \texample.com/m\t0.04s [no tests to run]\n"
+	rc, _, errb, _ := gotestRun(t, 0, nil, empty, "-run", "NoSuchTest", "./m")
+	if rc != 1 {
+		t.Fatalf("exit %d, want 1", rc)
+	}
+	if !strings.Contains(errb, "selected NO test at all") {
+		t.Errorf("the empty-selection verdict was lost: %q", errb)
+	}
+	if strings.Contains(errb, "FAILED before any test ran") {
+		t.Errorf("a passing run was reported as a failure: %q", errb)
+	}
+}
+
+// ⛔ The four below were mutation SURVIVORS of this package before the change
+// above, named by `mutsweep -dir cmd/gotest` on 2026-11-22: the load refusal,
+// the bench exception, the exec failure on the no-`-run` path, and a `-run`
+// alternative that is not a regexp. They are pre-existing and unrelated to the
+// setup-failure fix, and they are held here because the same sweep that proved
+// that fix named them, and a survivor read and left is a survivor read twice.
+
+// The load gate's REFUSAL. Deterministic only through the loadCheck seam: this
+// machine was at 1-minute load 42 while the test was written, so the host would
+// have answered the test's question instead of the code.
+func TestABenchmarkIsRefusedOnALoadedMachine(t *testing.T) {
+	old := loadCheck
+	t.Cleanup(func() { loadCheck = old })
+	loadCheck = func(string) (loadgate.Averages, error) {
+		return loadgate.Averages{One: 42, Five: 40}, errors.New("refusing to measure at 42.00 40.00")
+	}
+	rc, _, errb, saw := gotestRun(t, 0, nil, "", "-run", "^$", "-bench", "BenchmarkScan", "./m")
+	if rc != 2 {
+		t.Fatalf("exit %d, want 2 — the question could not be put", rc)
+	}
+	if !strings.Contains(errb, "refusing to measure") {
+		t.Errorf("stderr does not carry the gate's own reason: %q", errb)
+	}
+	if !strings.Contains(errb, "--under-load") {
+		t.Errorf("stderr does not say how to measure on purpose: %q", errb)
+	}
+	if saw != nil {
+		t.Errorf("go test ran although the gate refused: %v", saw)
+	}
+}
+
+// ⛔⛔ And the bench EXCEPTION, which is the other half and the one a sweep could
+// not tell from its absence: `-run '^$' -bench X` is the documented way to run
+// benchmarks without the tests, so the empty test selection is the point of the
+// command. Without the exception this command exits 1 on every benchmark run and
+// everybody goes back around it to bare `go test`, which is ungated.
+func TestABenchmarkRunIsNotAnEmptySelection(t *testing.T) {
+	old := loadCheck
+	t.Cleanup(func() { loadCheck = old })
+	loadCheck = func(string) (loadgate.Averages, error) {
+		return loadgate.Averages{One: 42, Five: 40}, nil
+	}
+	const benchOutput = "goos: darwin\nBenchmarkScan-10   \t 1000\t 1.2 ns/op\nPASS\nok  \texample.com/m\t1.4s [no tests to run]\n"
+	rc, out, errb, saw := gotestRun(t, 0, nil, benchOutput,
+		"-run", "^$", "-bench", "BenchmarkScan", "--under-load", "holding this very branch", "./m")
+	if rc != 0 {
+		t.Fatalf("exit %d, want 0 — an empty TEST selection is what -bench asks for", rc)
+	}
+	if strings.Contains(errb, "selected NO test at all") {
+		t.Errorf("a benchmark run was reported as an empty selection: %q", errb)
+	}
+	if !strings.Contains(out, "MEASURED UNDER LOAD ON PURPOSE") {
+		t.Errorf("the reason was not stamped into the output: %q", out)
+	}
+	for _, a := range saw {
+		if strings.Contains(a, "under-load") {
+			t.Errorf("--under-load reached go test, which has never heard of it: %v", saw)
+		}
+	}
+}
+
+// An exec failure is not a test result. Without -run there is no pattern to
+// check, and the only thing that can go wrong is the command not running at all.
+func TestGoTestFailingToRunIsUnanswerable(t *testing.T) {
+	rc, _, errb, _ := gotestRun(t, 0, errors.New(`exec: "go": executable file not found in $PATH`), "", "./...")
+	if rc != 2 {
+		t.Fatalf("exit %d, want 2 — nothing was measured", rc)
+	}
+	if !strings.Contains(errb, "executable file not found") {
+		t.Errorf("stderr does not carry the exec failure: %q", errb)
+	}
+}
+
+// A -run alternative that is not a regexp is a question that cannot be put, not
+// an alternative that matched nothing. The sweep caught this guard by PANIC —
+// luck, because the code after it crashed — which the next change would have
+// turned back into a survivor in silence.
+func TestAnAlternativeThatIsNotARegexpIsUnanswerable(t *testing.T) {
+	rc, _, errb, _ := gotestRun(t, 0, nil, theRealOutput, "-run", "TestUsage|Test([", "./m")
+	if rc != 2 {
+		t.Fatalf("exit %d, want 2 — the pattern could not be compiled", rc)
+	}
+	if !strings.Contains(errb, "not a regexp") {
+		t.Errorf("stderr does not name the broken alternative: %q", errb)
 	}
 }
 
