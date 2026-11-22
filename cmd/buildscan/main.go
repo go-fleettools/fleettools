@@ -202,7 +202,15 @@ that none of them reaches.
 measurement that is not under owner/name; --root and --repo name a place in the
 fleet's layout, so they cannot be combined with it.
 
---vet also runs go vet under each configuration, which COMPILES the tree.
+--vet also runs go vet under each configuration, which COMPILES the tree. A pass
+on a clean, committed repository root is RECORDED, keyed by the HEAD tree, under
+the user config directory (BUILDSCAN_RECORDS overrides).
+
+--hook is the push gate (gate.go): as a PreToolUse hook on Bash it refuses a
+gitpush whose commits add or change platform-specific Go (build constraint,
+GOOS/GOARCH file name, or syscall / unsafe / golang.org/x/sys) unless a vet pass
+is recorded for the tree being pushed. BUILDSCAN_SKIP=1 gitpush ... waives it,
+and the waiver is shown. What it cannot read, it allows and says so.
 
 ⛔ A tree with no REMOTE is not a repository missing a lane: nothing can run CI
 for something nobody can fetch. It is still printed, because "it exists only on
@@ -215,6 +223,7 @@ func RootCmd() *cobra.Command {
 	var (
 		root, only, one string
 		vet, all, fail  bool
+		hook            bool
 	)
 	c := cli.New("buildscan [flags]",
 		"What a repository's CI compiles, and the source none of it reaches", longHelp)
@@ -225,6 +234,9 @@ func RootCmd() *cobra.Command {
 		return nil
 	}
 	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		if hook {
+			return cli.FromStatus(hookMode(cli.Out(cmd), cli.Err(cmd), cmd.InOrStdin()))
+		}
 		return cli.FromStatus(scanAll(cli.Out(cmd), cli.Err(cmd), root, only, one, vet, all, fail))
 	}
 	f := c.Flags()
@@ -233,6 +245,8 @@ func RootCmd() *cobra.Command {
 	f.StringVar(&one, "dir", "", "scan this directory, whatever it is called:\n"+
 		"a worktree made for a measurement is not under owner/name")
 	f.BoolVar(&vet, "vet", false, "also run go vet under each configuration, which COMPILES the tree")
+	f.BoolVar(&hook, "hook", false, "answer a Claude Code PreToolUse payload on stdin: refuse a gitpush that adds or changes\n"+
+		"platform-specific Go code with no recorded --vet pass for the pushed tree (BUILDSCAN_SKIP=1 waives, shown)")
 	f.BoolVar(&all, "all", false, "list the repositories with nothing to report too")
 	f.BoolVar(&fail, "fail", false, "exit 1 if anything is found")
 	return c
@@ -293,6 +307,7 @@ func scanAll(stdout, stderr io.Writer, root, only, one string, vet, all, fail bo
 		}
 		if vet {
 			f.vetFail = vetAll(f, path)
+			recordVet(stderr, path, f)
 		}
 		found = append(found, f)
 	}
