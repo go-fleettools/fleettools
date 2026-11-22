@@ -424,8 +424,13 @@ func TestTheRecordStoreFailsLoudly(t *testing.T) {
 		t.Setenv(recordsEnv, "")
 		t.Setenv("HOME", "")
 		t.Setenv("XDG_CONFIG_HOME", "")
-		if _, err := recordDir(); err == nil {
+		// The precondition asks the platform, NOT recordDir: a skip decided by the
+		// code under test hides the guard it exists to exercise.
+		if _, err := os.UserConfigDir(); err == nil {
 			t.Skip("this platform finds a config directory without HOME")
+		}
+		if _, err := recordDir(); err == nil {
+			t.Error("recordDir found a directory the platform could not")
 		}
 		if err := storeRecord(passRecord{Tree: tree}); err == nil {
 			t.Error("storeRecord with no directory to write to succeeded")
@@ -580,5 +585,24 @@ func TestVetSaysWhenItCannotStoreTheRecord(t *testing.T) {
 	msg := vetRun(t, dir)
 	if !strings.Contains(msg, "no record") || strings.Contains(msg, "recorded a vet pass") {
 		t.Fatalf("%q", msg)
+	}
+}
+
+// --hook reaches the gate from the command line, not only from the function.
+func TestTheHookFlagAnswersThroughTheCommand(t *testing.T) {
+	dir := newClone(t, true)
+	commit(t, dir, "x_windows.go", "package a\n")
+	in, _ := json.Marshal(pushOf(dir))
+	var out, errOut bytes.Buffer
+	c := RootCmd()
+	c.SetIn(bytes.NewReader(in))
+	c.SetOut(&out)
+	c.SetErr(&errOut)
+	c.SetArgs([]string{"--hook"})
+	if err := c.Execute(); err != nil {
+		t.Fatalf("%v (stderr %q)", err, errOut.String())
+	}
+	if !strings.Contains(out.String(), `"permissionDecision":"deny"`) {
+		t.Fatalf("--hook did not deny: out=%q err=%q", out.String(), errOut.String())
 	}
 }
