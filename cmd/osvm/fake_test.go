@@ -22,6 +22,7 @@ type fakeCloud struct {
 	fail     map[string]int
 	calls    map[string]int
 	services []string
+	failNth  map[string]int    // key -> the one call number that fails
 	garbled  map[string]string // key -> body that lists fine but does not decode
 	denyAuth bool
 	nets     string
@@ -41,7 +42,7 @@ const (
 func newFake(t *testing.T) *fakeCloud {
 	t.Helper()
 	f := &fakeCloud{
-		fail: map[string]int{}, calls: map[string]int{}, garbled: map[string]string{},
+		fail: map[string]int{}, calls: map[string]int{}, garbled: map[string]string{}, failNth: map[string]int{},
 		services: []string{"compute", "network", "image", "identity"},
 		nets:     netsOne, flavors: flavorsOK, images: imagesOK,
 	}
@@ -86,7 +87,7 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 	n := f.calls[key]
 	limit, failing := f.fail[key]
 	f.mu.Unlock()
-	if failing && n > limit {
+	if failing && n > limit || f.failNth[key] == n {
 		http.Error(w, `{"error":"boom"}`, 500)
 		return
 	}
@@ -342,7 +343,16 @@ func TestCreateEachCallFails(t *testing.T) {
 	}
 }
 
-var undecodable = map[string]string{
+func TestWaitFailureIsRefusedEvenIfTheNextReadWorks(t *testing.T) {
+	f := newFake(t)
+	f.failNth["GET /compute/v2.1/servers/s1"] = 1
+	out, err := run(createArgs...)
+	if err == nil || strings.Contains(out, "server vm id=") {
+		t.Fatalf("a failed wait was reported as success: %v\n%s", err, out)
+	}
+}
+
+var undecodable =map[string]string{
 	"GET /compute/v2.1/servers/detail":  `{"servers":[{"id":5}]}`,
 	"GET /network/v2.0/networks":        `{"networks":[{"id":5}]}`,
 	"GET /network/v2.0/subnets":         `{"subnets":[{"id":5}]}`,
@@ -358,9 +368,11 @@ func TestInventoryUndecodableReplies(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			f := newFake(t)
 			f.garbled[key] = body
-			if _, err := run(cloudArg, "inventory"); err == nil {
+			_, err := run(cloudArg, "inventory")
+			if err == nil {
 				t.Fatal("undecodable reply accepted")
 			}
+			t.Logf("refused with: %v", err)
 		})
 	}
 }

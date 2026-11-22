@@ -39,6 +39,7 @@ import (
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/rules"
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/networks"
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/subnets"
+	"github.com/gophercloud/gophercloud/v2/pagination"
 	"github.com/gophercloud/utils/v2/openstack/clientconfig"
 	"github.com/spf13/cobra"
 )
@@ -247,6 +248,15 @@ func projectName(pc *gophercloud.ProviderClient) string {
 	return "unknown"
 }
 
+// collect reads every page of a listing and decodes it.
+func collect[T any](ctx context.Context, p pagination.Pager, extract func(pagination.Page) ([]T, error)) ([]T, error) {
+	pg, err := p.AllPages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return extract(pg)
+}
+
 func inventory(ctx context.Context, cloud string, w io.Writer) error {
 	c, err := connect(ctx, cloud)
 	if err != nil {
@@ -254,11 +264,7 @@ func inventory(ctx context.Context, cloud string, w io.Writer) error {
 	}
 	fmt.Fprintln(w, "project:", projectName(c.provider))
 
-	sp, err := servers.List(c.compute, servers.ListOpts{}).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	ss, err := servers.ExtractServers(sp)
+	ss, err := collect(ctx, servers.List(c.compute, servers.ListOpts{}), servers.ExtractServers)
 	if err != nil {
 		return err
 	}
@@ -276,77 +282,49 @@ func inventory(ctx context.Context, cloud string, w io.Writer) error {
 		fmt.Fprintf(w, "server %s id=%s status=%s keypair=%s addrs=%s\n", s.Name, s.ID, s.Status, s.KeyName, strings.Join(addrs, ","))
 	}
 
-	np, err := networks.List(c.network, networks.ListOpts{}).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	ns, err := networks.ExtractNetworks(np)
+	ns, err := collect(ctx, networks.List(c.network, networks.ListOpts{}), networks.ExtractNetworks)
 	if err != nil {
 		return err
 	}
 	for _, n := range ns {
 		fmt.Fprintf(w, "network %s id=%s external=%v shared=%v subnets=%d\n", n.Name, n.ID, false, n.Shared, len(n.Subnets))
 	}
-	sbp, err := subnets.List(c.network, subnets.ListOpts{}).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	sbs, err := subnets.ExtractSubnets(sbp)
+	sbs, err := collect(ctx, subnets.List(c.network, subnets.ListOpts{}), subnets.ExtractSubnets)
 	if err != nil {
 		return err
 	}
 	for _, s := range sbs {
 		fmt.Fprintf(w, "subnet %s cidr=%s net=%s dhcp=%v\n", s.Name, s.CIDR, s.NetworkID, s.EnableDHCP)
 	}
-	fp, err := floatingips.List(c.network, floatingips.ListOpts{}).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	fs, err := floatingips.ExtractFloatingIPs(fp)
+	fs, err := collect(ctx, floatingips.List(c.network, floatingips.ListOpts{}), floatingips.ExtractFloatingIPs)
 	if err != nil {
 		return err
 	}
 	for _, f := range fs {
 		fmt.Fprintf(w, "floatingip %s fixed=%s status=%s\n", f.FloatingIP, f.FixedIP, f.Status)
 	}
-	kp, err := keypairs.List(c.compute, nil).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	ks, err := keypairs.ExtractKeyPairs(kp)
+	ks, err := collect(ctx, keypairs.List(c.compute, nil), keypairs.ExtractKeyPairs)
 	if err != nil {
 		return err
 	}
 	for _, k := range ks {
 		fmt.Fprintf(w, "keypair %s fingerprint=%s\n", k.Name, k.Fingerprint)
 	}
-	gp, err := groups.List(c.network, groups.ListOpts{}).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	gs, err := groups.ExtractGroups(gp)
+	gs, err := collect(ctx, groups.List(c.network, groups.ListOpts{}), groups.ExtractGroups)
 	if err != nil {
 		return err
 	}
 	for _, g := range gs {
 		fmt.Fprintf(w, "secgroup %s id=%s rules=%d\n", g.Name, g.ID, len(g.Rules))
 	}
-	flp, err := flavors.ListDetail(c.compute, nil).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	fl, err := flavors.ExtractFlavors(flp)
+	fl, err := collect(ctx, flavors.ListDetail(c.compute, nil), flavors.ExtractFlavors)
 	if err != nil {
 		return err
 	}
 	for _, f := range fl {
 		fmt.Fprintf(w, "flavor %s vcpus=%d ram=%d disk=%d\n", f.Name, f.VCPUs, f.RAM, f.Disk)
 	}
-	ip, err := images.List(c.image, images.ListOpts{}).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	is, err := images.ExtractImages(ip)
+	is, err := collect(ctx, images.List(c.image, images.ListOpts{}), images.ExtractImages)
 	if err != nil {
 		return err
 	}
@@ -363,19 +341,11 @@ func create(ctx context.Context, cloud string, o createOpts, w io.Writer) error 
 	}
 	fmt.Fprintln(w, "project:", projectName(c.provider))
 
-	np, err := networks.List(c.network, networks.ListOpts{Name: o.Network}).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	ns, err := networks.ExtractNetworks(np)
+	ns, err := collect(ctx, networks.List(c.network, networks.ListOpts{Name: o.Network}), networks.ExtractNetworks)
 	if err != nil || len(ns) != 1 {
 		return fmt.Errorf("network %q: want exactly one, got %d (%v)", o.Network, len(ns), err)
 	}
-	flp, err := flavors.ListDetail(c.compute, nil).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	fl, err := flavors.ExtractFlavors(flp)
+	fl, err := collect(ctx, flavors.ListDetail(c.compute, nil), flavors.ExtractFlavors)
 	if err != nil {
 		return err
 	}
@@ -383,11 +353,7 @@ func create(ctx context.Context, cloud string, o createOpts, w io.Writer) error 
 	if err != nil {
 		return err
 	}
-	ip, err := images.List(c.image, images.ListOpts{}).AllPages(ctx)
-	if err != nil {
-		return err
-	}
-	is, err := images.ExtractImages(ip)
+	is, err := collect(ctx, images.List(c.image, images.ListOpts{}), images.ExtractImages)
 	if err != nil {
 		return err
 	}
