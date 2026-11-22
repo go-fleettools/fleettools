@@ -260,6 +260,10 @@ func hasGoSource(dir string) (bool, error) {
 	return found, err
 }
 
+// sourceOf is replaceable by tests: findModules walks the same tree first, so a
+// real filesystem cannot make hasGoSource fail after it succeeded.
+var sourceOf = hasGoSource
+
 // hugoConfigNames are the files that make a directory a Hugo site.
 //
 // ⛔ The presence of one is REPORTED, never what decides. Hugo mounts a theme
@@ -338,7 +342,7 @@ func check(ctx context.Context, root string) ([]result, error) {
 	for _, m := range mods {
 		rel, _ := filepath.Rel(root, m)
 		r := result{dir: rel, abs: m}
-		src, serr := hasGoSource(m)
+		src, serr := sourceOf(m)
 		switch {
 		case serr != nil:
 			r.state, r.text = unread, serr.Error()
