@@ -53,8 +53,13 @@ type jsonRecurrence struct {
 type jsonLedger struct {
 	// Decision is gate, pending, no-gate, untriaged (backlog), none (no entry),
 	// or unknown (a state word this binary does not know).
-	Decision    string         `json:"decision"`
-	Text        string         `json:"text"`
+	Decision string `json:"decision"`
+	Text     string `json:"text"`
+	// Entry is the id --replaces must carry to replace this entry. ⛔ It is not
+	// Fingerprint: that one is the MEMORY's, shared by every session deciding
+	// about the same memory, so two sessions' different decisions carry the same
+	// Fingerprint and different Entry ids. Empty when there is no entry.
+	Entry       string         `json:"entry"`
 	WrittenAt   *string        `json:"writtenAt"`
 	Fingerprint string         `json:"fingerprint"`
 	Downgrade   *jsonDowngrade `json:"downgrade,omitempty"`
@@ -147,7 +152,7 @@ func jsonReport(out, errOut io.Writer, dir string, known map[string]entry) int {
 			if dec == "" {
 				dec = "unknown"
 			}
-			l.Ledger = jsonLedger{Decision: dec, Text: e.detail, Fingerprint: e.mark}
+			l.Ledger = jsonLedger{Decision: dec, Text: e.detail, Entry: entryID(e), Fingerprint: e.mark}
 			if e.when != "" {
 				w := e.when
 				l.Ledger.WrittenAt = &w

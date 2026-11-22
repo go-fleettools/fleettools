@@ -116,6 +116,16 @@ var goTest = func(args []string, out io.Writer) (int, error) {
 	return 0, nil
 }
 
+// loadCheck is the seam for the load gate, for exactly the reason goTest is one:
+// what this command DECIDES about a busy machine cannot be tested by waiting for
+// the machine to be busy.
+//
+// ⛔ Its refusal path was a mutation SURVIVOR until this existed, and no test
+// could have been written without it: on a loaded machine a test asserting the
+// refusal passes, and the same test on an idle CI runner asserts the opposite.
+// A guard whose verdict depends on the host is a guard nothing holds.
+var loadCheck = loadgate.Check
+
 func asExitError(err error, target **exec.ExitError) bool {
 	if ee, ok := err.(*exec.ExitError); ok {
 		*target = ee
@@ -152,7 +162,7 @@ func gotest(cmd *cobra.Command, args []string) error {
 	// everyone to go around it.
 	why, benchesWanted := benchRequested(args)
 	if benchesWanted {
-		load, err := loadgate.Check(why)
+		load, err := loadCheck(why)
 		if err != nil {
 			fmt.Fprintln(stderr, "gotest:", err)
 			return cli.Unanswerable("a benchmark taken here measures the machine. " +
@@ -224,6 +234,39 @@ func gotest(cmd *cobra.Command, args []string) error {
 	if benchesWanted {
 		return cli.FromStatus(status)
 	}
+	// ⛔⛔ A RUN THAT NEVER GOT TO SELECTING IS NOT AN EMPTY SELECTION, and the
+	// sentence below then names an `ok` that was never printed. Measured
+	// 2026-11-22 in this repository:
+	//
+	//	$ gotest -run TestJSONGolden -update ./cmd/recur
+	//	# .
+	//	no Go files in …/go-fleettools-fleettools-recur343
+	//	FAIL	. [setup failed]
+	//	gotest: -run TestJSONGolden selected NO test at all — `ok` above is about nothing
+	//
+	// `go test` exited 1 before compiling anything: cmd/go wants the package list
+	// BEFORE the first test-binary flag (`go help test`), so `./cmd/recur` written
+	// after an unknown `-update` is an argument for the binary and the package
+	// defaulted to `.`, which holds no Go file. Control, same tree, three forms:
+	// `-update ./cmd/recur` and `-update=true ./cmd/recur` both fail that way,
+	// `./cmd/recur -update=true` passes — so it is the ORDER, not a swallowed
+	// value, and nothing about the pattern.
+	//
+	// ⛔ This command exists because `ok` is about what RAN. Pointing at an `ok`
+	// that is not there is the same defect, committed by the gate: the cause was
+	// three lines up, in the output, and the verdict invented another one.
+	//
+	// TestAFailingRunKeepsItsStatus already held the other half — a failure where
+	// a test DID run is not reported as a selection problem — and this half,
+	// where none ran, was the hole.
+	//
+	// ⚠ The verdict is told apart rather than dropped: the status is `go test`'s,
+	// and the sentence says the selection was NOT checked rather than that it was
+	// empty. Zero tests after a FAILED run says nothing about the pattern.
+	if len(ran) == 0 && status != 0 {
+		fmt.Fprintf(stderr, "gotest: go test FAILED before any test ran, so -run %s was never checked — the cause is in its output above, not here\n", pattern)
+		return cli.FromStatus(status)
+	}
 	if len(ran) == 0 {
 		fmt.Fprintf(stderr, "gotest: -run %s selected NO test at all — `ok` above is about nothing\n", pattern)
 		return cli.Found("no test ran")
@@ -239,7 +282,10 @@ func gotest(cmd *cobra.Command, args []string) error {
 		for _, m := range missed {
 			fmt.Fprintf(stderr, "  %s\n", m)
 		}
-		fmt.Fprintf(stderr, "gotest: %d test(s) did run, which is why `go test` said nothing\n", len(ran))
+		// ⚠ Not "which is why `go test` said nothing": `go test` may well have
+		// failed for its own reasons on this very run. What is true either way is
+		// WHY it never warned — it warns only when the selection is WHOLLY empty.
+		fmt.Fprintf(stderr, "gotest: %d test(s) did run, so the selection was not empty — `go test` warns only when NOTHING matched\n", len(ran))
 		return cli.Found("an alternative matched no test")
 	}
 	return cli.FromStatus(status)

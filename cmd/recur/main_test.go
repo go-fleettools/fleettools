@@ -38,6 +38,22 @@ func ledger(t *testing.T, dir string) string {
 	return string(b)
 }
 
+// entryIDOf is the id --replaces must carry for one lesson, read from the entry
+// that is there — the way an operator reads it out of the report or out of a
+// refusal, and never composed from the parts of a line.
+func entryIDOf(t *testing.T, dir, lesson string) string {
+	t.Helper()
+	known, err := readLedger(filepath.Join(dir, ledgerName))
+	if err != nil {
+		t.Fatalf("reading the ledger: %v", err)
+	}
+	e, ok := known[lesson]
+	if !ok {
+		t.Fatalf("no entry for %s in %q", lesson, ledger(t, dir))
+	}
+	return entryID(e)
+}
+
 // The words a memory already uses when the same mistake happens again. These
 // are the sentences this command exists to read, in the languages the corpus is
 // written in.
@@ -512,7 +528,8 @@ func TestReplacingAnEntryPrintsTheOneThatIsThere(t *testing.T) {
 	if code, out, _ := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/first"); code != 0 {
 		t.Fatalf("first accept: %d\n%s", code, out)
 	}
-	code, out, _ := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/second")
+	code, out, _ := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/second",
+		"--replaces", entryIDOf(t, dir, "lesson"))
 	if code != 0 {
 		t.Fatalf("a gate replaced by another gate must be allowed: %d\n%s", code, out)
 	}
@@ -534,7 +551,8 @@ func TestALandedGateIsNotSilentlyDowngraded(t *testing.T) {
 		t.Fatalf("first accept: %d\n%s", code, out)
 	}
 	for _, weaker := range [][]string{{"--gate-pending", "somewhere"}, {"--no-gate", "cannot"}} {
-		args := append([]string{"--memory", dir, "--accept", "lesson"}, weaker...)
+		args := append([]string{"--memory", dir, "--accept", "lesson",
+			"--replaces", entryIDOf(t, dir, "lesson")}, weaker...)
 		code, _, errOut := drive(t, args...)
 		if code != 2 {
 			t.Errorf("%s over a landed gate: code %d, want 2", weaker[0], code)
@@ -554,7 +572,8 @@ func TestADowngradeWithItsReasonIsAllowedAndStamped(t *testing.T) {
 	dir := mem(t, map[string]string{"lesson.md": "Troisième récidive."})
 	drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/landed")
 	code, out, errOut := drive(t, "--memory", dir, "--accept", "lesson",
-		"--gate-pending", "rewritten, not landed", "--downgrade", "the gate passed on a race")
+		"--gate-pending", "rewritten, not landed", "--downgrade", "the gate passed on a race",
+		"--replaces", entryIDOf(t, dir, "lesson"))
 	if code != 0 {
 		t.Fatalf("a stated downgrade must be allowed: %d\n%s\n%s", code, out, errOut)
 	}
@@ -574,11 +593,126 @@ func TestADowngradeWithItsReasonIsAllowedAndStamped(t *testing.T) {
 func TestPendingAndNoGateReplaceEachOtherFreely(t *testing.T) {
 	dir := mem(t, map[string]string{"lesson.md": "Deuxième occurrence."})
 	drive(t, "--memory", dir, "--accept", "lesson", "--gate-pending", "over there")
-	if code, _, errOut := drive(t, "--memory", dir, "--accept", "lesson", "--no-gate", "none can exist"); code != 0 {
+	if code, _, errOut := drive(t, "--memory", dir, "--accept", "lesson", "--no-gate", "none can exist",
+		"--replaces", entryIDOf(t, dir, "lesson")); code != 0 {
 		t.Errorf("pending → no-gate: code %d, %q", code, errOut)
 	}
-	if code, _, errOut := drive(t, "--memory", dir, "--accept", "lesson", "--gate-pending", "back again"); code != 0 {
+	if code, _, errOut := drive(t, "--memory", dir, "--accept", "lesson", "--gate-pending", "back again",
+		"--replaces", entryIDOf(t, dir, "lesson")); code != 0 {
 		t.Errorf("no-gate → pending: code %d, %q", code, errOut)
+	}
+}
+
+// ⛔⛔ #343, THE LOST UPDATE. Printing the displaced entry made the replacement
+// visible to whoever was watching; the session being overwritten is not
+// watching. Nothing may be written over an entry the caller has not named.
+func TestReplacingAnEntryNobodyNamedIsRefusedAndWritesNothing(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Troisième récidive."})
+	if code, out, _ := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/first"); code != 0 {
+		t.Fatalf("a FIRST entry needs no id: %d\n%s", code, out)
+	}
+	id := entryIDOf(t, dir, "lesson")
+
+	code, out, errOut := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/second")
+	if code != 2 {
+		t.Fatalf("code %d, want 2\n%s\n%s", code, out, errOut)
+	}
+	// The refusal hands back the way through, filled in: the honest case must
+	// not be harder than the dishonest one.
+	if !strings.Contains(errOut, "--replaces "+id) {
+		t.Errorf("the refusal does not carry the id ready to paste (%s):\n%s", id, errOut)
+	}
+	// ⛔ And it says WHICH way the id failed. "You named the wrong entry" sends
+	// the reader to the entry above; "you named none" sends them to the report.
+	// Telling the two apart is held here, because a single sentence for both
+	// reads as a mystery in the one case and as a lie in the other.
+	if !strings.Contains(errOut, "--replaces was not given") {
+		t.Errorf("the refusal does not say the id was missing rather than wrong:\n%s", errOut)
+	}
+	if strings.Contains(errOut, "not the one that is there") {
+		t.Errorf("a missing id was reported as a wrong one:\n%s", errOut)
+	}
+	// ⛔ And the ledger is untouched. A refusal that had already written would
+	// be the defect with a message on top.
+	if l := ledger(t, dir); !strings.Contains(l, "cmd/first") || strings.Contains(l, "cmd/second") {
+		t.Errorf("the refused write changed the ledger: %q", l)
+	}
+
+	if code, out, errOut := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/second",
+		"--replaces", id); code != 0 {
+		t.Fatalf("naming the entry that is there must be allowed: %d\n%s\n%s", code, out, errOut)
+	}
+	if l := ledger(t, dir); !strings.Contains(l, "cmd/second") {
+		t.Errorf("the named replacement did not land: %q", l)
+	}
+}
+
+// ⛔⛔ THE CONTROL ON THE IDENTIFIER. #343 assumed `state@mark` already
+// identified an entry. It does not: `mark` is the fingerprint of the MEMORY, so
+// two sessions deciding differently about the same memory share it — which is
+// the occurrence that issue opens with (three accounts in thirty seconds, two
+// decisions lost). This asserts the two ids DIFFER, which is the whole reason
+// the decision text is in the identifier.
+func TestTwoDecisionsAboutOneMemoryDoNotShareAnID(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Deuxième occurrence."})
+	drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/mine")
+	known, err := readLedger(filepath.Join(dir, ledgerName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine := known["lesson"]
+	theirs := mine
+	theirs.detail = "cmd/theirs"
+	if entryID(mine) == entryID(theirs) {
+		t.Fatalf("two different decisions about the same memory share the id %s: a compare-and-swap on it would allow a lost update", entryID(mine))
+	}
+	if mine.mark != theirs.mark {
+		t.Fatal("the fixture is wrong: both entries must carry the SAME memory fingerprint, which is the point")
+	}
+	// And the id a stale caller holds is refused rather than overwritten.
+	code, _, errOut := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/theirs",
+		"--replaces", entryID(theirs))
+	if code != 2 || !strings.Contains(errOut, "not the one that is there") {
+		t.Errorf("a stale id: code %d, %q", code, errOut)
+	}
+	if l := ledger(t, dir); !strings.Contains(l, "cmd/mine") {
+		t.Errorf("a refused stale write changed the ledger: %q", l)
+	}
+}
+
+func TestAnIDWithNothingToReplaceIsRefused(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Troisième récidive."})
+	code, _, errOut := drive(t, "--memory", dir, "--accept", "lesson",
+		"--gate", "cmd/x", "--replaces", "abc123abc123")
+	if code != 2 || !strings.Contains(errOut, "no entry to replace") {
+		t.Errorf("code %d, %q", code, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ledgerName)); err == nil {
+		t.Error("a refused first write created a ledger")
+	}
+}
+
+// The id has to be readable where the decision is read, or every replacement
+// learns it from the refusal of a command already composed.
+func TestTheReportPrintsTheEntryIDBesideTheDecision(t *testing.T) {
+	dir := mem(t, map[string]string{"lesson.md": "Deuxième fois."})
+	drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/landed")
+	id := entryIDOf(t, dir, "lesson")
+	// A third occurrence moves the memory's fingerprint, so the gate fires
+	// again — the honest case this must not make harder.
+	if err := os.WriteFile(filepath.Join(dir, "lesson.md"),
+		[]byte("Deuxième fois.\nEt troisième récidive."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, _ := drive(t, "--memory", dir)
+	if code != 1 {
+		t.Fatalf("the gate must fire again: code %d\n%s", code, out)
+	}
+	if !strings.Contains(out, "entry "+id) {
+		t.Errorf("the report does not print the id %s to replace:\n%s", id, out)
+	}
+	if !strings.Contains(out, "--replaces") {
+		t.Errorf("the report does not say an existing entry needs --replaces:\n%s", out)
 	}
 }
 
@@ -632,7 +766,8 @@ func TestAnEntryWrittenBeforeTheStampSaysSo(t *testing.T) {
 		[]byte("- lesson — gate@deadbeef: cmd/old\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	code, out, _ := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/new")
+	code, out, _ := drive(t, "--memory", dir, "--accept", "lesson", "--gate", "cmd/new",
+		"--replaces", entryIDOf(t, dir, "lesson"))
 	if code != 0 {
 		t.Fatalf("code %d\n%s", code, out)
 	}

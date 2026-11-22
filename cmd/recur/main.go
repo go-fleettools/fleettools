@@ -106,7 +106,18 @@ decision already made about them.
 twenty-five sessions share a memory directory, so the entry you read a minute
 ago may not be the entry that is there now. Every replacement therefore PRINTS
 the entry it is about to overwrite — its decision, its fingerprint, the instant
-it was written and its reason — before writing, not after.
+it was written, its id and its reason — before writing, not after.
+
+⛔⛔ AND PRINTING IS NOT ENOUGH, so replacing an entry REQUIRES --replaces <id>:
+the id of the entry that is there now, which the report prints beside its
+decision and which any refusal prints ready to paste. An id that is no longer
+the one on the line is refused, and nothing is written. Printing made the
+replacement visible to whoever was watching; the session being overwritten is
+not watching, and its reasoning then exists in one transcript and nowhere else.
+Three sessions accounted one lesson within thirty seconds on 2026-11-17 and two
+decisions had to be merged back by hand. The refusal is deliberately not work:
+it hands back the same command with the id filled in, so the only thing it
+costs is reading what you are about to displace.
 
 And a landed --gate may not become --gate-pending or --no-gate without
 --downgrade '<why>', which is written into the ledger beside the new decision.
@@ -199,6 +210,8 @@ func RootCmd() *cobra.Command {
 		"why no gate can exist for this one; the reason is written into the ledger, dated")
 	c.Flags().StringVar(&o.downgrade, "downgrade", "",
 		"why a landed `gate` may be replaced by a weaker decision; the reason is written into the ledger beside it (required to replace a gate with --gate-pending or --no-gate)")
+	c.Flags().StringVar(&o.replaces, "replaces", "",
+		"the id of the entry this replaces, as the report and the refusal print it: required whenever a lesson already has one, and refused when it names an entry that is no longer there")
 	c.Flags().BoolVar(&o.seed, "seed", false,
 		"write everything known right now as untriaged backlog, so the gate starts clean")
 	c.Flags().BoolVar(&o.hook, "hook", false,
@@ -636,6 +649,7 @@ type opts struct {
 	pending   string
 	noGate    string
 	downgrade string
+	replaces  string
 	seed      bool
 	hook      bool
 	json      bool
@@ -795,8 +809,11 @@ func triage(known map[string]entry, found []recorded) (open []finding, backlog, 
 			// silently treated as current.
 			unmarked++
 		case e.mark != r.mark:
+			// ⛔ The entry's id is printed HERE, where the decision is read,
+			// because --replaces needs it and the alternative is learning it
+			// from the refusal of a command one has already composed.
 			open = append(open, finding{r.lesson, fmt.Sprintf(
-				"recorded a NEW recurrence since it was accounted for (%s: %s)", e.state, e.detail)})
+				"recorded a NEW recurrence since it was accounted for (%s, entry %s: %s)", e.state, entryID(e), e.detail)})
 			continue
 		}
 		if e.state == "backlog" {
@@ -811,6 +828,39 @@ func triage(known map[string]entry, found []recorded) (open []finding, backlog, 
 // typo or a word written by a newer version, and either way it is not a
 // decision this binary can act on.
 var states = map[string]bool{"gate": true, "pending": true, "no-gate": true, "backlog": true}
+
+// entryID identifies ONE ENTRY: its state word, the memory fingerprint it was
+// taken against, the instant it was written and the decision text itself. It is
+// what --replaces names, and it is not stored — it is computed from the line
+// that is there, so a ledger edited by any version answers it.
+//
+// ⛔⛔ NOT `state@mark`, which is what #343 assumed was already a per-entry
+// identifier. `mark` is the fingerprint of the MEMORY's recurrence sentences
+// (markOf), so every session accounting the same memory computes the SAME one —
+// which is precisely the occurrence that issue opens with: three sessions
+// accounted `my-sweeps-starve-renovate` within thirty seconds, two entries were
+// lost, and all three had the same state and the same mark. A compare-and-swap
+// on `state@mark` would have allowed every one of them. The decision text is
+// what differs between two sessions' entries, so the decision text has to be in
+// the identifier.
+//
+// Two entries identical in all four fields have the same id and replace each
+// other silently: they say the same thing at the same instant about the same
+// memory, so nothing is displaced.
+// mismatch says which way --replaces failed, because "you named the wrong
+// entry" and "you named none" send the reader to different places: the first to
+// the entry above, the second to the report.
+func mismatch(given string) string {
+	if given == "" {
+		return "--replaces was not given"
+	}
+	return fmt.Sprintf("--replaces %s names an entry that is not the one that is there", given)
+}
+
+func entryID(e entry) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{e.state, e.mark, e.when, e.detail}, "\x00")))
+	return hex.EncodeToString(sum[:6])
+}
 
 // entry is one ledger line: a lesson, and what was decided about it.
 type entry struct {
@@ -913,6 +963,7 @@ func check(out, errOut io.Writer, o opts) int {
 	}
 	if len(open) > 0 {
 		fmt.Fprintf(out, "account for each: recur --memory %s --accept <lesson> --gate <what> | --gate-pending <where it is> | --no-gate '<why>'\n", o.memory)
+		fmt.Fprintln(out, "a lesson that already has an entry needs --replaces <entry>, the id printed with its decision above: the ledger keeps one entry per lesson and about twenty-five sessions share it")
 		return 1
 	}
 	return 0
@@ -972,10 +1023,48 @@ func accept(out, errOut io.Writer, path string, known map[string]entry, found []
 		if when == "" {
 			when = "not recorded — written before recur stamped the instant"
 		}
-		fmt.Fprintf(out, "replacing the entry that is there:\n  %s %s\n  written %s\n  %s\n",
-			prev.state, prev.mark, when, prev.detail)
+		fmt.Fprintf(out, "replacing the entry that is there:\n  %s %s\n  written %s\n  entry %s\n  %s\n",
+			prev.state, prev.mark, when, entryID(prev), prev.detail)
 
-		// The ONE refusal. A `gate` becoming anything else is a strict loss of
+		// ⛔⛔ COMPARE AND SWAP (#343). Printing what is about to be overwritten
+		// made the replacement VISIBLE to whoever was watching; it did not make
+		// it SAFE. ~25 sessions share this file, so the entry read a minute ago
+		// may not be the entry that is there now, and the session being
+		// overwritten is not watching. Measured twice on 2026-11-17: three
+		// sessions accounted one lesson within thirty seconds and two entries
+		// had to be merged back by hand; and one session's published --downgrade
+		// reason survived only because the other party happened to mention it in
+		// a message. A fourth loss happened on 2026-11-22, inside this very
+		// command: a session accounting a recurrence replaced a `pending` entry
+		// that already named the gate another session had designed five days
+		// earlier, and read that it had done so only in the receipt.
+		//
+		// ⛔ The constraint the issue states, and it decides the shape: this must
+		// not make the HONEST case harder than the dishonest one. The honest case
+		// is improving a memory after accounting it, which moves the fingerprint
+		// and re-fires the gate correctly. So the refusal is not work: it prints
+		// the whole entry, its id, and the same command with --replaces filled
+		// in, ready to run again. One paste, and the operator has READ what they
+		// are displacing — which is the only thing that was missing.
+		//
+		// ⛔ Written as a plain `if` over a hoisted id, and the two guards below
+		// as plain `if`s inside an `else`, because `mutate` reports neither an
+		// `if` carrying an init statement nor an `else if` as a refusal: the
+		// first shape of this guard was `if id := entryID(prev); o.replaces !=
+		// id`, and mutsweep swept 61 refusals of this package without ever
+		// mutating it. A guard a sweep cannot see is a guard the sweep says
+		// nothing about, and its report would have read as 15 pre-existing
+		// survivors and a clean new one.
+		if o.replaces != entryID(prev) {
+			fmt.Fprintf(errOut, `recur: %s, so this would overwrite the entry above without having read it.
+The ledger keeps ONE entry per lesson and about twenty-five sessions share it.
+Read that decision, fold anything worth keeping into yours, and run it again with the id:
+  --replaces %s
+`, mismatch(o.replaces), entryID(prev))
+			return 2
+		}
+
+		// The ONE refusal about DIRECTION. A `gate` becoming anything else is a strict loss of
 		// information, which needs no judgement about which text is better —
 		// unlike a gate replaced by another gate, which may be an improvement
 		// or a regression and is nobody's to decide here. So that one is
@@ -989,10 +1078,21 @@ func accept(out, errOut io.Writer, path string, known map[string]entry, found []
 		if o.downgrade != "" {
 			e.detail += " ⛔ DOWNGRADED from " + prev.state + ": " + o.downgrade
 		}
-	} else if o.downgrade != "" {
-		// A reason for replacing something that is not there describes nothing.
-		fmt.Fprintf(errOut, "recur: --downgrade was given but %s has no entry to replace\n", o.accept)
-		return 2
+	} else {
+		if o.downgrade != "" {
+			// A reason for replacing something that is not there describes
+			// nothing.
+			fmt.Fprintf(errOut, "recur: --downgrade was given but %s has no entry to replace\n", o.accept)
+			return 2
+		}
+		// ⛔ And neither does an id for something that is not there — said rather
+		// than ignored, because the usual cause is a lesson name that does not
+		// match the one whose entry was read, and silently writing a FIRST entry
+		// under a near-miss name leaves the real one still firing.
+		if o.replaces != "" {
+			fmt.Fprintf(errOut, "recur: --replaces %s was given but %s has no entry to replace; check the lesson name against the ledger\n", o.replaces, o.accept)
+			return 2
+		}
 	}
 	e.when = clock().UTC().Format(time.RFC3339)
 	known[o.accept] = e
