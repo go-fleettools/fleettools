@@ -1,0 +1,4 @@
+go test fuzz v1
+string("\x000")
+bool(false)
+bool(false)

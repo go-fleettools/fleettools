@@ -11,10 +11,11 @@
 //     resolve(s|d); a bare #N means the PR's own repository, another one needs
 //     owner/name#N; the PR must target the default branch for the link to exist.
 //
-// Classes: CLOSABLE (merged PR with a closing keyword, or a "connected" event)
-// and REVIEW (merged PR mentioned it without one, or the issue was reopened
-// after the merge). Issues whose referencing PRs are all unmerged are not
-// listed. Dry run by default; --close closes only CLOSABLE ones.
+// Classes: CLOSABLE (merged PR with a closing keyword, or a "connected" event),
+// REVIEW (merged PR mentioned it with NO keyword, or the issue was reopened
+// after the merge) and REFS (a merged PR wrote `Refs`, which says it stays open
+// on purpose). Issues whose referencing PRs are all unmerged are not listed.
+// Dry run by default; --close closes only CLOSABLE ones.
 //
 // ⛔ A scan that cannot read must not report zero: every issue found by search
 // is accounted for as read, or skipped with its reason, per owner.
@@ -59,8 +60,19 @@ For each owner it searches open issues (the ones with a closing reference,
   CLOSABLE  a merged PR referenced it with a closing keyword (or the timeline
             says "connected"), yet it is open. Also needs the PR to have
             targeted the default branch, which the timeline does not show.
-  REVIEW    a merged PR mentioned it without a closing keyword, or the issue
-            was reopened after the merge: a person decides.
+  REVIEW    a merged PR mentioned it with NO keyword at all, or the issue was
+            reopened after the merge: a person decides.
+  REFS      a merged PR wrote ` + "`Refs`" + ` (or ` + "`Ref`" + `): the author said it stays open
+            ON PURPOSE, so nobody has to decide. Still listed -- an author can
+            write ` + "`Refs`" + ` and be wrong -- but counted apart, and printed last.
+            ⛔ ` + "`See #N`" + ` is NOT one: the gate's keywords are close/fix/resolve
+            and ref(s), and ` + "`see #12`" + ` is the phrasing it exists to refuse.
+
+⛔ REFS exists because the fleet-wide merge rule made that reference mandatory:
+ghmerge refuses a merge that mentions an issue and says nothing about it, so
+every correctly-classified reference used to become permanent REVIEW output
+(37 of 64 open issues in one organisation). A bucket meaning "a person decides"
+that fills with what a person decided is a bucket nobody reads.
 
 Issues whose referencing PRs are all unmerged are not listed.
 
@@ -69,7 +81,8 @@ timelines read, skipped and why. A scan that could not read is never zero:
 status 2 if anything was skipped.
 
 --close closes only CLOSABLE issues, with a comment naming the PR. Dry run is
-the default. It never closes REVIEW.
+the default. It never closes REVIEW, and never REFS: an author who wrote ` + "`Refs`" + `
+asked for the issue to stay open.
 
 Budget: stops before the REST budget falls under --margin (default 1000) so the
 fleet's Renovate runners are not starved. The search API is paced (30/min).
@@ -145,6 +158,7 @@ type tally struct {
 	read      int
 	skipped   map[string]int // reason → count
 	closable  int
+	stated    int // REFS: an author wrote `Refs`, so it stays open on purpose
 	review    int
 	closed    int
 	closeFail int
@@ -225,17 +239,34 @@ func run(w io.Writer, scopes []scope, doClose bool, margin, maxReads int) error 
 				continue
 			}
 			all = append(all, finding{is, c, prs})
-			if c == Closable {
+			switch c {
+			case Closable:
 				t.closable++
-			} else {
+			case Stated:
+				t.stated++
+			default:
 				t.review++
 			}
 		}
 	}
 
+	// Most urgent first: what can be closed, then what nobody has decided, then
+	// what somebody already decided in writing. REFS last and not first is the
+	// whole point of having the word: the rows a reader must act on are no
+	// longer buried among the rows an author already answered.
+	rank := func(c Class) int {
+		switch c {
+		case Closable:
+			return 0
+		case Review:
+			return 1
+		default:
+			return 2
+		}
+	}
 	sort.SliceStable(all, func(i, j int) bool {
-		if all[i].Class != all[j].Class {
-			return all[i].Class == Closable
+		if ri, rj := rank(all[i].Class), rank(all[j].Class); ri != rj {
+			return ri < rj
 		}
 		return all[i].ref() < all[j].ref()
 	})
@@ -264,11 +295,11 @@ func run(w io.Writer, scopes []scope, doClose bool, margin, maxReads int) error 
 
 	failed, skipped := 0, 0
 	fmt.Fprintln(w, "\nsummary per owner:")
-	var cl, rv int
+	var cl, rv, st int
 	for _, sc := range scopes {
 		t := tallies[sc.name]
-		fmt.Fprintf(w, "  %-22s searched %d, listed %d, timelines read %d, skipped %d | CLOSABLE %d, REVIEW %d",
-			sc.name, t.reported, t.listed, t.read, t.skippedTotal(), t.closable, t.review)
+		fmt.Fprintf(w, "  %-22s searched %d, listed %d, timelines read %d, skipped %d | CLOSABLE %d, REVIEW %d, REFS %d",
+			sc.name, t.reported, t.listed, t.read, t.skippedTotal(), t.closable, t.review, t.stated)
 		if doClose {
 			fmt.Fprintf(w, " | closed %d, failed %d", t.closed, t.closeFail)
 		}
@@ -281,10 +312,10 @@ func run(w io.Writer, scopes []scope, doClose bool, margin, maxReads int) error 
 		for _, r := range reasons {
 			fmt.Fprintf(w, "      skipped %d: %s\n", t.skipped[r], r)
 		}
-		cl, rv = cl+t.closable, rv+t.review
+		cl, rv, st = cl+t.closable, rv+t.review, st+t.stated
 		failed, skipped = failed+t.closeFail, skipped+t.skippedTotal()
 	}
-	fmt.Fprintf(w, "total: CLOSABLE %d, REVIEW %d\n", cl, rv)
+	fmt.Fprintf(w, "total: CLOSABLE %d, REVIEW %d, REFS %d\n", cl, rv, st)
 	if left, ok := fleet.BudgetLeft(); ok {
 		fmt.Fprintf(w, "budget: about %d REST calls left (margin %d)\n", left, margin)
 	}
