@@ -41,6 +41,7 @@ func TestTypedAgentModel(t *testing.T) {
 	writeAgent(t, home, "checker.md", def("checker", "haiku"))
 	writeAgent(t, home, "implementer.md", def("implementer", "sonnet"))
 	writeAgent(t, home, "reviewer.md", def("reviewer", "opus"))
+	writeAgent(t, home, "security.md", def("security", "fable"))
 	writeAgent(t, home, "nomodel.md", def("nomodel", ""))
 	writeAgent(t, home, "inherit.md", def("inherit", "inherit"))
 	writeAgent(t, home, "broken.md", "no frontmatter at all\nmodel: haiku\n")
@@ -72,6 +73,8 @@ func TestTypedAgentModel(t *testing.T) {
 		{"checker, no model, accepted", "Check the lanes", "checker", "", home, false, nil},
 		{"implementer on implement", "Fix the parser", "implementer", "", home, false, nil},
 		{"reviewer on review", "Review PR 5", "reviewer", "", home, false, nil},
+		{"security agent (fable) on a security review", "Security review of the parser", "security", "", home, false, nil},
+		{"security agent (fable) on an implement task is refused", "Fix the parser", "security", "", home, true, []string{"class implement", `"sonnet"`, "(from agent security)"}},
 		{"reviewer-class task on a haiku agent is refused", "Review PR 5", "checker", "", home, true, []string{"class review", `"opus"`, `(from agent checker)`}},
 		{"implement task on a haiku agent is refused", "Fix the parser", "checker", "", home, true, []string{"class implement", `"sonnet"`}},
 		{"unclassified task accepts any resolved model", "turnd: host handover", "checker", "", home, false, nil},

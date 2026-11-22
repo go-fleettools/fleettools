@@ -59,7 +59,7 @@ import (
 // A class is a kind of task and the model family that should run it.
 type class struct {
 	name   string
-	model  string   // the expected family: haiku, sonnet or opus
+	model  string   // the expected family: haiku, sonnet, opus or fable
 	phrase []string // words or space-separated phrases, lower case
 }
 
@@ -80,6 +80,11 @@ var classes = []class{
 	{"check", "haiku", []string{
 		"check", "verify", "inventory", "list", "find", "search", "read",
 		"count", "fetch", "survey", "wait",
+	}},
+	{"security", "fable", []string{
+		"security", "sécurité", "securite", "vulnerability", "vulnerabilities",
+		"vuln", "cve", "exploit", "exploits", "threat", "threat-model", "pentest",
+		"attack-surface", "attack surface",
 	}},
 }
 
@@ -297,7 +302,8 @@ model, checked exactly as if passed explicitly; an explicit model wins.
 
 FABLE (claude-fable-*) is the tier above opus: on an opus-class task it is
 refused unless a model-waiver line states why opus is not enough; on a sonnet or
-haiku class it is refused like opus.
+haiku class it is refused like opus. The security class is the one class that
+EXPECTS fable (opus, sonnet and haiku are refused there).
 
 REFUSED: the model is missing (and no agent definition gives one; the environment
 default is sonnet, which hides the choice), or its family is not the class's. Each refusal names the class, the
