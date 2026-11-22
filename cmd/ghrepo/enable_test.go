@@ -20,11 +20,15 @@ type enableServer struct {
 	states       map[int]string // workflow id -> state
 	lie          int            // total_count to report, 0 = honest
 	writes       []string
+	stuck        bool           // an enabled workflow stays disabled_fork
+	fail         map[string]int // "METHOD path" -> hit number answered with a 500
+	empty        map[string]bool
+	hits         map[string]int
 }
 
 func newEnableServer(t *testing.T) *enableServer {
 	t.Helper()
-	e := &enableServer{states: map[int]string{1: "disabled_fork", 2: "disabled_manually", 3: "active"}}
+	e := &enableServer{states: map[int]string{1: "disabled_fork", 2: "disabled_manually", 3: "active"}, hits: map[string]int{}}
 	mux := http.NewServeMux()
 	repo := func(w http.ResponseWriter) {
 		k := fmt.Sprintf(`,"has_issues":%t`, e.issues)
@@ -75,12 +79,75 @@ func newEnableServer(t *testing.T) *enableServer {
 			return
 		}
 		e.writes = append(e.writes, fmt.Sprintf("PUT workflow %d", id))
-		e.states[id] = "active"
+		if !e.stuck {
+			e.states[id] = "active"
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	e.Server = httptest.NewServer(mux)
+	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Method + " " + r.URL.Path
+		e.hits[key]++
+		if e.fail[key] == e.hits[key] {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		if e.empty[key] {
+			_, _ = io.WriteString(w, `{}`)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}))
 	t.Cleanup(e.Close)
 	return e
+}
+
+// TestEnableTransportAndShapeFailures makes each request fail (on its nth hit)
+// or answer with an empty object, and asserts a refusal every time, so that
+// each error branch of the verbs is held by an assertion.
+func TestEnableTransportAndShapeFailures(t *testing.T) {
+	const perm, wfs = "/repos/o/r/actions/permissions", "/repos/o/r/actions/workflows"
+	cases := []struct {
+		name  string
+		args  []string
+		fail  map[string]int
+		empty map[string]bool
+	}{
+		{"patch fails", []string{"issues", "enable"}, map[string]int{"PATCH /repos/o/r": 1}, nil},
+		{"permissions GET fails", []string{"actions", "status"}, map[string]int{"GET " + perm: 1}, nil},
+		{"permissions has no enabled", []string{"actions", "status"}, nil, map[string]bool{"GET " + perm: true}},
+		{"workflows GET fails", []string{"actions", "status"}, map[string]int{"GET " + wfs: 1}, nil},
+		{"workflows has no total", []string{"actions", "status"}, nil, map[string]bool{"GET " + wfs: true}},
+		{"permissions PUT fails", []string{"actions", "enable"}, map[string]int{"PUT " + perm: 1}, nil},
+		{"workflow PUT fails", []string{"actions", "enable"}, map[string]int{"PUT " + wfs + "/1/enable": 1}, nil},
+		{"permissions read-back fails", []string{"actions", "enable"}, map[string]int{"GET " + perm: 2}, nil},
+		{"workflows read-back fails", []string{"actions", "enable"}, map[string]int{"GET " + wfs: 2}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnableServer(t)
+			e.fail, e.empty = c.fail, c.empty
+			out, err := e.run(t, append([]string{"o/r"}, c.args...)...)
+			if err == nil {
+				t.Fatalf("accepted:\n%s", out)
+			}
+			// the refusal must be the one for this failure, not a later one
+			want := "nothing proves"
+			if c.fail != nil {
+				want = "500"
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("refused for another reason, want %q: %v", want, err)
+			}
+		})
+	}
+}
+
+func TestActionsRefusesAWorkflowThatStaysDisabledFork(t *testing.T) {
+	e := newEnableServer(t)
+	e.stuck = true
+	if out, err := e.run(t, "o/r", "actions", "enable"); err == nil || !strings.Contains(err.Error(), "still disabled_fork") {
+		t.Fatalf("a workflow still disabled_fork was reported as enabled: %v\n%s", err, out)
+	}
 }
 
 func (e *enableServer) run(t *testing.T, args ...string) (string, error) {
