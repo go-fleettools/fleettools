@@ -75,6 +75,26 @@ func TestAStampFromTheFutureGivesNoExtraGrace(t *testing.T) {
 	}
 }
 
+// The grace is exclusive at its end: a lesson exactly one grace old refuses
+// every session, one second younger only warns.
+func TestTheGraceEndsAtExactlyItsAge(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	at := func(age time.Duration) func(string, string) (origin, error) {
+		return func(string, string) (origin, error) {
+			return origin{session: "other", modified: now.Add(-age)}, nil
+		}
+	}
+	o := opts{grace: time.Hour}
+	refuse, warn := scopeByOwner([]finding{{lesson: "x"}}, o, "me", now, at(time.Hour))
+	if len(refuse) != 1 || len(warn) != 0 {
+		t.Errorf("at exactly the grace: refuse %v, warn %v; want a refusal", refuse, warn)
+	}
+	refuse, warn = scopeByOwner([]finding{{lesson: "x"}}, o, "me", now, at(time.Hour-time.Second))
+	if len(refuse) != 0 || len(warn) != 1 || warn[0].left != time.Second {
+		t.Errorf("a second inside the grace: refuse %v, warn %+v", refuse, warn)
+	}
+}
+
 func TestShortIDKeepsEightCharacters(t *testing.T) {
 	if got := shortID("abc"); got != "abc" {
 		t.Errorf("shortID(abc) = %q", got)
