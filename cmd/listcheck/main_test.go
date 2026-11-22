@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -231,6 +232,119 @@ func TestWrapKeepsTheWidth(t *testing.T) {
 	// One name longer than the width is still on a line of its own, never cut.
 	if got := wrap([]string{"abcdefghij", "k"}, 4); got != "abcdefghij\nk" {
 		t.Errorf("a name longer than the width came out as %q", got)
+	}
+}
+
+func gitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	c := exec.Command("git", append([]string{"-C", dir,
+		"-c", "user.name=t", "-c", "user.email=t@example.invalid",
+		"-c", "commit.gpgsign=false"}, args...)...)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// ⛔ The defect this guards, in its measured shape: the count was taken in the
+// clone I happened to be standing in, whose branch had forked before two of the
+// commands landed. Here origin/main holds three commands and the checkout holds
+// two, so the comparison would have answered confidently about the wrong tree.
+func TestACountTakenFromTheWrongTreeIsRefusedBeforeItIsTaken(t *testing.T) {
+	repo := t.TempDir()
+	gitIn(t, repo, "init", "-q", "-b", "main")
+	cmdDir := filepath.Join(repo, "cmd")
+	for _, n := range []string{"abbench", "brief"} {
+		if err := os.MkdirAll(filepath.Join(cmdDir, n), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(cmdDir, n, "main.go"), []byte("package main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "commit", "-qm", "two commands")
+	forked := strings.TrimSpace(gitOut(t, repo, "rev-parse", "HEAD"))
+
+	// A third command lands, on origin/main only.
+	if err := os.MkdirAll(filepath.Join(cmdDir, "listcheck"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cmdDir, "listcheck", "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "commit", "-qm", "the third one")
+	gitIn(t, repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+	page := doc(t, "```text\nabbench brief listcheck\n```\n")
+
+	// The checkout goes back to where the branch forked: the tree now holds two.
+	gitIn(t, repo, "checkout", "-q", forked)
+
+	code, got := drive(t, "--tree", cmdDir, "--marker", "abbench", "--at", "origin/main", page)
+	if code != 2 {
+		t.Fatalf("a tree that is not at origin/main was not refused: exit %d\n%s", code, got)
+	}
+	// ⛔ The refusal has to name BOTH, or it cannot be acted on.
+	for _, want := range []string{"origin/main", short(forked)} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the refusal does not name %q: %q", want, got)
+		}
+	}
+	// Without --at, the very same call answers 1 — a difference the page did
+	// not have — which is the wrong answer this flag exists to prevent.
+	if code, got := drive(t, "--tree", cmdDir, "--marker", "abbench", page); code != 1 {
+		t.Fatalf("without --at, exit %d, want 1 (the control for the refusal above):\n%s", code, got)
+	}
+
+	// At the ref it names, the same comparison agrees and says which tree it read.
+	gitIn(t, repo, "checkout", "-q", "main")
+	code, got = drive(t, "--tree", cmdDir, "--marker", "abbench", "--at", "origin/main", page)
+	if code != 0 {
+		t.Fatalf("at origin/main, exit %d, want 0:\n%s", code, got)
+	}
+	if !strings.Contains(got, "the checkout is at origin/main") {
+		t.Errorf("the output does not say which tree was read: %q", got)
+	}
+}
+
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return string(out)
+}
+
+// A tree outside a repository cannot say which tree it is, so --at is unknown,
+// never agreement.
+func TestATreeOutsideARepositoryCannotAnswerAt(t *testing.T) {
+	dir := tree(t, "abbench")
+	page := doc(t, "```text\nabbench\n```\n")
+	code, got := drive(t, "--tree", dir, "--marker", "abbench", "--at", "origin/main", page)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2:\n%s", code, got)
+	}
+	if !strings.Contains(got, "git") {
+		t.Errorf("the refusal does not say why the tree could not be identified: %q", got)
+	}
+}
+
+// A ref the repository does not have is unknown too — a typo must not pass.
+func TestARefThatDoesNotResolveIsUnanswerable(t *testing.T) {
+	repo := t.TempDir()
+	gitIn(t, repo, "init", "-q", "-b", "main")
+	cmdDir := filepath.Join(repo, "cmd", "abbench")
+	if err := os.MkdirAll(cmdDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "commit", "-qm", "one", "--allow-empty")
+	page := doc(t, "```text\nabbench\n```\n")
+	code, got := drive(t, "--tree", filepath.Join(repo, "cmd"), "--marker", "abbench", "--at", "origin/nope", page)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2:\n%s", code, got)
 	}
 }
 

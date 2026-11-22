@@ -18,7 +18,8 @@
 // --no-path .` in the clone I happened to be standing in answered 112, because
 // that BRANCH had forked before two of the eleven landed. The tree a count is
 // taken from is part of the count, so this reads a directory you name and says
-// which one it read.
+// which one it read — and `--at origin/main` REFUSES unless that directory's
+// checkout is at the ref the count is about to be published as.
 //
 // The alternative was to transcribe 113 names by eye into a document, which is
 // the operation this fleet has written down as a defect in four other shapes:
@@ -46,6 +47,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -76,6 +78,14 @@ holds the marker twice, once in the list and once in the example, so the two are
 told apart by kind ("text" against "bash") and not by position. The refusal names
 the kinds it found, so the flag to add is in the message.
 
+--at REF refuses unless the tree's checkout is at REF, and that refusal is the
+one earned the hard way: the first recount of this very inventory was taken in
+whatever clone happened to be at hand, whose branch had forked before two
+commands landed, and answered 112 where origin/main held 113. Nothing in that
+run was wrong except the tree, and nothing said which tree it was. A count is
+published as a fact about a ref, so name the ref: --at origin/main. A tree
+outside a repository, or a ref that does not resolve, is exit 2.
+
 --count N asserts that the tree holds exactly N entries, so a number written
 in the prose beside the block is checked too, and not only the block itself.
 A count that is right while the list is wrong, or the other way round, is the
@@ -94,9 +104,49 @@ type opts struct {
 	tree   string
 	marker string
 	block  string
+	at     string
 	count  int
 	skip   []string
 	width  int
+}
+
+// gitHEAD is replaceable in tests.
+var gitHEAD = func(dir, rev string) (string, error) {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", rev).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// atRef refuses when the tree is not checked out at the ref the caller means.
+//
+// ⛔ This is the gate for the defect that produced the wrong number first: the
+// count was taken in the clone I happened to be standing in, whose BRANCH had
+// forked before two of the commands landed, and answered 112 where origin/main
+// held 113. Nothing in that run was wrong except the tree, and nothing said
+// which tree it was. A directory cannot say what it is not asked, so --at makes
+// the caller name the ref and compares it with HEAD.
+func atRef(dir, ref string) error {
+	head, err := gitHEAD(dir, "HEAD")
+	if err != nil {
+		return cli.Unanswerable("--at %s: %s is not in a git repository, so which tree this is cannot be read: %v", ref, dir, err)
+	}
+	want, err := gitHEAD(dir, ref)
+	if err != nil {
+		return cli.Unanswerable("--at %s: that ref cannot be resolved in %s (fetch it first): %v", ref, dir, err)
+	}
+	if head != want {
+		return cli.Unanswerable("--at %s resolves to %s but the tree is at %s: a count taken from the wrong tree is a wrong count, and this one would have been read as a fact about %s", ref, short(want), short(head), ref)
+	}
+	return nil
+}
+
+func short(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
 }
 
 func rootCmd() *cobra.Command {
@@ -117,6 +167,7 @@ func rootCmd() *cobra.Command {
 	c.Flags().StringVar(&o.tree, "tree", "", "the directory whose immediate subdirectories the list describes")
 	c.Flags().StringVar(&o.marker, "marker", "", "a token the fenced block contains, which is how the block is found")
 	c.Flags().StringVar(&o.block, "block", "", "only consider fenced blocks whose info string is this (default: any)")
+	c.Flags().StringVar(&o.at, "at", "", "refuse unless the tree's checkout is at this ref (e.g. origin/main)")
 	c.Flags().IntVar(&o.count, "count", -1, "assert the tree holds exactly this many entries (-1: do not check)")
 	c.Flags().StringSliceVar(&o.skip, "skip", nil, "a directory to leave out of the comparison (repeatable)")
 	c.Flags().IntVar(&o.width, "width", 88, "wrap the printed list at this many columns")
@@ -129,6 +180,13 @@ func main() {
 }
 
 func run(out io.Writer, o opts, files []string) error {
+	if o.at != "" {
+		if err := atRef(o.tree, o.at); err != nil {
+			return err
+		}
+		head, _ := gitHEAD(o.tree, "HEAD")
+		fmt.Fprintf(out, "%s: the checkout is at %s == %s\n", o.tree, o.at, short(head))
+	}
 	have, err := subdirs(o.tree)
 	if err != nil {
 		return cli.Unanswerable("--tree %s: %v", o.tree, err)
