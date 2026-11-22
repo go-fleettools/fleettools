@@ -355,12 +355,18 @@ func fenced(src string) []block {
 	return blocks
 }
 
+// firstWord is written without a length guard on purpose. `f := Fields(s); if
+// len(f) == 0 { return "" }; return f[0]` is the same function, but its guard
+// can only ever be killed by the PANIC the mutation causes, never by an
+// assertion — mutsweep says so in as many words ("a PANIC red is luck, not a
+// test"), and a guard nothing can assert about is one the next edit silently
+// turns into a survivor. Ranging returns the first field if there is one and
+// falls through if there is not, so there is no unguarded index to protect.
 func firstWord(s string) string {
-	f := strings.Fields(s)
-	if len(f) == 0 {
-		return ""
+	for _, f := range strings.Fields(s) {
+		return f
 	}
-	return f[0]
+	return ""
 }
 
 // wrap joins names into lines no longer than width, so the output can be pasted

@@ -346,6 +346,94 @@ func TestARefThatDoesNotResolveIsUnanswerable(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit %d, want 2:\n%s", code, got)
 	}
+	// ⛔ The WORDING is the finding here, not the status: without it this reads
+	// as "the tree is at the wrong commit", and the fix someone then makes is a
+	// checkout instead of a fetch. (mutsweep: deleting the guard that tells the
+	// two apart left every status unchanged.)
+	if !strings.Contains(got, "cannot be resolved") {
+		t.Errorf("an unresolvable ref was reported as something else: %q", got)
+	}
+}
+
+// Shortening a SHA is what makes the refusal readable; nothing else held it.
+func TestShortKeepsEightAndNeverCutsAShorterName(t *testing.T) {
+	if got := short("0123456789abcdef"); got != "01234567" {
+		t.Errorf("short = %q, want 01234567", got)
+	}
+	if got := short("abc"); got != "abc" {
+		t.Errorf("short truncated something that was already short: %q", got)
+	}
+}
+
+// A document that cannot be read is unknown, never agreement.
+//
+// ⛔ And the STATUS alone does not test it: with the read error unguarded the
+// contents are empty, no block holds the marker, and the refusal is exit 2 just
+// the same — about the wrong thing. mutsweep showed that by surviving. What has
+// to be asserted is which refusal it is.
+func TestAFileThatCannotBeReadIsUnanswerable(t *testing.T) {
+	dir := tree(t, "abbench")
+	absent := filepath.Join(t.TempDir(), "absent.md")
+	code, got := drive(t, "--tree", dir, "--marker", "abbench", absent)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2:\n%s", code, got)
+	}
+	if strings.Contains(got, "no fenced block holds") {
+		t.Errorf("an unreadable file was reported as a document with no such block: %q", got)
+	}
+	// The error the OS gave is the one reported, whatever its wording is here.
+	_, err := os.ReadFile(absent)
+	if err == nil {
+		t.Fatal("the absent file could be read")
+	}
+	if !strings.Contains(got, err.Error()) {
+		t.Errorf("the refusal does not carry the read error %q: %q", err, got)
+	}
+}
+
+// firstWord's guard, asserted on both sides rather than by the panic that the
+// mutation produced ("caught by PANIC is luck, not a test").
+func TestFirstWordOfNothingIsNothing(t *testing.T) {
+	for in, want := range map[string]string{
+		"":          "",
+		"   ":       "",
+		"\t\n":      "",
+		"text":      "text",
+		"text  go ": "text",
+		"  go bash": "go",
+	} {
+		if got := firstWord(in); got != want {
+			t.Errorf("firstWord(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// ⛔ A fence with NO info string is the commonest fence there is, and the arm
+// that reads the info string indexed its first word without checking there was
+// one. mutsweep found it: no test used a bare fence, so nothing panicked.
+func TestABareFenceHasNoLanguageAndIsStillRead(t *testing.T) {
+	dir := tree(t, "abbench", "brief")
+	page := doc(t, "# p\n\n```\nabbench brief\n```\n")
+	if code, got := drive(t, "--tree", dir, "--marker", "abbench", page); code != 0 {
+		t.Fatalf("exit %d, want 0:\n%s", code, got)
+	}
+	// And it is NOT the same block as a ```text one, so --block still tells them apart.
+	if code, got := drive(t, "--tree", dir, "--marker", "abbench", "--block", "text", page); code != 2 {
+		t.Fatalf("--block text matched a bare fence: exit %d\n%s", code, got)
+	}
+}
+
+// One subdirectory is one subdirectory.
+func TestTheCountReadsAsEnglishForOne(t *testing.T) {
+	dir := tree(t, "abbench")
+	page := doc(t, "```text\nabbench\n```\n")
+	code, got := drive(t, "--tree", dir, "--marker", "abbench", page)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0:\n%s", code, got)
+	}
+	if !strings.Contains(got, "1 subdirectory") {
+		t.Errorf("a tree of one did not read as one: %q", got)
+	}
 }
 
 // An unterminated fence at the end of a file still holds names someone wrote.
