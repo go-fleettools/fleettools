@@ -221,29 +221,50 @@ func TestAKeywordOnAnotherLineDoesNotCloseTheIssue(t *testing.T) {
 // REVIEW rows -- and --close must still refuse it, because `Refs` asked for the
 // issue to stay open.
 func TestAStatedDecisionIsListedLastAndCountedApart(t *testing.T) {
+	// ⛔⛔ THE ISSUE NUMBERS RUN BACKWARDS ON PURPOSE. KEEP THEM THAT WAY.
+	//
+	// This test first used the obvious fixture -- CLOSABLE #1, REVIEW #2,
+	// REFS #5 -- and the position assertion below passed. It passed for a reason
+	// other than its name: the comparator falls back to `ref() < ref()` when two
+	// ranks are equal, and `"A/x#1" < "A/x#2" < "A/x#5"` as STRINGS, so the rows
+	// came out in class order even when the class was ignored entirely. mutsweep
+	// proved it rather than my reading it: `ri != rj` -> `ri == rj` at
+	// main.go:268 SURVIVED, 0 caught of 1, with the whole suite green.
+	//
+	// So the refs are now chosen to sort AGAINST the ranks. By class the order is
+	// #9, #5, #7, #1; by ref alone it would be #1, #5, #7, #9 -- nearly the
+	// reverse. The two orders can no longer be mistaken for each other.
+	//
+	// The two REVIEW rows are what witness the comparator's SECOND line: listed
+	// as #7 before #5, they must come out #5 before #7, which only the
+	// `ref() < ref()` fallback does. One row per class witnessed neither line.
 	f := newFake(t)
-	f.issues["org:A"] = []string{"A/x#1|fixed one", "A/x#2|mentioned", "A/x#5|open on purpose"}
-	f.timelines["A/x#1"] = xref("A/x", 10, mergedAt, "Closes #1")
-	f.timelines["A/x#2"] = xref("A/z", 11, mergedAt, "related to A/x#2")
-	f.timelines["A/x#5"] = xref("A/z", 14, mergedAt, "Refs A/x#5")
+	f.issues["org:A"] = []string{"A/x#9|fixed one", "A/x#7|mentioned late", "A/x#5|mentioned", "A/x#1|open on purpose"}
+	f.timelines["A/x#9"] = xref("A/x", 10, mergedAt, "Closes #9")
+	f.timelines["A/x#7"] = xref("A/z", 12, mergedAt, "related to A/x#7")
+	f.timelines["A/x#5"] = xref("A/z", 11, mergedAt, "related to A/x#5")
+	f.timelines["A/x#1"] = xref("A/z", 14, mergedAt, "Refs A/x#1")
 
 	code, out := drive(t, "--org", "A", "--close")
 	if code != 0 {
 		t.Fatalf("status %d\n%s", code, out)
 	}
 	for _, want := range []string{
-		"REFS     A/x#5  open on purpose  <- A/z#14 (merged 2026-11-01)",
-		"searched 3, listed 3, timelines read 3, skipped 0 | CLOSABLE 1, REVIEW 1, REFS 1",
-		"total: CLOSABLE 1, REVIEW 1, REFS 1",
+		"REFS     A/x#1  open on purpose  <- A/z#14 (merged 2026-11-01)",
+		"searched 4, listed 4, timelines read 4, skipped 0 | CLOSABLE 1, REVIEW 2, REFS 1",
+		"total: CLOSABLE 1, REVIEW 2, REFS 1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
 	// Order by POSITION, so the assertion does not move when a title changes.
-	iRefs, iRev, iCls := strings.Index(out, "REFS     A/x#5"), strings.Index(out, "REVIEW   A/x#2"), strings.Index(out, "CLOSABLE A/x#1")
-	if iCls < 0 || iRev < 0 || iRefs < 0 || !(iCls < iRev && iRev < iRefs) {
-		t.Errorf("want CLOSABLE, then REVIEW, then REFS; got positions %d, %d, %d:\n%s", iCls, iRev, iRefs, out)
+	iCls := strings.Index(out, "CLOSABLE A/x#9")
+	iRev5, iRev7 := strings.Index(out, "REVIEW   A/x#5"), strings.Index(out, "REVIEW   A/x#7")
+	iRefs := strings.Index(out, "REFS     A/x#1")
+	if iCls < 0 || iRev5 < 0 || iRev7 < 0 || iRefs < 0 || !(iCls < iRev5 && iRev5 < iRev7 && iRev7 < iRefs) {
+		t.Errorf("want CLOSABLE, then the two REVIEW rows by ref, then REFS; got positions %d, %d, %d, %d:\n%s",
+			iCls, iRev5, iRev7, iRefs, out)
 	}
 	// ⛔ --close was passed: exactly ONE issue may have been closed.
 	closed := strings.Count(out, "         closed\n")
@@ -251,7 +272,7 @@ func TestAStatedDecisionIsListedLastAndCountedApart(t *testing.T) {
 		t.Errorf("%d issue(s) closed, want only the CLOSABLE one:\n%s", closed, out)
 	}
 	for _, p := range f.posts {
-		if strings.Contains(p, "A/x/issues/5") {
+		if strings.Contains(p, "A/x/issues/1") {
 			t.Errorf("a stated decision was written to: %q", p)
 		}
 	}
