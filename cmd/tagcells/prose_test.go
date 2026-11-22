@@ -71,6 +71,12 @@ func TestFindProseReadsTheThreeShapesOfARepositoryPage(t *testing.T) {
 func TestRewriteLeavesTheWrittenFromVersionAloneAndMovesTheDate(t *testing.T) {
 	for _, src := range []string{startsLine, sameLine} {
 		cells := Find(src, "go-fleettools", false)
+		// len before index, for the reason spelled out above the first test:
+		// the mutations this file is held by are applied by hand, and a test
+		// that panics instead of failing takes the rest of the suite with it.
+		if len(cells) == 0 {
+			t.Fatalf("no claim found at all in:\n%s", src)
+		}
 		out := Rewrite(src, cells, map[string]string{cells[0].Module: "v0.99.0"}, "2026-12-01")
 		if !strings.Contains(out, "Latest tag: **v0.99.0**") && !strings.Contains(out, "**v0.99.0**\n(`git") {
 			t.Fatalf("the claim was not rewritten:\n%s", out)
