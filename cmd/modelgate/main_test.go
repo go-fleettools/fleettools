@@ -128,8 +128,8 @@ func TestTableIsWellFormed(t *testing.T) {
 			seen[p] = c.name
 		}
 	}
-	if len(classes) != 3 {
-		t.Fatalf("%d classes, want review, implement, check", len(classes))
+	if len(classes) != 4 {
+		t.Fatalf("%d classes, want review, implement, check, security", len(classes))
 	}
 }
 
@@ -194,6 +194,21 @@ func TestDecide(t *testing.T) {
 		{"fable on implement", agent("Fix the parser", "", "", "fable"), true, []string{"class implement", `"sonnet"`, `"fable"`}},
 		{"fable on check", agent("Check the lanes", "", "", "claude-fable-5-2"), true, []string{"class check", `"haiku"`}},
 		{"fable on an unclassified task", agent("turnd: host handover", "", "", "fable"), false, nil},
+
+		// the security class expects fable
+		{"fable on security", agent("Security review of the parser", "", "", "fable"), false, nil},
+		{"full fable id on a vulnerability", agent("Vulnerability triage", "", "", "claude-fable-5-2"), false, nil},
+		{"opus on security", agent("Security review of the parser", "", "", "opus"), true, []string{"class security", `"security"`, `expects model "fable"`}},
+		{"sonnet on a CVE", agent("CVE triage", "", "", "sonnet"), true, []string{"class security", `expects model "fable"`}},
+		{"haiku on a threat-model", agent("threat-model of the daemon", "", "", "haiku"), true, []string{"class security", `"threat-model"`}},
+		{"attack surface phrase", agent("Map the attack surface", "", "", "opus"), true, []string{"class security", `"attack surface"`}},
+		{"security waived", agent("Security review of the parser", "model-waiver: budget\n", "", "opus"), false, []string{"waived", "budget"}},
+		{"missing model on security", agent("Security review of the parser", "", "", ""), true, []string{"no model given", "class security", `"fable"`}},
+		{"security bug fix stays implement", agent("Fix the security bug", "", "", "sonnet"), false, nil},
+		{"fable on the security bug fix", agent("Fix the security bug", "", "", "fable"), true, []string{"class implement"}},
+		{"review the security of X stays review", agent("Review the security of X", "", "", "opus"), false, nil},
+		{"fable on review the security of X", agent("Review the security of X", "", "", "fable"), true, []string{"class review", "tier ABOVE opus"}},
+		{"audit is not security", agent("Audit the fuzz harness", "", "", "opus"), false, nil},
 
 		// the prompt's first line stands in for a missing description
 		{"prompt fallback, refused", agent("", "Fix the parser\nlong body about review", "", "opus"), true, []string{"class implement"}},
@@ -413,7 +428,10 @@ func TestRealDescriptions(t *testing.T) {
 			}
 		}
 	}
-	want := map[string]int{"review": 198, "implement": 122, "check": 39, "unclassified": 175}
+	// The security class (fleettools, 2026-11-22) took four rows: three
+	// "Security review ..." rows that were review (opus) and "ghrepo verb:
+	// private vuln reporting", which was unclassified.
+	want := map[string]int{"review": 195, "implement": 122, "check": 39, "security": 4, "unclassified": 174}
 	for k, w := range want {
 		if counts[k] != w {
 			t.Errorf("class %s: %d real descriptions, want %d", k, counts[k], w)
@@ -427,8 +445,9 @@ func TestRealDescriptions(t *testing.T) {
 	if bad["unclassified"] != 0 {
 		t.Errorf("an unclassified task was refused: %v", bad)
 	}
-	if bad["check"] != 1 || bad["implement"] != 0 || bad["review"] != 22 {
-		t.Errorf("would-be refusals by class = %v, want review 22, check 1, implement 0", bad)
+	// All four security rows ran below fable (three opus, one sonnet).
+	if bad["check"] != 1 || bad["implement"] != 0 || bad["review"] != 22 || bad["security"] != 4 {
+		t.Errorf("would-be refusals by class = %v, want review 22, check 1, implement 0, security 4", bad)
 	}
 	t.Logf("%d descriptions: %v; refused %v", n, counts, bad)
 	for _, r := range refusedExamples {
@@ -456,6 +475,8 @@ func TestRealDescriptions(t *testing.T) {
 		"avkit#113 MP4 box-count bound":                      "unclassified",
 		"turnd: relay grace + session renewal":               "unclassified",
 		"Build modelgate Agent-call hook":                    "implement",
+		"Security review of go-avkit/worker#1":               "security",
+		"ghrepo verb: private vuln reporting":                "security",
 	} {
 		if got := classOf(desc); got != want {
 			t.Errorf("%q: %s, want %s", desc, got, want)
