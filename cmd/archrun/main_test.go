@@ -478,7 +478,7 @@ func TestAFailureToRunIsNoAnswerAndSaysWhy(t *testing.T) {
 			}
 			return nil
 		}, nil, "scp of testdata failed"},
-		"report path": {"ex/a\t/x/a\n", nil, []string{"--report", filepath.Join(td, "no", "dir", "r.json")}, "cannot write --report"},
+		"report path":    {"ex/a\t/x/a\n", nil, []string{"--report", filepath.Join(td, "no", "dir", "r.json")}, "cannot write --report"},
 		"work is a file": {"ex/a\t/x/a\n", nil, []string{"--work", notDir}, "cannot create --work"},
 	} {
 		f := &fake{machine: "s390x", goList: c.goList, runCode: map[string]int{"p0": 0}}
