@@ -1,0 +1,602 @@
+// Rolls out ONE literal text edit to one file of the same repository in every
+// organisation, as one pull request per organisation, merged only when CI is
+// green and at a capped rate (go-fleettools/fleettools#305, #312).
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/go-fleettools/fleettools/internal/cli"
+	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/go-fleettools/fleettools/internal/ghorg"
+	"github.com/go-fleettools/fleettools/internal/ghtoken"
+	"github.com/go-fleettools/fleettools/internal/rollout"
+	"github.com/spf13/cobra"
+)
+
+const longHelp = `Replaces every occurrence of --old with --new in --file of repository --repo
+(default .github) in each organisation the account belongs to, one pull request
+per organisation, and merges each one only when its CI is green.
+
+  orgedit --file .github/workflows/ci.yml \
+          --old  '--package renovate@latest' --new '--package renovate@44' \
+          --skip-if RENOVATE_VERSION \
+          --branch pin-renovate --title 'ci: pin the Renovate validator' \
+          --body-file body.md --commit-file commit.txt --dry-run
+
+Per organisation, in order, the file is read through the contents API (one GET)
+and judged:
+
+  nofile     the repository has no such file (404)
+  unchanged  the file does not contain --old: nothing to do (or already done)
+  skip       the file contains a --skip-if string: left alone, listed
+  target     the file contains --old and no --skip-if string
+  unread     any other answer: counted and printed, NEVER read as nofile
+
+Only a target is acted on, one at a time:
+
+  1. the REST reserve must hold --reserve requests and the trailing hour fewer
+     than --max pull requests, or the run STOPS;
+  2. agentsync claim of owner/repo; a repository somebody else holds is
+     skipped and listed, the run goes on;
+  3. an open pull request from --branch is RESUMED (wait, merge), never doubled;
+     otherwise the clone ~/Documents/VCS/GIT/localhost/<org>-<repo>-<branch> is
+     created or reused, --branch is cut from the fresh default branch, the edit
+     is made, committed with git commit -F --commit-file and pushed with gitpush;
+  4. the pull request is opened (prbody and paritycheck text on --body-file
+     first), prwait, the checks are read again bound to the pushed commit, and
+     ghmerge runs only on green; the ledger records the merge;
+  5. the claim is released.
+
+--dry-run reads only: it prints each organisation's verdict and, for a target,
+the diff size, and claims, clones and writes nothing.
+
+⛔ The run STOPS (status 1 or 2, naming the organisation) on red CI, a CI that is
+not conclusive, any command that fails or refuses (ghmerge included), an
+unreadable rate limit or ledger, the REST reserve and the hourly cap. A stop is
+never retried another way. An unread file does not stop the run but is counted,
+and the run exits 1 at the end if any was.
+
+Exit status: 0 every organisation read and every target merged or skipped, 1 a
+refusal, a red CI or an unread file, 2 usage error or a limit reached.`
+
+type options struct {
+	file, old, new string
+	newSet         bool // --new was given, even as ""
+	skipIf         []string
+	repo           string
+	orgs           []string
+	branch, title  string
+	bodyFile       string
+	commitFile     string
+	max, reserve   int
+	ledger         string
+	dryRun         bool
+	root           string
+	tokenFile      string
+	base           string
+	now            func() time.Time
+}
+
+func main() {
+	fleet.WarnIfStale(os.Stderr)
+	cli.Run(RootCmd())
+}
+
+// readToken is ghtoken.Read; tests replace it.
+var readToken = ghtoken.Read
+
+// sweepBase lets a test aim the command at a server.
+var sweepBase string
+
+// RootCmd builds the command. Tests drive it through cli.Drive.
+func RootCmd() *cobra.Command {
+	home, _ := os.UserHomeDir()
+	cfg, _ := os.UserConfigDir()
+	o := options{now: time.Now}
+	var orgs string
+	c := cli.New("orgedit [flags]",
+		"Roll one literal edit of one file out to every organisation, one merged pull request each", longHelp)
+	c.Args = cobra.NoArgs
+	f := c.Flags()
+	f.StringVar(&o.file, "file", "", "path of the file in the repository (required)")
+	f.StringVar(&o.old, "old", "", "literal text to replace, every occurrence (required)")
+	f.StringVar(&o.new, "new", "", "literal replacement text (required; an explicit empty string deletes --old)")
+	f.StringArrayVar(&o.skipIf, "skip-if", nil, "skip an organisation whose file contains this string; repeatable")
+	f.StringVar(&o.repo, "repo", ".github", "repository name in each organisation")
+	f.StringVar(&orgs, "orgs", "", "comma-separated organisations instead of every one the account belongs to")
+	f.StringVar(&o.branch, "branch", "", "branch name for the pull requests (required unless --dry-run)")
+	f.StringVar(&o.title, "title", "", "pull request title (required unless --dry-run)")
+	f.StringVar(&o.bodyFile, "body-file", "", "pull request body file (required unless --dry-run)")
+	f.StringVar(&o.commitFile, "commit-file", "", "commit message file (required unless --dry-run)")
+	f.IntVar(&o.max, "max", 20, "pull requests merged per trailing hour")
+	f.IntVar(&o.reserve, "reserve", 1000, "REST requests that must remain")
+	f.StringVar(&o.ledger, "ledger", filepath.Join(cfg, "orgedit", "ledger.txt"),
+		"file recording one merged pull request per line, for the hourly cap")
+	f.BoolVar(&o.dryRun, "dry-run", false, "read only: print each verdict and the diff size, change nothing")
+	f.StringVar(&o.root, "root", filepath.Join(home, "Documents", "VCS", "GIT", "localhost"),
+		"directory holding the clones, named <org>-<repo>-<branch>")
+	f.StringVar(&o.tokenFile, "token-file", "", "token file, owner-only (default ~/.github-token)")
+	c.RunE = func(cmd *cobra.Command, _ []string) error {
+		o.orgs = split(orgs)
+		o.newSet = cmd.Flags().Changed("new")
+		o.base = "https://api.github.com"
+		return cli.FromStatus(sweep(cmd.Context(), cli.Out(cmd), cli.Err(cmd), o))
+	}
+	return c
+}
+
+func split(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+type verdict string
+
+const (
+	vNoFile    verdict = "nofile"
+	vUnchanged verdict = "unchanged"
+	vSkip      verdict = "skip"
+	vTarget    verdict = "target"
+	vUnread    verdict = "unread"
+)
+
+// judge decides what a file read from an organisation is. The skip-if test
+// comes first: a file carrying the pin is left alone even if --old is present.
+func judge(src string, o options) (verdict, string) {
+	if !strings.Contains(src, o.old) {
+		return vUnchanged, ""
+	}
+	for _, s := range o.skipIf {
+		if strings.Contains(src, s) {
+			return vSkip, s
+		}
+	}
+	return vTarget, ""
+}
+
+var (
+	refRe  = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+	slugRe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+)
+
+// validate refuses what must never reach GitHub or git. It returns a reason.
+func validate(o options) string {
+	switch {
+	case !ghorg.ValidPath(o.file):
+		return "--file is required and must be a relative path"
+	case o.old == "":
+		return "--old is required: an empty string matches everywhere"
+	case !o.newSet:
+		return "--new is required (give '' to delete --old)"
+	case o.old == o.new:
+		return "--old and --new are the same: the edit changes nothing"
+	case !ghorg.ValidName(o.repo):
+		return fmt.Sprintf("%q is not a repository name", o.repo)
+	case strings.Contains(o.new, o.old):
+		return "--new contains --old: the file would still be a target after the edit"
+	case o.max < 1:
+		return "--max must be at least 1"
+	}
+	for _, s := range o.skipIf {
+		if s == "" {
+			return "an empty --skip-if string matches every file"
+		}
+	}
+	for _, n := range o.orgs {
+		if !ghorg.ValidName(n) {
+			return fmt.Sprintf("%q is not a GitHub name", n)
+		}
+	}
+	if o.dryRun {
+		return ""
+	}
+	switch {
+	case o.branch == "" || !refRe.MatchString(o.branch) || strings.Contains(o.branch, "..") ||
+		strings.HasPrefix(o.branch, "-") || strings.HasPrefix(o.branch, "/") || strings.HasSuffix(o.branch, "/") ||
+		strings.HasSuffix(o.branch, ".lock"):
+		return "--branch is required and must be a plain branch name"
+	case o.title == "":
+		return "--title is required"
+	case o.bodyFile == "" || o.commitFile == "":
+		return "--body-file and --commit-file are required"
+	}
+	for _, p := range []string{o.bodyFile, o.commitFile} {
+		if st, err := os.Stat(p); err != nil || st.IsDir() {
+			return fmt.Sprintf("%s is not a readable file", p)
+		}
+	}
+	return ""
+}
+
+type tally struct {
+	counts map[verdict]int
+	merged int
+	claim  int // targets skipped because somebody else holds the repository
+}
+
+func (t *tally) print(w io.Writer, total int) {
+	fmt.Fprintf(w, "totals: %d organisations, target %d, unchanged %d, skip %d, nofile %d, unread %d; merged %d, claim refused %d\n",
+		total, t.counts[vTarget], t.counts[vUnchanged], t.counts[vSkip], t.counts[vNoFile], t.counts[vUnread], t.merged, t.claim)
+}
+
+// absPath is a seam: filepath.Abs fails only when the working directory is gone.
+var absPath = filepath.Abs
+
+func sweep(ctx context.Context, stdout, stderr io.Writer, o options) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if sweepBase != "" {
+		o.base = sweepBase
+	}
+	if why := validate(o); why != "" {
+		fmt.Fprintf(stderr, "orgedit: %s\n", why)
+		return 2
+	}
+	// the git steps run inside the clone: the message and body paths must not
+	// depend on the working directory
+	for _, p := range []*string{&o.bodyFile, &o.commitFile} {
+		if *p != "" {
+			abs, err := absPath(*p)
+			if err != nil {
+				fmt.Fprintf(stderr, "orgedit: %v\n", err)
+				return 2
+			}
+			*p = abs
+		}
+	}
+	tok, err := readToken(o.tokenFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "orgedit: %v\n", err)
+		return 2
+	}
+	c := ghorg.New(o.base, tok, o.reserve)
+	list := o.orgs
+	if len(list) == 0 {
+		if list, err = c.Orgs(ctx); err != nil {
+			fmt.Fprintf(stderr, "orgedit: could not list organisations: %v\n", err)
+			return 2
+		}
+	} else {
+		list = append([]string{}, list...)
+		sort.Strings(list)
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(stderr, "orgedit: no organisation to read; refusing to print a clean result")
+		return 2
+	}
+
+	t := &tally{counts: map[verdict]int{}}
+	done := 0
+	finish := func(code int) int {
+		t.print(stdout, len(list))
+		if rest := len(list) - done; rest > 0 {
+			fmt.Fprintf(stdout, "%d organisation(s) not finished\n", rest)
+		}
+		return code
+	}
+	for _, org := range list {
+		if c.Low() {
+			fmt.Fprintf(stderr, "orgedit: STOPPED before %s: the REST reserve is reached (%d left, %d reserved)\n",
+				org, c.Remaining(), o.reserve)
+			return finish(2)
+		}
+		src, v, why := read(ctx, c, org, o)
+		if v == vUnread {
+			t.counts[v]++
+			done++
+			fmt.Fprintf(stdout, "%-9s %s/%s  %s\n", v, org, o.repo, why)
+			continue
+		}
+		if v == vTarget {
+			rem, add := diffLines(src, o)
+			if o.dryRun {
+				t.counts[v]++
+				done++
+				fmt.Fprintf(stdout, "%-9s %s/%s  %d line(s): -%d +%d\n", v, org, o.repo, rem+add, rem, add)
+				continue
+			}
+			t.counts[v]++
+			if st := act(stdout, stderr, org, t, o); st != 0 {
+				return finish(st)
+			}
+			done++
+			continue
+		}
+		t.counts[v]++
+		done++
+		if v == vSkip {
+			fmt.Fprintf(stdout, "%-9s %s/%s  contains %q\n", v, org, o.repo, why)
+		} else {
+			fmt.Fprintf(stdout, "%-9s %s/%s\n", v, org, o.repo)
+		}
+	}
+	code := 0
+	if t.counts[vUnread] > 0 {
+		fmt.Fprintf(stderr, "orgedit: %d organisation(s) unread; they were not judged\n", t.counts[vUnread])
+		code = 1
+	}
+	return finish(code)
+}
+
+// read fetches the file and judges it. Anything but 200 and 404 is unread.
+func read(ctx context.Context, c *ghorg.Client, org string, o options) (string, verdict, string) {
+	st, b, err := c.Get(ctx, "/repos/"+org+"/"+o.repo+"/contents/"+ghorg.EscapePath(o.file), true)
+	switch {
+	case err != nil:
+		return "", vUnread, err.Error()
+	case st == 404:
+		return "", vNoFile, ""
+	case st != 200:
+		return "", vUnread, fmt.Sprintf("HTTP %d", st)
+	}
+	v, why := judge(string(b), o)
+	return string(b), v, why
+}
+
+// diffLines counts the lines the edit removes and adds: the distinct lines the
+// occurrences touch, and what those same lines become. Two occurrences on one
+// line are one changed line.
+func diffLines(src string, o options) (removed, added int) {
+	lines := strings.SplitAfter(src, "\n")
+	// byte offset of each line start
+	starts := make([]int, len(lines)+1)
+	for i, l := range lines {
+		starts[i+1] = starts[i] + len(l)
+	}
+	lineOf := func(off int) int { return sort.Search(len(lines), func(i int) bool { return starts[i+1] > off }) }
+	type span struct{ a, b int }
+	var spans []span
+	for off := 0; ; {
+		i := strings.Index(src[off:], o.old)
+		if i < 0 {
+			break
+		}
+		s, e := off+i, off+i+len(o.old)
+		sp := span{lineOf(s), lineOf(e - 1)}
+		if n := len(spans); n > 0 && spans[n-1].b >= sp.a {
+			spans[n-1].b = sp.b
+		} else {
+			spans = append(spans, sp)
+		}
+		off = max(e, off+1) // an empty --old (refused by validate) must still move on
+	}
+	for _, sp := range spans {
+		block := src[starts[sp.a]:starts[sp.b+1]]
+		removed += len(strings.SplitAfter(strings.TrimSuffix(block, "\n"), "\n"))
+		out := strings.ReplaceAll(block, o.old, o.new)
+		added += strings.Count(strings.TrimSuffix(out, "\n"), "\n") + 1
+	}
+	return removed, added
+}
+
+type check struct {
+	Conclusion string `json:"conclusion"`
+	State      string `json:"state"`
+	Status     string `json:"status"`
+}
+
+type prView struct {
+	Head   string  `json:"headRefOid"`
+	Checks []check `json:"statusCheckRollup"`
+}
+
+// judgeChecks says whether the checks of the pull request, read at head want,
+// are green: "" when they are, a reason otherwise. red is true when a check
+// failed outright, as opposed to being unfinished or absent.
+func judgeChecks(out, want string) (reason string, red bool) {
+	var pv prView
+	if err := json.Unmarshal([]byte(out), &pv); err != nil || pv.Head == "" {
+		return "the pull request's checks were unreadable", false
+	}
+	if pv.Head != want {
+		return fmt.Sprintf("the checks were read at %.7s, not at the pushed commit %.7s", pv.Head, want), false
+	}
+	if len(pv.Checks) == 0 {
+		return "the pull request has no checks: an empty list is not a pass", false
+	}
+	pending := 0
+	for _, ck := range pv.Checks {
+		switch {
+		case ck.Conclusion == "FAILURE" || ck.Conclusion == "CANCELLED" || ck.Conclusion == "TIMED_OUT" ||
+			ck.Conclusion == "ACTION_REQUIRED" || ck.Conclusion == "STARTUP_FAILURE" ||
+			ck.State == "FAILURE" || ck.State == "ERROR":
+			return "a check failed", true
+		case ck.Conclusion == "SUCCESS" || ck.Conclusion == "NEUTRAL" || ck.Conclusion == "SKIPPED" || ck.State == "SUCCESS":
+		default:
+			pending++
+		}
+	}
+	if pending > 0 {
+		return fmt.Sprintf("%d check(s) not finished", pending), false
+	}
+	return "", false
+}
+
+type prRef struct {
+	Number int    `json:"number"`
+	Head   string `json:"headRefOid"`
+}
+
+// openPR returns the open pull request from the branch, if any.
+func openPR(repo, branch string) (*prRef, error) {
+	out, err := rollout.Call("", "gh", "pr", "list", "-R", repo, "--head", branch, "--state", "open",
+		"--json", "number,headRefOid")
+	if err != nil {
+		return nil, err
+	}
+	var l []prRef
+	if err := json.Unmarshal([]byte(out), &l); err != nil {
+		return nil, fmt.Errorf("gh pr list answered something unreadable")
+	}
+	switch len(l) {
+	case 0:
+		return nil, nil
+	case 1:
+		if l[0].Number <= 0 || l[0].Head == "" {
+			return nil, fmt.Errorf("gh pr list answered a pull request with no number or head")
+		}
+		return &l[0], nil
+	}
+	return nil, fmt.Errorf("%d open pull requests from %s: not choosing one", len(l), branch)
+}
+
+// act lands the edit in one organisation. It returns 0 to go on, 1 on a
+// refusal and 2 at a limit; the stop is already said on stderr.
+func act(stdout, stderr io.Writer, org string, t *tally, o options) int {
+	repo := org + "/" + o.repo
+	led := rollout.Ledger{Path: o.ledger, Now: o.now}
+	if st := rollout.Budget(stderr, "orgedit", led, o.reserve, o.max); st != 0 {
+		fmt.Fprintf(stderr, "orgedit: STOPPED before %s\n", repo)
+		return st
+	}
+	if out, err := rollout.Call("", "agentsync", "claim", "--note",
+		"orgedit: "+o.branch, repo); err != nil {
+		t.claim++
+		fmt.Fprintf(stdout, "claim refused %s: %s\n", repo, strings.TrimSpace(out))
+		return 0
+	}
+	defer rollout.Call("", "agentsync", "release", repo)
+
+	number, err := land(repo, org, o)
+	if err != nil {
+		fmt.Fprintf(stderr, "orgedit: STOPPED at %s: %v\n", repo, err)
+		return 1
+	}
+	if err := led.Record(fmt.Sprintf("%s#%s", repo, number)); err != nil {
+		fmt.Fprintf(stderr, "orgedit: STOPPED at %s: merged #%s but the ledger could not be written: %v\n", repo, number, err)
+		return 1
+	}
+	t.merged++
+	fmt.Fprintf(stdout, "merged    %s#%s\n", repo, number)
+	return 0
+}
+
+// land resumes or opens the pull request, waits for it and merges it. It
+// returns the pull request number.
+func land(repo, org string, o options) (string, error) {
+	pr, err := openPR(repo, o.branch)
+	if err != nil {
+		return "", err
+	}
+	var sha string
+	if pr == nil {
+		dir := filepath.Join(o.root, org+"-"+o.repo+"-"+strings.Trim(slugRe.ReplaceAllString(o.branch, "-"), "-"))
+		if sha, err = edit(repo, dir, o); err != nil {
+			return "", err
+		}
+		if _, err := rollout.Call(dir, "prbody", o.bodyFile, "--repo", repo); err != nil {
+			return "", err
+		}
+		if _, err := rollout.Call(dir, "paritycheck", "text", o.bodyFile); err != nil {
+			return "", err
+		}
+		if _, err := rollout.Call(dir, "gh", "pr", "create", "--repo", repo, "--head", o.branch,
+			"--title", o.title, "--body-file", o.bodyFile); err != nil {
+			return "", err
+		}
+		if pr, err = openPR(repo, o.branch); err != nil {
+			return "", err
+		}
+		if pr == nil {
+			return "", fmt.Errorf("the pull request just created is not listed")
+		}
+	} else {
+		sha = pr.Head
+	}
+	number := fmt.Sprint(pr.Number)
+	if err := rollout.HeadIs(repo, number, sha); err != nil {
+		return "", err
+	}
+	if _, err := rollout.Call("", "prwait", "-repo", repo, number); err != nil {
+		return "", fmt.Errorf("not green, not merging #%s: %v", number, err)
+	}
+	out, err := rollout.Call("", "gh", "pr", "view", number, "-R", repo, "--json", "headRefOid,statusCheckRollup")
+	if err != nil {
+		return "", err
+	}
+	if why, red := judgeChecks(out, sha); why != "" {
+		if red {
+			return "", fmt.Errorf("red CI on #%s: %s", number, why)
+		}
+		return "", fmt.Errorf("CI of #%s is not conclusive: %s", number, why)
+	}
+	if _, err := rollout.Call("", "ghmerge", repo, number); err != nil {
+		return "", fmt.Errorf("ghmerge refused #%s: %v", number, err)
+	}
+	return number, nil
+}
+
+// edit prepares the clone, cuts the branch from the fresh default branch,
+// applies the edit, commits and pushes. It returns the pushed commit.
+func edit(repo, dir string, o options) (string, error) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		if _, err := rollout.Call("", "git", "clone", "https://github.com/"+repo+".git", dir); err != nil {
+			return "", err
+		}
+	} else {
+		if st, err := rollout.Call(dir, "git", "status", "--porcelain"); err != nil || strings.TrimSpace(st) != "" {
+			return "", fmt.Errorf("clone %s is dirty or unreadable; not touching it", dir)
+		}
+		if _, err := rollout.Call(dir, "git", "fetch", "origin"); err != nil {
+			return "", err
+		}
+	}
+	if _, err := rollout.Call(dir, "git", "remote", "set-head", "origin", "--auto"); err != nil {
+		return "", err
+	}
+	head, err := rollout.Call(dir, "git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+	if err != nil {
+		return "", err
+	}
+	base := strings.TrimSpace(head)
+	if !strings.HasPrefix(base, "origin/") {
+		return "", fmt.Errorf("the default branch of %s is unreadable: %q", repo, base)
+	}
+	if _, err := rollout.Call(dir, "git", "switch", "-C", o.branch, base); err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, filepath.FromSlash(o.file))
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	// The API read and the clone must agree: the edit is judged again on the
+	// bytes it is about to change.
+	if v, why := judge(string(src), o); v != vTarget {
+		return "", fmt.Errorf("the clone's %s is no longer a target (%s %s) although the API read said so", o.file, v, why)
+	}
+	// the file exists, so WriteFile keeps its mode
+	if err := os.WriteFile(path, []byte(strings.ReplaceAll(string(src), o.old, o.new)), 0o644); err != nil {
+		return "", err
+	}
+	for _, step := range [][]string{
+		{"git", "add", "--", o.file},
+		{"git", "commit", "-F", o.commitFile},
+		{"gitpush", "origin", o.branch},
+	} {
+		if _, err := rollout.Call(dir, step[0], step[1:]...); err != nil {
+			return "", err
+		}
+	}
+	sha, err := rollout.Call(dir, "git", "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(sha), nil
+}

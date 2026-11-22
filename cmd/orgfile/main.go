@@ -9,21 +9,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/go-fleettools/fleettools/internal/ghorg"
 	"github.com/go-fleettools/fleettools/internal/ghtoken"
 	"github.com/spf13/cobra"
 )
@@ -69,9 +65,6 @@ const (
 // test fail.
 var failVerdict = vUnread
 
-// maxBody bounds a file read: a runner config is a few KB.
-const maxBody = 4 << 20
-
 // readToken is ghtoken.Read; tests replace it.
 var readToken = ghtoken.Read
 
@@ -96,123 +89,16 @@ type result struct {
 	count int
 }
 
-// client counts nothing itself: it reads the reserve off every response.
-type client struct {
-	base, token string
-	http        *http.Client
-	reserve     int
-
-	mu        sync.Mutex
-	remaining int // -1 until a response has said
-	stopped   bool
-	calls     int
-}
-
-// low reports whether the reserve is reached, latching the stop.
-func (c *client) low() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.remaining >= 0 && c.remaining < c.reserve {
-		c.stopped = true
-	}
-	return c.stopped
-}
-
-func (c *client) note(h http.Header) {
-	n, err := strconv.Atoi(h.Get("X-RateLimit-Remaining"))
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.calls++
-	if err == nil && n >= 0 {
-		c.remaining = n
-	}
-}
-
-// get returns the status and body of one GET. raw asks for the file's bytes.
-func (c *client) get(ctx context.Context, path string, raw bool) (int, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
-	if err != nil {
-		return 0, nil, err
-	}
-	accept := "application/vnd.github+json"
-	if raw {
-		accept = "application/vnd.github.raw+json"
-	}
-	req.Header.Set("Accept", accept)
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-	c.note(resp.Header)
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
-	if err != nil {
-		return resp.StatusCode, nil, err
-	}
-	if len(b) > maxBody {
-		return resp.StatusCode, nil, fmt.Errorf("body over %d bytes", maxBody)
-	}
-	return resp.StatusCode, b, nil
-}
-
-// orgs lists every organisation of the account, page by page.
-func (c *client) orgs(ctx context.Context) ([]string, error) {
-	var out []string
-	for page := 1; page <= 100; page++ {
-		st, b, err := c.get(ctx, fmt.Sprintf("/user/orgs?per_page=100&page=%d", page), false)
-		if err != nil {
-			return nil, err
-		}
-		if st != http.StatusOK {
-			return nil, fmt.Errorf("listing organisations: HTTP %d", st)
-		}
-		names, err := logins(b)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, names...)
-		if len(names) < 100 {
-			sort.Strings(out)
-			return out, nil
-		}
-	}
-	return nil, fmt.Errorf("listing organisations: over 100 pages")
-}
-
-var nameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
-
-func validPath(p string) bool {
-	if p == "" || len(p) > 300 {
-		return false
-	}
-	for _, seg := range strings.Split(p, "/") {
-		if seg == "" || seg == "." || seg == ".." {
-			return false
-		}
-	}
-	return true
-}
-
-func escapePath(p string) string {
-	segs := strings.Split(p, "/")
-	for i, s := range segs {
-		segs[i] = url.PathEscape(s)
-	}
-	return strings.Join(segs, "/")
-}
-
 // check reads the file in one organisation. A non-404 answer is unread and ends
 // the search: the repository that failed might be the one that has the file.
-func (c *client) check(ctx context.Context, org string, o options) result {
+func check(ctx context.Context, c *ghorg.Client, org string, o options) result {
 	r := result{org: org}
 	for _, repo := range o.repos {
-		if c.low() {
+		if c.Low() {
 			r.v, r.why = vUnread, "not read: stopped at the reserve"
 			return r
 		}
-		st, b, err := c.get(ctx, "/repos/"+org+"/"+repo+"/contents/"+escapePath(o.file), true)
+		st, b, err := c.Get(ctx, "/repos/"+org+"/"+repo+"/contents/"+ghorg.EscapePath(o.file), true)
 		switch {
 		case err != nil:
 			r.v, r.repo, r.why = failVerdict, repo, repo+": "+err.Error()
@@ -294,7 +180,7 @@ func sweep(ctx context.Context, stdout, stderr io.Writer, o options) int {
 		o.base = sweepBase
 	}
 	switch {
-	case !validPath(o.file):
+	case !ghorg.ValidPath(o.file):
 		fmt.Fprintln(stderr, "orgfile: --file is required and must be a relative path")
 		return 2
 	case len(o.contains) == 0:
@@ -314,7 +200,7 @@ func sweep(ctx context.Context, stdout, stderr io.Writer, o options) int {
 		}
 	}
 	for _, n := range append(append([]string{}, o.repos...), o.orgs...) {
-		if !nameRe.MatchString(n) || n == "." || n == ".." {
+		if !ghorg.ValidName(n) {
 			fmt.Fprintf(stderr, "orgfile: %q is not a GitHub name\n", n)
 			return 2
 		}
@@ -324,12 +210,11 @@ func sweep(ctx context.Context, stdout, stderr io.Writer, o options) int {
 		fmt.Fprintf(stderr, "orgfile: %v\n", err)
 		return 2
 	}
-	c := &client{base: o.base, token: tok, http: &http.Client{Timeout: 30 * time.Second},
-		reserve: o.reserve, remaining: -1}
+	c := ghorg.New(o.base, tok, o.reserve)
 
 	list := o.orgs
 	if len(list) == 0 {
-		if list, err = c.orgs(ctx); err != nil {
+		if list, err = c.Orgs(ctx); err != nil {
 			fmt.Fprintf(stderr, "orgfile: could not list organisations: %v\n", err)
 			return 2
 		}
@@ -350,14 +235,14 @@ func sweep(ctx context.Context, stdout, stderr io.Writer, o options) int {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			res[i] = c.check(ctx, org, o)
+			res[i] = check(ctx, c, org, o)
 		}()
 	}
 	wg.Wait()
 	return report(stdout, stderr, res, o, c)
 }
 
-func report(stdout, stderr io.Writer, res []result, o options, c *client) int {
+func report(stdout, stderr io.Writer, res []result, o options, c *ghorg.Client) int {
 	tot := map[verdict]int{}
 	per := make([]int, len(o.contains))
 	notRead := 0
@@ -377,18 +262,18 @@ func report(stdout, stderr io.Writer, res []result, o options, c *client) int {
 	}
 	read := tot[vMatch] + tot[vNoMatch] + tot[vNoFile]
 	fmt.Fprintf(stdout, "totals: %d organisations, match %d, nomatch %d, nofile %d, unread %d; %d API calls\n",
-		len(res), tot[vMatch], tot[vNoMatch], tot[vNoFile], tot[vUnread], c.calls)
+		len(res), tot[vMatch], tot[vNoMatch], tot[vNoFile], tot[vUnread], c.Calls())
 	for i, s := range o.contains {
 		fmt.Fprintf(stdout, "  contains %q: %d of %d files read\n", s, per[i], tot[vMatch]+tot[vNoMatch])
 	}
 	code := 0
-	if c.stopped {
+	if c.Stopped() {
 		fmt.Fprintf(stderr, "orgfile: stopped at the reserve (%d left, %d reserved): %d of %d organisations read, "+
-			"%d not read; every count above is a FLOOR, not a total\n", c.remaining, c.reserve, read, len(res), notRead)
+			"%d not read; every count above is a FLOOR, not a total\n", c.Remaining(), c.Reserve, read, len(res), notRead)
 		code = 1
 	}
 	if tot[vUnread] > 0 {
-		if !c.stopped {
+		if !c.Stopped() {
 			fmt.Fprintf(stderr, "orgfile: %d organisation(s) unread; counts exclude them\n", tot[vUnread])
 		}
 		code = 1
@@ -416,21 +301,4 @@ func line(r result, o options) string {
 		s += fmt.Sprintf("  %q=%s", str, mark)
 	}
 	return s
-}
-
-// logins decodes the organisation names of one /user/orgs page.
-func logins(b []byte) ([]string, error) {
-	var page []struct {
-		Login string `json:"login"`
-	}
-	if err := json.Unmarshal(b, &page); err != nil {
-		return nil, fmt.Errorf("listing organisations: %w", err)
-	}
-	out := make([]string, 0, len(page))
-	for _, p := range page {
-		if p.Login != "" {
-			out = append(out, p.Login)
-		}
-	}
-	return out, nil
 }

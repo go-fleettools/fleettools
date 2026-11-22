@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
+	"github.com/go-fleettools/fleettools/internal/ghorg"
 )
 
 // answer is what the fake GitHub says for one contents path.
@@ -345,7 +346,7 @@ func TestATruncatedBodyIsUnread(t *testing.T) {
 
 func TestAnOversizedBodyIsUnread(t *testing.T) {
 	code, out, _ := driveH(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(bytes.Repeat([]byte("x"), maxBody+2))
+		w.Write(bytes.Repeat([]byte("x"), ghorg.MaxBody+2))
 	}), oneOrg...)
 	if code != 1 || !strings.Contains(out, "unread   a") || !strings.Contains(out, "over") || strings.Contains(out, "match    a") {
 		t.Fatalf("code %d\n%s", code, out)
@@ -403,22 +404,5 @@ func TestAMissingTokenIsExit2(t *testing.T) {
 	var o, e bytes.Buffer
 	if code := cli.Drive(RootCmd(), oneOrg, &o, &e); code != 2 || !strings.Contains(e.String(), "absent") {
 		t.Fatalf("code %d %q", code, e.String())
-	}
-}
-
-func TestFilePathBounds(t *testing.T) {
-	if validPath("") || validPath(strings.Repeat("a", 301)) || !validPath(strings.Repeat("a", 300)) || !validPath("a/b.js") {
-		t.Fatal("validPath bounds moved")
-	}
-}
-
-func TestTheReserveLatches(t *testing.T) {
-	c := &client{reserve: 10, remaining: 5}
-	if !c.low() {
-		t.Fatal("below the reserve is not low")
-	}
-	c.remaining = 5000 // a quota that comes back mid-run does not un-stop the run
-	if !c.low() {
-		t.Fatal("the stop did not latch")
 	}
 }
