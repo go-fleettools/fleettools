@@ -108,7 +108,7 @@ func TestOrgOfIsAnswerOnlyFromAnAnsweredGit(t *testing.T) {
 		{"nowhere", nil, ""},
 		{"", nil, ""},
 	} {
-		if got := orgOf(answer(c.url, c.err), "d"); got != c.want {
+		if got := orgOf(originOf(answer(c.url, c.err), "d")); got != c.want {
 			t.Errorf("orgOf(%q, %v) = %q, want %q", c.url, c.err, got, c.want)
 		}
 	}

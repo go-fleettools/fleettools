@@ -53,6 +53,10 @@ var secretWords = map[string]bool{
 var keyPrefix = map[string]bool{
 	"api": true, "private": true, "secret": true, "signing": true,
 	"encryption": true, "master": true,
+	// weft-ha-irods: --negotiation-key, --control-plane-key, --zone-key hold
+	// key material typed on the command line.
+	"negotiation": true, "plane": true, "zone": true,
+	"hmac": true, "jwt": true, "shared": true,
 }
 
 // quantifier words turn `token` into a COUNT (LLM tokens, a rate limit), which

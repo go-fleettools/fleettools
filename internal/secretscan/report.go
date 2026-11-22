@@ -21,8 +21,16 @@ type Hit struct {
 // an environment variable or a config field. n <= 0 means all of them.
 func (r Report) Top(n int) []Hit {
 	var hits []Hit
+	// one finding per repository: the worktrees of one origin hold the same
+	// line, which is counted once, in the first clone by name.
+	seen := map[string]bool{}
 	for _, c := range r.Clones {
 		for _, f := range c.Repo.Plaintext() {
+			k := fmt.Sprintf("%s\x00%s\x00%d\x00%s", c.Key(), f.File, f.Line, f.Name)
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
 			hits = append(hits, Hit{Clone: c.Dir, Org: c.Org, Finding: f})
 		}
 	}

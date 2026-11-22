@@ -37,6 +37,7 @@ type Staleness struct {
 type Clone struct {
 	Dir        string    `json:"dir"`
 	Org        string    `json:"org,omitempty"`
+	Origin     string    `json:"origin,omitempty"` // canonical origin URL; see Key
 	Read       bool      `json:"read"`
 	SkipReason string    `json:"skip_reason,omitempty"`
 	Repo       Repo      `json:"repo"`
@@ -84,6 +85,7 @@ func Sweep(root string, git Git, now time.Time, staleAfter time.Duration) (Repor
 	}
 	rep := Report{Generated: now, Root: root}
 	d := &rep.Denominator
+	daemon, plain := map[string]bool{}, map[string]bool{}
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			d.Ignored++
@@ -104,7 +106,8 @@ func Sweep(root string, git Git, now time.Time, staleAfter time.Duration) (Repor
 			rep.Clones = append(rep.Clones, c)
 			continue
 		}
-		c.Org = orgOf(git, dir)
+		c.Origin = originOf(git, dir)
+		c.Org = orgOf(c.Origin)
 		c.Staleness = staleness(git, dir, now, staleAfter)
 		d.Read++
 		d.FilesRead += c.Repo.FilesRead
@@ -122,26 +125,52 @@ func Sweep(root string, git Git, now time.Time, staleAfter time.Duration) (Repor
 			d.UsesSecretsource++
 		}
 		if c.Repo.Daemon {
-			d.DaemonRepos++
+			// per REPOSITORY, not per clone: the worktrees of one origin are
+			// one daemon.
+			daemon[c.Key()] = true
 			if len(c.Repo.Plaintext()) > 0 {
-				d.DaemonsPlaintext++
+				plain[c.Key()] = true
 			}
 		}
 		rep.Clones = append(rep.Clones, c)
 	}
+	d.DaemonRepos, d.DaemonsPlaintext = len(daemon), len(plain)
 	sort.Slice(rep.Clones, func(i, j int) bool { return rep.Clones[i].Dir < rep.Clones[j].Dir })
 	return rep, nil
+}
+
+// originOf reads origin's URL in one canonical spelling, so that the
+// worktrees and copies of one repository share it (`github.com/ORG/REPO`
+// whether the clone was made over https or ssh). "" when there is none.
+func originOf(git Git, dir string) string {
+	url, err := git(dir, "config", "--get", "remote.origin.url")
+	if err != nil {
+		return ""
+	}
+	url = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(url), "/"), ".git")
+	if _, rest, ok := strings.Cut(url, "://"); ok {
+		url = rest
+	}
+	if _, rest, ok := strings.Cut(url, "@"); ok {
+		url = rest
+	}
+	return strings.ToLower(strings.Replace(url, ":", "/", 1))
+}
+
+// Key is what makes two clones the same repository: the origin URL, or, with
+// none, the clone's own name, so that clones without an origin are never
+// merged into one.
+func (c Clone) Key() string {
+	if c.Origin != "" {
+		return c.Origin
+	}
+	return "dir:" + c.Dir
 }
 
 // orgOf reads the owner from origin's URL (https://github.com/ORG/REPO or
 // git@github.com:ORG/REPO): an organisation name may itself contain a hyphen,
 // so the directory name cannot say where the org ends.
-func orgOf(git Git, dir string) string {
-	url, err := git(dir, "config", "--get", "remote.origin.url")
-	if err != nil {
-		return ""
-	}
-	url = strings.TrimSuffix(url, ".git")
+func orgOf(url string) string {
 	i := strings.LastIndexAny(url, "/:")
 	if i < 0 {
 		return ""

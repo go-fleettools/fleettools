@@ -96,3 +96,11 @@ file	none
 from	none
 env	none
 path	none
+negotiation-key	plaintext
+control-plane-key	plaintext
+zone-key	plaintext
+hmac_key	plaintext
+jwt-key	plaintext
+shared_key	plaintext
+zone	none
+key-path	none

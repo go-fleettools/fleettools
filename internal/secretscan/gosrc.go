@@ -105,8 +105,14 @@ func ScanGo(rel string, src []byte) (GoScan, error) {
 				add("config-field", name, x.Pos())
 			}
 		case *ast.CallExpr:
-			if source, name := callName(x); name != "" {
-				add(source, name, x.Pos())
+			if source, name, pathy := callName(x); name != "" {
+				if pathy && Classify(name) == Plaintext {
+					// the flag takes a path (or a prompt), not the value.
+					gs.Findings = append(gs.Findings,
+						newFinding("input", source, Path, name, rel, fset.Position(x.Pos()).Line))
+				} else {
+					add(source, name, x.Pos())
+				}
 			}
 		}
 		return true
@@ -154,14 +160,45 @@ func stringLike(e ast.Expr) bool {
 	return false
 }
 
-// callName returns ("flag"|"env", name) for a pflag/flag string flag
-// definition or an os.Getenv/os.LookupEnv of a literal name, else "".
-func callName(c *ast.CallExpr) (string, string) {
+// pathLike: a flag default that is a path (`~/.github-token`, `/etc/x`,
+// `./tok`) says the flag takes a path.
+func pathLike(s string) bool {
+	return strings.HasPrefix(s, "/") || strings.HasPrefix(s, "~") || strings.HasPrefix(s, "./") ||
+		strings.HasPrefix(s, "../")
+}
+
+// pathUsage: a usage text that says "file" or "path" says the same.
+func pathUsage(s string) bool {
+	for _, w := range Tokens(s) {
+		if w == "file" || w == "path" || w == "filename" {
+			return true
+		}
+	}
+	return false
+}
+
+// strArg returns the value of the string literal argument i (the caller has
+// checked the argument count), or "".
+func strArg(c *ast.CallExpr, i int) string {
+	if lit, ok := c.Args[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+		s, _ := strconv.Unquote(lit.Value)
+		return s
+	}
+	return ""
+}
+
+// callName returns ("flag"|"env", name, pathy) for a pflag/flag string flag
+// definition or an os.Getenv/os.LookupEnv of a literal name, else "". pathy
+// is true for a flag whose default or usage says it takes a path: its value
+// is read from that file, so it is not the secret. Where the value merely
+// flows into os.Open or a *From reader, that flow is NOT followed: a stated
+// limit.
+func callName(c *ast.CallExpr) (string, string, bool) {
 	sel, ok := c.Fun.(*ast.SelectorExpr)
 	if !ok {
-		return "", ""
+		return "", "", false
 	}
-	source, idx := "", 0
+	source, idx, pathy := "", 0, false
 	switch fn := sel.Sel.Name; {
 	case flagFuncs[fn]:
 		source = "flag"
@@ -177,23 +214,25 @@ func callName(c *ast.CallExpr) (string, string) {
 			want++
 		}
 		if len(c.Args) != want {
-			return "", ""
+			return "", "", false
 		}
+		// the last two arguments are always the default and the usage.
+		pathy = pathLike(strArg(c, want-2)) || pathUsage(strArg(c, want-1))
 	case fn == "Getenv" || fn == "LookupEnv":
 		if id, ok := sel.X.(*ast.Ident); !ok || id.Name != "os" {
-			return "", ""
+			return "", "", false
 		}
 		source = "env"
 	default:
-		return "", ""
+		return "", "", false
 	}
 	if idx >= len(c.Args) {
-		return "", ""
+		return "", "", false
 	}
 	lit, ok := c.Args[idx].(*ast.BasicLit)
 	if !ok || lit.Kind != token.STRING {
-		return "", ""
+		return "", "", false
 	}
 	name, _ := strconv.Unquote(lit.Value)
-	return source, name
+	return source, name, pathy
 }

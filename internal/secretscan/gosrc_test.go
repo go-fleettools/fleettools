@@ -152,3 +152,61 @@ func FuzzScanGo(f *testing.F) {
 		}
 	})
 }
+
+func TestAFlagThatTakesAPathIsNotThePlaintextSecret(t *testing.T) {
+	src := "package main\n\nimport \"flag\"\n\nfunc main() {\n" +
+		"\t_ = flag.String(\"store-ssh-passphrase\", \"\", \"path to the ssh key file\")\n" +
+		"\t_ = flag.String(\"content-token\", \"\", \"Token FILE\")\n" +
+		"\t_ = flag.String(\"token\", \"~/.github-token\", \"github token\")\n" +
+		"\t_ = flag.String(\"abs-token\", \"/etc/t\", \"x\")\n" +
+		"\t_ = flag.String(\"rel-token\", \"./t\", \"x\")\n" +
+		"\t_ = flag.String(\"up-token\", \"../t\", \"x\")\n" +
+		"\t_ = flag.String(\"password\", \"\", \"the password\")\n" +
+		"\t_ = flag.String(\"api-token\", \"\", \"filename of nothing\")\n" +
+		"\t_ = flag.String(\"dyn-token\", dflt, \"the token\")\n" +
+		"}\n"
+	gs, err := ScanGo("m.go", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]Class{
+		"store-ssh-passphrase": Path, "content-token": Path, "token": Path,
+		"abs-token": Path, "rel-token": Path, "up-token": Path,
+		"password": Plaintext, "api-token": Path, "dyn-token": Plaintext,
+	}
+	got := map[string]Class{}
+	for _, f := range gs.Findings {
+		got[f.Name] = f.Class
+	}
+	for n, c := range want {
+		if got[n] != c {
+			t.Errorf("flag %q = %q, want %q", n, got[n], c)
+		}
+	}
+}
+
+func TestKeyMaterialFlagsAreSecretsButAKeyPathIsNot(t *testing.T) {
+	src := "package main\n\nimport \"flag\"\n\nfunc main() {\n" +
+		"\t_ = flag.String(\"negotiation-key\", \"\", \"k\")\n" +
+		"\t_ = flag.String(\"control-plane-key\", \"\", \"k\")\n" +
+		"\t_ = flag.String(\"zone-key\", \"\", \"k\")\n" +
+		"\t_ = flag.String(\"key\", \"\", \"k\")\n" +
+		"\t_ = flag.String(\"key-file\", \"\", \"k\")\n" +
+		"}\n"
+	gs, err := ScanGo("m.go", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Class{}
+	for _, f := range gs.Findings {
+		got[f.Name] = f.Class
+	}
+	for n, c := range map[string]Class{
+		"negotiation-key": Plaintext, "control-plane-key": Plaintext, "zone-key": Plaintext,
+		"key": None, "key-file": None,
+	} {
+		if got[n] != c {
+			t.Errorf("flag %q = %q, want %q", n, got[n], c)
+		}
+	}
+}
