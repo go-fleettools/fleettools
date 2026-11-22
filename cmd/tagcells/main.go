@@ -85,12 +85,34 @@ type options struct {
 // is written to a temporary file in the SAME directory (so the rename stays on
 // one filesystem), given the original's mode, and renamed over it. A kill at any
 // point leaves the old page or the new one, never an empty one.
+// tempFile is the part of *os.File that writeAtomic uses.
+//
+// ⛔ IT EXISTS SO THAT EACH FAILURE BELOW CAN BE MADE TO HAPPEN. Every one of
+// them was held by nothing until 2026-11-22 (mutation sweep: five survivors in
+// this function), and they are the only paths that decide whether a page is
+// left whole: a filesystem does not run out of space, refuse a chmod or fail a
+// close on request, and the branch that is never executed is the one that
+// deletes the half-written file. The seam is the smallest that lets a test
+// choose the step that fails.
+type tempFile interface {
+	io.Writer
+	Chmod(os.FileMode) error
+	Close() error
+	Name() string
+}
+
+// newTempFile is replaced in tests. It must create a REAL file: the point of
+// the tests below is what is left on disk afterwards.
+var newTempFile = func(dir, pattern string) (tempFile, error) {
+	return os.CreateTemp(dir, pattern)
+}
+
 func writeAtomic(path string, data []byte) error {
 	st, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tagcells-*")
+	tmp, err := newTempFile(filepath.Dir(path), ".tagcells-*")
 	if err != nil {
 		return err
 	}
@@ -233,10 +255,24 @@ func run(o options, stdout, stderr io.Writer, latest func(org, repo string) (str
 	return 0
 }
 
+// lsRemote is the one network call this command makes, replaced in tests. It is
+// a variable because the guard below cannot otherwise be exercised without
+// going out to GitHub, and a test whose only shield from the network is the
+// guard it is testing is no test.
+var lsRemote = func(url string) ([]byte, error) {
+	return exec.Command("git", "ls-remote", "--tags", "--refs", url).Output()
+}
+
 // latestTag asks git, not the REST API, for the repository's tags.
 func latestTag(org, repo string) (string, error) {
-	out, err := exec.Command("git", "ls-remote", "--tags", "--refs", "https://github.com/"+org+"/"+repo).Output()
+	out, err := lsRemote("https://github.com/" + org + "/" + repo)
 	if err != nil {
+		// ⛔ "I COULD NOT ASK" IS NOT "THERE IS NO RELEASE". Without this
+		// branch a failed call returns no output, highest("") says "no release
+		// tag", and every module reads as unreleased the moment the network is
+		// down -- a page would then be reported current because nothing could
+		// contradict it. The two answers travel apart: this one is counted as
+		// unread, which is exit 2.
 		return "", fmt.Errorf("git ls-remote: %w", err)
 	}
 	return highest(string(out))
