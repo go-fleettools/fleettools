@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"$schema\":\"x\",\"extends\":[\"config:base\",\"local>ACME/.github:default.json#v1\"],\"k\":1}")

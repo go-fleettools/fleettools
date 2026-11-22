@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"extends\":[1,null,[\"x\"]]}")
