@@ -169,6 +169,13 @@ func pathLike(s string) bool {
 
 // pathUsage: a usage text that says "file" or "path" says the same.
 func pathUsage(s string) bool {
+	// "the credential to use (default ~/.github-token)": a path named in the
+	// usage is the default, whatever the declared default says.
+	for _, f := range strings.Fields(s) {
+		if pathLike(strings.Trim(f, "()[],;:'\"`")) {
+			return true
+		}
+	}
 	for _, w := range Tokens(s) {
 		if w == "file" || w == "path" || w == "filename" {
 			return true

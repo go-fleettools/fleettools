@@ -164,6 +164,8 @@ func TestAFlagThatTakesAPathIsNotThePlaintextSecret(t *testing.T) {
 		"\t_ = flag.String(\"password\", \"\", \"the password\")\n" +
 		"\t_ = flag.String(\"api-token\", \"\", \"filename of nothing\")\n" +
 		"\t_ = flag.String(\"dyn-token\", dflt, \"the token\")\n" +
+		"\t_ = flag.String(\"use-token\", \"\", \"the credential to use (default ~/.github-token)\")\n" +
+		"\t_ = flag.String(\"url-token\", \"\", \"see https://x/y for the token\")\n" +
 		"}\n"
 	gs, err := ScanGo("m.go", []byte(src))
 	if err != nil {
@@ -173,6 +175,7 @@ func TestAFlagThatTakesAPathIsNotThePlaintextSecret(t *testing.T) {
 		"store-ssh-passphrase": Path, "content-token": Path, "token": Path,
 		"abs-token": Path, "rel-token": Path, "up-token": Path,
 		"password": Plaintext, "api-token": Path, "dyn-token": Plaintext,
+		"use-token": Path, "url-token": Plaintext,
 	}
 	got := map[string]Class{}
 	for _, f := range gs.Findings {
