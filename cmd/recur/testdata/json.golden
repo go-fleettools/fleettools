@@ -13,6 +13,7 @@
       "ledger": {
         "decision": "gate",
         "text": "refused by the pre-push hook",
+        "entry": "2a7c4414d0d9",
         "writtenAt": "2026-11-19T09:00:00Z",
         "fingerprint": "dd7debde8b82"
       },
@@ -32,6 +33,7 @@
       "ledger": {
         "decision": "untriaged",
         "text": "seeded, not triaged",
+        "entry": "0b1a26a22b2d",
         "writtenAt": null,
         "fingerprint": "f81a599bd287"
       },
@@ -54,6 +56,7 @@
       "ledger": {
         "decision": "none",
         "text": "",
+        "entry": "",
         "writtenAt": null,
         "fingerprint": ""
       },
@@ -77,6 +80,7 @@
       "ledger": {
         "decision": "none",
         "text": "",
+        "entry": "",
         "writtenAt": null,
         "fingerprint": ""
       },
@@ -99,6 +103,7 @@
       "ledger": {
         "decision": "no-gate",
         "text": "none can exist ⛔ DOWNGRADED from gate: the tool was removed",
+        "entry": "258016b7f36b",
         "writtenAt": "2026-11-10T08:00:00Z",
         "fingerprint": "000000000000",
         "downgrade": {
@@ -121,6 +126,7 @@
       "ledger": {
         "decision": "none",
         "text": "",
+        "entry": "",
         "writtenAt": null,
         "fingerprint": ""
       },
