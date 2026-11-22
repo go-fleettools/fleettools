@@ -388,6 +388,26 @@ func TestVetRecordsAPassForTheHeadTree(t *testing.T) {
 	}
 }
 
+// ⛔ `buildscan --dir . --vet` from the repository root is the way most people
+// type it. The root was compared with the directory AS GIVEN, so "." was never the
+// root and a passing vet was not recorded (fleettools#407).
+func TestVetRecordsAPassForARelativeDirAndASymlink(t *testing.T) {
+	dir := newClone(t, true)
+	commit(t, dir, "x_windows.go", "package a\n")
+	t.Chdir(dir)
+	if msg := vetRun(t, "."); !strings.Contains(msg, "recorded a vet pass") {
+		t.Fatalf("--dir . from the root: %q", msg)
+	}
+
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if msg := vetRun(t, link); !strings.Contains(msg, "recorded a vet pass") {
+		t.Fatalf("--dir through a symlink: %q", msg)
+	}
+}
+
 func TestVetRecordsNothingForADirtyTree(t *testing.T) {
 	dir := newClone(t, true)
 	commit(t, dir, "x_windows.go", "package a\n")

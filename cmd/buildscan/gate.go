@@ -193,7 +193,17 @@ func recordVet(stderr io.Writer, dir string, f finding) {
 	if a, err := filepath.EvalSymlinks(top); err == nil {
 		top = a
 	}
-	if top != filepath.Clean(dir) {
+	// The root is absolute with its symlinks resolved, so dir must be too: "." from
+	// the root, or a path through a symlink, is the root all the same.
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "buildscan: no record: %v\n", oneLine(err))
+		return
+	}
+	if a, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = a
+	}
+	if top != abs {
 		fmt.Fprintf(stderr, "buildscan: no record: %s is not the repository root (%s), the vet covered part of it\n", dir, top)
 		return
 	}
@@ -217,7 +227,7 @@ func recordVet(stderr io.Writer, dir string, f finding) {
 		cfgs = append(cfgs, c.key())
 	}
 	sort.Strings(cfgs)
-	if err := storeRecord(passRecord{Tree: tree, Dir: dir, Configs: cfgs, At: time.Now().UTC()}); err != nil {
+	if err := storeRecord(passRecord{Tree: tree, Dir: abs, Configs: cfgs, At: time.Now().UTC()}); err != nil {
 		fmt.Fprintf(stderr, "buildscan: no record: %v\n", oneLine(err))
 		return
 	}
