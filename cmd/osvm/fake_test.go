@@ -336,6 +336,9 @@ func TestCreateEachCallFails(t *testing.T) {
 			if err == nil {
 				t.Fatal("error swallowed")
 			}
+			if !strings.Contains(err.Error(), "500") {
+				t.Errorf("the refusal is not the server's failure: %v", err)
+			}
 			if strings.Contains(out, c.absent) {
 				t.Errorf("went on past the failure (%q reported):\n%s", c.absent, out)
 			}
@@ -352,7 +355,7 @@ func TestWaitFailureIsRefusedEvenIfTheNextReadWorks(t *testing.T) {
 	}
 }
 
-var undecodable =map[string]string{
+var undecodable = map[string]string{
 	"GET /compute/v2.1/servers/detail":  `{"servers":[{"id":5}]}`,
 	"GET /network/v2.0/networks":        `{"networks":[{"id":5}]}`,
 	"GET /network/v2.0/subnets":         `{"subnets":[{"id":5}]}`,
