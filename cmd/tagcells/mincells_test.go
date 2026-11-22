@@ -36,7 +36,7 @@ func claimless(t *testing.T) (string, string) {
 func TestAPageWithNoClaimIsNamedEvenWhenTheRunSucceeds(t *testing.T) {
 	with, without := claimless(t)
 	var out, errb bytes.Buffer
-	current := func(_, repo string) (string, error) { return "v0.89.0", nil }
+	current := func(_, repo string) (Release, error) { return rel("window", "v0.89.0")["window"], nil }
 	if rc := run(options{org: "go-widgets", files: []string{with, without}}, &out, &errb, current); rc != 0 {
 		t.Fatalf("rc %d, want 0: the one claim there is, is current\n%s", rc, out.String())
 	}
@@ -50,7 +50,7 @@ func TestAPageWithNoClaimIsNamedEvenWhenTheRunSucceeds(t *testing.T) {
 
 func TestMinCellsRefusesARunThatLostAClaim(t *testing.T) {
 	with, without := claimless(t)
-	current := func(_, repo string) (string, error) { return "v0.89.0", nil }
+	current := func(_, repo string) (Release, error) { return rel("window", "v0.89.0")["window"], nil }
 
 	// One cell is what these two pages hold, so --min-cells 1 passes...
 	var out, errb bytes.Buffer
@@ -73,13 +73,13 @@ func TestMinCellsRefusesARunThatLostAClaim(t *testing.T) {
 func TestMinCellsDefaultsToTheOldRule(t *testing.T) {
 	with, without := claimless(t)
 	var out, errb bytes.Buffer
-	current := func(_, repo string) (string, error) { return "v0.89.0", nil }
+	current := func(_, repo string) (Release, error) { return rel("window", "v0.89.0")["window"], nil }
 	if rc := run(options{org: "go-widgets", files: []string{with, without}}, &out, &errb, current); rc != 0 {
 		t.Fatalf("rc %d, want 0 with no --min-cells", rc)
 	}
 	// And a stale claim still outranks it: exit 1 is about the page's contents.
 	out.Reset()
-	old := func(_, repo string) (string, error) { return "v0.90.0", nil }
+	old := func(_, repo string) (Release, error) { return rel("window", "v0.90.0")["window"], nil }
 	if rc := run(options{org: "go-widgets", minCells: 1, files: []string{with, without}}, &out, &errb, old); rc != 1 {
 		t.Fatalf("rc %d, want 1: --min-cells was satisfied and the claim is stale", rc)
 	}
@@ -93,7 +93,7 @@ func TestMinCellsDefaultsToTheOldRule(t *testing.T) {
 func TestAnUnreadTagOutranksMinCells(t *testing.T) {
 	with, without := claimless(t)
 	var out, errb bytes.Buffer
-	broken := func(_, repo string) (string, error) { return "", os.ErrPermission }
+	broken := func(_, repo string) (Release, error) { return Release{}, os.ErrPermission }
 	if rc := run(options{org: "go-widgets", minCells: 99, files: []string{with, without}}, &out, &errb, broken); rc != 2 {
 		t.Fatalf("rc %d, want 2", rc)
 	}

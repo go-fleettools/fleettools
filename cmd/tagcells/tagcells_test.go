@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,7 +82,7 @@ func TestFindTOMLReadsTheLandingsOwnRepoBlocks(t *testing.T) {
 	if strings.Join(got, " ") != "fleettools@v0.65.0 modfloor@v0.6.1" {
 		t.Fatalf("%v", got)
 	}
-	out := Rewrite(landing, cells, map[string]string{"fleettools": "v0.66.0", "modfloor": "v0.6.1"}, "")
+	out, _ := Rewrite(landing, cells, rel("fleettools", "v0.66.0", "modfloor", "v0.6.1"), "")
 	if !strings.Contains(out, `label  = "v0.66.0"`) {
 		t.Error("the aligned spelling must survive the rewrite:\n" + out)
 	}
@@ -106,7 +107,7 @@ func TestATableHeaderEndsTheBlock(t *testing.T) {
 
 func TestRewriteChangesOnlyStaleKnownCells(t *testing.T) {
 	cells := Find(md, "go-widgets", false)
-	out := Rewrite(md, cells, map[string]string{"window": "v0.89.1", "mvvm": "v0.15.0"}, "")
+	out, _ := Rewrite(md, cells, rel("window", "v0.89.1", "mvvm", "v0.15.0"), "")
 	if !strings.Contains(out, "| [`window`](https://github.com/go-widgets/window) | v0.89.1 |") ||
 		!strings.Contains(out, "| [`mvvm`](https://github.com/go-widgets/mvvm) | v0.15.0 |") ||
 		!strings.Contains(out, "| [`fonts`](https://github.com/go-opentype/fonts) | v0.1.0 |") ||
@@ -114,7 +115,7 @@ func TestRewriteChangesOnlyStaleKnownCells(t *testing.T) {
 		t.Fatal(out)
 	}
 	tc := Find(toml, "go-widgets", true)
-	out = Rewrite(toml, tc, map[string]string{"window": "v0.89.1", "mvvm": "v0.16.0", "Linux": ""}, "")
+	out, _ = Rewrite(toml, tc, rel("window", "v0.89.1", "mvvm", "v0.16.0", "Linux", ""), "")
 	if !strings.Contains(out, "tag = \"v0.89.1\"") || !strings.Contains(out, "tag = \"v0.16.0\"") || !strings.Contains(out, "tag = \"v9.9.9\"") {
 		t.Fatal(out)
 	}
@@ -122,11 +123,44 @@ func TestRewriteChangesOnlyStaleKnownCells(t *testing.T) {
 
 func TestHighestIsSemverNotText(t *testing.T) {
 	ls := "a\trefs/tags/v0.9.0\nb\trefs/tags/v0.10.0\nc\trefs/tags/v0.11.0-rc1\nd\trefs/tags/rougelex/v0.1.0\ne\trefs/tags/v1\nf\trefs/tags/latest\n"
-	if got, err := highest(ls); err != nil || got != "v0.10.0" {
-		t.Fatalf("%q %v", got, err)
+	if got, err := highest(ls); err != nil || got.Tag != "v0.10.0" {
+		t.Fatalf("%+v %v", got, err)
 	}
 	if _, err := highest("x\trefs/tags/v0.1.0-rc1\n"); err == nil {
 		t.Fatal("only a prerelease is no release")
+	}
+}
+
+// ⛔ THE COMMIT MUST BE THE ONE OF THE TAG THAT WON, and the rest of the output
+// must not be able to lend it one. Three ways this went wrong before the commit
+// was read at all, each of which produces a well-formed object id that answers
+// for the wrong thing: the LAST line's oid, the HIGHEST line's oid regardless
+// of which tag that line carries, and a short or peeled field accepted as an
+// id. The fixture is deliberately out of order and mixes widths.
+func TestHighestKeepsTheCommitOfTheTagItPicked(t *testing.T) {
+	const win = "1111111111111111111111111111111111111111"
+	const lose = "2222222222222222222222222222222222222222"
+	ls := "" +
+		lose + "\trefs/tags/v0.9.0\n" +
+		win + "\trefs/tags/v0.10.0\n" +
+		lose + "\trefs/tags/v0.1.0\n"
+	got, err := highest(ls)
+	if err != nil || got.Tag != "v0.10.0" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if got.Commit != win {
+		t.Fatalf("commit %q, want the commit of v0.10.0 (%s)", got.Commit, win)
+	}
+	// A field that is not a full object id yields NO commit, never a plausible
+	// one: an unread commit is refused downstream, a wrong one is published.
+	for _, bad := range []string{"1111111", "deadbeefg" + strings.Repeat("0", 31), win + "^{}"} {
+		got, err := highest(bad + "\trefs/tags/v0.3.0\n")
+		if err != nil || got.Tag != "v0.3.0" {
+			t.Fatalf("%q: %+v %v", bad, got, err)
+		}
+		if got.Commit != "" {
+			t.Fatalf("%q was accepted as an object id: %q", bad, got.Commit)
+		}
 	}
 }
 
@@ -142,8 +176,24 @@ func files(t *testing.T) (string, string) {
 	return m, h
 }
 
-var fake = func(org, repo string) (string, error) {
-	return map[string]string{"window": "v0.89.1", "mvvm": "v0.15.0"}[repo], nil
+// rel builds the want map from module, tag pairs. Each commit must have a REAL
+// object id's shape, because rewritePar truncates it onto the page: one hex
+// digit per module repeated forty times keeps the fixtures readable and the
+// values distinguishable. A module with no tag has no commit either.
+func rel(pairs ...string) map[string]Release {
+	want := map[string]Release{}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		r := Release{Tag: pairs[i+1]}
+		if r.Tag != "" {
+			r.Commit = strings.Repeat(fmt.Sprintf("%x", (i/2)+10), 40)[:40]
+		}
+		want[pairs[i]] = r
+	}
+	return want
+}
+
+var fake = func(org, repo string) (Release, error) {
+	return rel("window", "v0.89.1", "mvvm", "v0.15.0")[repo], nil
 }
 
 func TestRunReportsThenWrites(t *testing.T) {
@@ -176,7 +226,7 @@ func TestRunReportsThenWrites(t *testing.T) {
 func TestAnUnreadTagOrNoCellFailsTheRun(t *testing.T) {
 	m, _ := files(t)
 	var out, errb bytes.Buffer
-	broken := func(_, repo string) (string, error) { return "", errors.New("ls-remote failed") }
+	broken := func(_, repo string) (Release, error) { return Release{}, errors.New("ls-remote failed") }
 	if rc := run(options{org: "go-widgets", files: []string{m}}, &out, &errb, broken); rc != 2 {
 		t.Fatalf("unread: rc %d", rc)
 	}

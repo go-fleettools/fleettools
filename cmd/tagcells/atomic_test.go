@@ -163,7 +163,7 @@ func TestAFailedWriteIsExitTwoAndNamesTheError(t *testing.T) {
 
 	var out, errb bytes.Buffer
 	rc := run(options{org: "go-widgets", write: true, files: []string{p}}, &out, &errb,
-		func(string, string) (string, error) { return "v0.90.0", nil })
+		func(string, string) (Release, error) { return rel("window", "v0.90.0")["window"], nil })
 	if rc != 2 {
 		t.Fatalf("rc %d, want 2\n%s", rc, out.String())
 	}
