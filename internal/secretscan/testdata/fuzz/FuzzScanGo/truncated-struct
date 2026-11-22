@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("package c\ntype C struct {\n\tPassword string `toml:\"password\"`\n\tTok string `json:\"tok")
