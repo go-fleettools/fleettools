@@ -22,6 +22,7 @@ type fakeCloud struct {
 	fail     map[string]int
 	calls    map[string]int
 	services []string
+	groups   string
 	failNth  map[string]int    // key -> the one call number that fails
 	garbled  map[string]string // key -> body that lists fine but does not decode
 	denyAuth bool
@@ -36,7 +37,7 @@ const (
 	flavorsOK   = `{"flavors":[{"id":"f1","name":"vd.1","ram":2048,"vcpus":1,"disk":10},{"id":"f2","name":"os.6","ram":12268,"vcpus":6,"disk":20}]}`
 	imagesOK    = `{"images":[{"id":"i1","name":"debian-13-genericcloud","status":"active","created_at":"2026-08-03T00:00:00Z"}]}`
 	serverBody  = `{"server":{"id":"s1","name":"vm","status":"ACTIVE","key_name":"k","addresses":{"private-network":[{"addr":"192.168.1.94","OS-EXT-IPS:type":"fixed"}]}}}`
-	serversList = `{"servers":[{"id":"s1","name":"vm","status":"ACTIVE","key_name":"k","addresses":{"private-network":[{"addr":"192.168.1.94","OS-EXT-IPS:type":"fixed"}]}}]}`
+	serversList = `{"servers":[{"id":"s1","name":"vm","status":"ACTIVE","key_name":"k","security_groups":[{"name":"sg-a"},{"name":"sg-b"}],"addresses":{"private-network":[{"addr":"192.168.1.94","OS-EXT-IPS:type":"fixed"}]}}]}`
 )
 
 func newFake(t *testing.T) *fakeCloud {
@@ -122,6 +123,10 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 	case "GET /compute/v2.1/os-keypairs":
 		reply(200, `{"keypairs":[{"keypair":{"name":"k","fingerprint":"aa:bb"}}]}`)
 	case "GET /network/v2.0/security-groups":
+		if f.groups != "" {
+			reply(200, f.groups)
+			return
+		}
 		reply(200, `{"security_groups":[{"id":"g1","name":"default","security_group_rules":[]}]}`)
 	case "GET /compute/v2.1/flavors/detail":
 		reply(200, f.flavors)
@@ -184,7 +189,7 @@ func TestInventoryHappy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"project: demo (p1)", "server vm id=s1", "private-network:192.168.1.94(fixed)",
+	for _, want := range []string{"project: demo (p1)", "server vm id=s1", "secgroups=sg-a,sg-b", "private-network:192.168.1.94(fixed)",
 		"network private-network", "subnet private-subnet cidr=192.168.1.0/24", "floatingip 157.136.254.110 fixed=192.168.1.67",
 		"keypair k", "secgroup default", "flavor vd.1", "image debian-13-genericcloud"} {
 		if !strings.Contains(out, want) {
@@ -352,6 +357,130 @@ func TestWaitFailureIsRefusedEvenIfTheNextReadWorks(t *testing.T) {
 	out, err := run(createArgs...)
 	if err == nil || strings.Contains(out, "server vm id=") {
 		t.Fatalf("a failed wait was reported as success: %v\n%s", err, out)
+	}
+}
+
+var allowArgs = []string{cloudArg, "allow", "--group=default", "--from=192.168.1.94/32", "--port=88", "--port=445"}
+
+func ruleBodies(f *fakeCloud) []string {
+	var r []string
+	for _, c := range f.created {
+		if strings.Contains(c, "security-group-rules") {
+			r = append(r, c)
+		}
+	}
+	return r
+}
+
+func TestAllowAddsOneRulePerPortFromOneHost(t *testing.T) {
+	f := newFake(t)
+	out, err := run(allowArgs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := ruleBodies(f)
+	if len(rs) != 2 {
+		t.Fatalf("rules = %v", rs)
+	}
+	for i, port := range []string{"88", "445"} {
+		for _, want := range []string{`"port_range_min":` + port, `"port_range_max":` + port, `"remote_ip_prefix":"192.168.1.94/32"`, `"direction":"ingress"`, `"protocol":"tcp"`, `"security_group_id":"g1"`} {
+			if !strings.Contains(rs[i], want) {
+				t.Errorf("rule %d lacks %s: %s", i, want, rs[i])
+			}
+		}
+		if !strings.Contains(out, "rule added: tcp/"+port+" from 192.168.1.94/32 in default") {
+			t.Errorf("no report for %s:\n%s", port, out)
+		}
+	}
+}
+
+func TestAllowIsIdempotent(t *testing.T) {
+	f := newFake(t)
+	f.groups = `{"security_groups":[{"id":"g1","name":"default","security_group_rules":[` +
+		`{"direction":"ingress","protocol":"tcp","remote_ip_prefix":"192.168.1.94/32","port_range_min":88,"port_range_max":88},` +
+		`{"direction":"ingress","protocol":"tcp","remote_ip_prefix":"10.0.0.1/32","port_range_min":445,"port_range_max":445},` +
+		`{"direction":"egress","protocol":"tcp","remote_ip_prefix":"192.168.1.94/32","port_range_min":445,"port_range_max":445}]}]}`
+	out, err := run(allowArgs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := ruleBodies(f)
+	if len(rs) != 1 || !strings.Contains(rs[0], `"port_range_min":445`) {
+		t.Fatalf("rules = %v", rs)
+	}
+	if !strings.Contains(out, "rule exists: tcp/88") || !strings.Contains(out, "rule added: tcp/445") {
+		t.Errorf("out:\n%s", out)
+	}
+}
+
+func TestAllowRefusals(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--from=192.168.1.94/32", "--port=88"}, "--group and"},
+		{[]string{"--group=default", "--from=192.168.1.94/32"}, "--group and"},
+		{[]string{"--group=default", "--from=192.168.1.0/24", "--port=88"}, "/32"},
+		{[]string{"--group=default", "--from=0.0.0.0/0", "--port=88"}, "/32"},
+		{[]string{"--group=default", "--from=fe80::1/128", "--port=88"}, "/32"},
+		{[]string{"--group=default", "--from=junk", "--port=88"}, "--from"},
+		{[]string{"--group=default", "--port=88"}, "--from"},
+		{[]string{"--group=default", "--from=192.168.1.94/32", "--port=0"}, "out of range"},
+		{[]string{"--group=default", "--from=192.168.1.94/32", "--port=65536"}, "out of range"},
+	}
+	for _, c := range cases {
+		t.Run(c.want+strings.Join(c.args, " "), func(t *testing.T) {
+			f := newFake(t)
+			_, err := run(append([]string{cloudArg, "allow"}, c.args...)...)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want %q", err, c.want)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("reached the cloud: %v", f.calls)
+			}
+		})
+	}
+	newFake(t)
+	if _, err := run("allow", "--group=default", "--from=192.168.1.94/32", "--port=88"); err == nil || !strings.Contains(err.Error(), "--cloud") {
+		t.Errorf("allow without --cloud: %v", err)
+	}
+}
+
+func TestAllowGroupAndCallFailures(t *testing.T) {
+	f := newFake(t)
+	f.groups = `{"security_groups":[]}`
+	if _, err := run(allowArgs...); err == nil || !strings.Contains(err.Error(), "want exactly one") {
+		t.Errorf("no group: %v", err)
+	}
+	f = newFake(t)
+	f.groups = `{"security_groups":[{"id":"a","name":"default"},{"id":"b","name":"default"}]}`
+	if _, err := run(allowArgs...); err == nil || !strings.Contains(err.Error(), "want exactly one") {
+		t.Errorf("two groups: %v", err)
+	}
+	if len(ruleBodies(f)) != 0 {
+		t.Error("wrote a rule to an ambiguous group")
+	}
+	f = newFake(t)
+	f.fail["GET /network/v2.0/security-groups"] = 0
+	if _, err := run(allowArgs...); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Errorf("list failure: %v", err)
+	}
+	f = newFake(t)
+	f.fail["POST /network/v2.0/security-group-rules"] = 0
+	out, err := run(allowArgs...)
+	if err == nil || !strings.Contains(err.Error(), "tcp/88") || strings.Contains(out, "rule added") {
+		t.Errorf("rule failure: %v\n%s", err, out)
+	}
+	f = newFake(t)
+	f.fail["POST /network/v2.0/security-group-rules"] = 1
+	out, err = run(allowArgs...)
+	if err == nil || !strings.Contains(err.Error(), "tcp/445") || !strings.Contains(out, "rule added: tcp/88") {
+		t.Errorf("second rule failure: %v\n%s", err, out)
+	}
+	f = newFake(t)
+	f.denyAuth = true
+	if _, err := run(allowArgs...); err == nil || !strings.Contains(err.Error(), "authenticate") {
+		t.Errorf("auth: %v", err)
 	}
 }
 

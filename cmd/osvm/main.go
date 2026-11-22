@@ -97,6 +97,26 @@ func RootCmd() *cobra.Command {
 		},
 	})
 
+	var a allowOpts
+	allow := &cobra.Command{
+		Use:   "allow",
+		Short: "add TCP ingress rules to an existing security group, from one host (/32) only",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cloud == "" {
+				return errors.New("--cloud is required")
+			}
+			if err := a.validate(); err != nil {
+				return err
+			}
+			return allowRules(cmd.Context(), cloud, a, cmd.OutOrStdout())
+		},
+	}
+	allow.Flags().StringVar(&a.Group, "group", "", "security group name (must match exactly one)")
+	allow.Flags().StringVar(&a.From, "from", "", "source host as a /32 (required)")
+	allow.Flags().IntSliceVar(&a.Ports, "port", nil, "TCP port (repeatable)")
+	root.AddCommand(allow)
+
 	var o createOpts
 	create := &cobra.Command{
 		Use:   "create",
@@ -154,6 +174,64 @@ func checkCIDR(s string) error {
 	}
 	if p.Bits() == 0 {
 		return errors.New("--ssh-from: refusing a world-open prefix")
+	}
+	return nil
+}
+
+type allowOpts struct {
+	Group, From string
+	Ports       []int
+}
+
+func (a allowOpts) validate() error {
+	if a.Group == "" || len(a.Ports) == 0 {
+		return errors.New("--group and at least one --port are required")
+	}
+	for _, p := range a.Ports {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("--port %d out of range", p)
+		}
+	}
+	pre, err := netip.ParsePrefix(a.From)
+	if err != nil {
+		return fmt.Errorf("--from: %w", err)
+	}
+	if !pre.Addr().Is4() || pre.Bits() != 32 {
+		return errors.New("--from: a single IPv4 host (/32) is required")
+	}
+	return nil
+}
+
+// allowRules adds one ingress TCP rule per port from a single host, skipping a
+// rule the group already has, so a repeat changes nothing.
+func allowRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) error {
+	c, err := connect(ctx, cloud)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "project:", projectName(c.provider))
+	gs, err := collect(ctx, groups.List(c.network, groups.ListOpts{Name: a.Group}), groups.ExtractGroups)
+	if err != nil || len(gs) != 1 {
+		return fmt.Errorf("security group %q: want exactly one, got %d (%v)", a.Group, len(gs), err)
+	}
+	have := map[int]bool{}
+	for _, r := range gs[0].Rules {
+		if r.Direction == "ingress" && r.Protocol == "tcp" && r.RemoteIPPrefix == a.From {
+			have[r.PortRangeMin] = r.PortRangeMin == r.PortRangeMax
+		}
+	}
+	for _, p := range a.Ports {
+		if have[p] {
+			fmt.Fprintf(w, "rule exists: tcp/%d from %s in %s\n", p, a.From, gs[0].Name)
+			continue
+		}
+		if _, err := rules.Create(ctx, c.network, rules.CreateOpts{
+			SecGroupID: gs[0].ID, Direction: rules.DirIngress, EtherType: rules.EtherType4,
+			Protocol: rules.ProtocolTCP, PortRangeMin: p, PortRangeMax: p, RemoteIPPrefix: a.From,
+		}).Extract(); err != nil {
+			return fmt.Errorf("rule tcp/%d: %w", p, err)
+		}
+		fmt.Fprintf(w, "rule added: tcp/%d from %s in %s\n", p, a.From, gs[0].Name)
 	}
 	return nil
 }
@@ -279,7 +357,11 @@ func inventory(ctx context.Context, cloud string, w io.Writer) error {
 			}
 		}
 		sort.Strings(addrs)
-		fmt.Fprintf(w, "server %s id=%s status=%s keypair=%s addrs=%s\n", s.Name, s.ID, s.Status, s.KeyName, strings.Join(addrs, ","))
+		var sgs []string
+		for _, g := range s.SecurityGroups {
+			sgs = append(sgs, fmt.Sprint(g["name"]))
+		}
+		fmt.Fprintf(w, "server %s id=%s status=%s keypair=%s secgroups=%s addrs=%s\n", s.Name, s.ID, s.Status, s.KeyName, strings.Join(sgs, ","), strings.Join(addrs, ","))
 	}
 
 	ns, err := collect(ctx, networks.List(c.network, networks.ListOpts{}), networks.ExtractNetworks)
