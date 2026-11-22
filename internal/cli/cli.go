@@ -285,11 +285,9 @@ func Drive(c *cobra.Command, args []string, out, errOut io.Writer) int {
 	shimmed, err := Compat(c, args, errOut)
 	if err != nil {
 		fmt.Fprintln(errOut, "⛔", err)
-		var e *Exit
-		if errors.As(err, &e) {
-			return e.Code
-		}
-		return 2
+		// Wrap keeps a status the error already carries and gives any other
+		// error 2, so no branch is left for an error Compat does not return.
+		return Wrap(err).(*Exit).Code
 	}
 	c.SetArgs(shimmed)
 	return Status(c)

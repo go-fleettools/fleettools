@@ -37,7 +37,9 @@ const Attempts = 5
 
 // Backoff is how long to wait before the next attempt. A test sets it to
 // nothing.
-var Backoff = func(attempt int) time.Duration {
+var Backoff = defaultBackoff
+
+func defaultBackoff(attempt int) time.Duration {
 	return time.Duration(20*(attempt+1)) * time.Second
 }
 
