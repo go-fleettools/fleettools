@@ -81,7 +81,7 @@ func TestFindTOMLReadsTheLandingsOwnRepoBlocks(t *testing.T) {
 	if strings.Join(got, " ") != "fleettools@v0.65.0 modfloor@v0.6.1" {
 		t.Fatalf("%v", got)
 	}
-	out := Rewrite(landing, cells, map[string]string{"fleettools": "v0.66.0", "modfloor": "v0.6.1"})
+	out := Rewrite(landing, cells, map[string]string{"fleettools": "v0.66.0", "modfloor": "v0.6.1"}, "")
 	if !strings.Contains(out, `label  = "v0.66.0"`) {
 		t.Error("the aligned spelling must survive the rewrite:\n" + out)
 	}
@@ -106,7 +106,7 @@ func TestATableHeaderEndsTheBlock(t *testing.T) {
 
 func TestRewriteChangesOnlyStaleKnownCells(t *testing.T) {
 	cells := Find(md, "go-widgets", false)
-	out := Rewrite(md, cells, map[string]string{"window": "v0.89.1", "mvvm": "v0.15.0"})
+	out := Rewrite(md, cells, map[string]string{"window": "v0.89.1", "mvvm": "v0.15.0"}, "")
 	if !strings.Contains(out, "| [`window`](https://github.com/go-widgets/window) | v0.89.1 |") ||
 		!strings.Contains(out, "| [`mvvm`](https://github.com/go-widgets/mvvm) | v0.15.0 |") ||
 		!strings.Contains(out, "| [`fonts`](https://github.com/go-opentype/fonts) | v0.1.0 |") ||
@@ -114,7 +114,7 @@ func TestRewriteChangesOnlyStaleKnownCells(t *testing.T) {
 		t.Fatal(out)
 	}
 	tc := Find(toml, "go-widgets", true)
-	out = Rewrite(toml, tc, map[string]string{"window": "v0.89.1", "mvvm": "v0.16.0", "Linux": ""})
+	out = Rewrite(toml, tc, map[string]string{"window": "v0.89.1", "mvvm": "v0.16.0", "Linux": ""}, "")
 	if !strings.Contains(out, "tag = \"v0.89.1\"") || !strings.Contains(out, "tag = \"v0.16.0\"") || !strings.Contains(out, "tag = \"v9.9.9\"") {
 		t.Fatal(out)
 	}
