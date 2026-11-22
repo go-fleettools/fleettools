@@ -122,6 +122,15 @@ jobs:
         working-directory: pages
         run: |
           set -o pipefail
+          # ⛔ $FILES IS UNQUOTED ON PURPOSE and shellcheck is right to ask: it
+          # holds a space-separated list of paths or patterns, and splitting
+          # plus globbing is the contract — `content/en/repos/*.md` has to
+          # become thirteen arguments here, because the pattern is expanded by
+          # the runner's shell relative to the checked-out page tree. Quoted, it
+          # would arrive as ONE argument with spaces and asterisks in it, and
+          # tagcells would exit 2 on a file name nothing can open — a refusal
+          # that looks exactly like a page it could not read.
+          # shellcheck disable=SC2086
           "$RUNNER_TEMP/tagcells" --org "$ORG" --min-cells "$MIN" $FILES | tee "$RUNNER_TEMP/report.txt"
           {
             echo '## labels-current'
