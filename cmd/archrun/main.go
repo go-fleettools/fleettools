@@ -118,7 +118,7 @@ type options struct {
 
 // RootCmd is the command, driven by the tests through cli.Drive.
 func RootCmd() *cobra.Command {
-	c := cli.New("archrun --host HOST --arch GOARCH [flags] <clone>",
+	c := cli.New("archrun --host HOST --arch GOARCH [flags] <clone>...",
 		"Cross-compile a repository's tests, run them on a real remote machine",
 		`Lists the packages of <clone> that have tests for the target, cross-compiles
 each test binary (GOOS=linux GOARCH=<arch> CGO_ENABLED=0 go test -c), copies it
@@ -129,6 +129,10 @@ HOST is anything ssh accepts (an alias, or user@host); --port sets the port.
 ssh runs with BatchMode, so a key that needs a prompt fails instead of hanging.
 A connection that fails (a banner timeout is common on a busy shared host) is
 retried --retries times before the package is called ERROR.
+
+Several clones run in turn over one shared ssh connection (a "== clone" line
+precedes each; --report FILE.json becomes FILE.<clone>.json per clone); exit 1
+if any package of any clone did not pass, else 2 if any could not be run.
 
 With --bench REGEXP the binaries run as benchmarks (-test.run '^$' -test.bench
 REGEXP -test.benchtime T) and the raw output is written to --report's directory,
@@ -142,7 +146,7 @@ exit 0 every package PASSed or had no test file for this target
 exit 1 a package FAILed, TIMED OUT, or did not BUILD
 exit 2 it refuses to decide: a missing flag, the host unreachable or not the
        machine --arch names, a copy that failed`)
-	c.Args = cobra.ExactArgs(1)
+	c.Args = cobra.MinimumNArgs(1)
 	var o options
 	var only, skip string
 	f := c.Flags()
@@ -153,7 +157,7 @@ exit 2 it refuses to decide: a missing flag, the host unreachable or not the
 	f.StringVar(&o.memlimit, "memlimit", "2GiB", "GOMEMLIMIT for each remote run")
 	f.StringVar(&o.remoteDir, "remote-dir", "", "scratch directory on the host (default archrun-<timestamp>, relative to $HOME)")
 	f.BoolVar(&o.keep, "keep", false, "leave the remote directory in place")
-	f.StringVar(&o.work, "work", "", "local directory for the binaries (default <user config dir>/archrun)")
+	f.StringVar(&o.work, "work", "", "local directory for the binaries (default ~/.cache/archrun)")
 	f.StringVar(&o.reportPath, "report", "", "write the JSON report here (benchmark output goes beside it)")
 	f.IntVar(&o.retries, "retries", 3, "attempts per ssh/scp when the connection itself fails")
 	f.StringVar(&o.bench, "bench", "", "run benchmarks matching this regexp instead of the tests")
@@ -165,7 +169,6 @@ exit 2 it refuses to decide: a missing flag, the host unreachable or not the
 		if cli.HelpRequested(c) {
 			return nil
 		}
-		o.clone = args[0]
 		var err error
 		if o.only, err = optRe("--only", only); err != nil {
 			return err
@@ -176,9 +179,56 @@ exit 2 it refuses to decide: a missing flag, the host unreachable or not the
 		if err := o.validate(); err != nil {
 			return err
 		}
-		return run(c, o)
+		return runAll(c, o, args)
 	}
 	return c
+}
+
+var reUnsafe = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+
+// runAll runs each clone in turn over one shared connection and answers with
+// the worst outcome: a finding (1) outranks "no answer" (2), because a package
+// that failed is something to act on whatever else could not be run.
+func runAll(c *cobra.Command, o options, clones []string) error {
+	defer func() {
+		r := &runner{o: o, ctx: context.Background()}
+		if len(clones) > 1 && !o.keep {
+			r.ssh(time.Minute, "rm -rf "+o.remoteDir)
+		}
+		if m := r.muxOpts(); m != nil {
+			exe(context.Background(), nil, "", "ssh", append(append([]string{}, m...), "-O", "exit", o.host)...)
+		}
+	}()
+	var found, unanswered error
+	for _, cl := range clones {
+		oo := o
+		oo.clone = cl
+		if len(clones) > 1 {
+			base := reUnsafe.ReplaceAllString(filepath.Base(filepath.Clean(cl)), "_")
+			oo.remoteDir = o.remoteDir + "/" + base
+			if o.reportPath != "" {
+				oo.reportPath = strings.TrimSuffix(o.reportPath, filepath.Ext(o.reportPath)) + "." + base + ".json"
+			}
+			fmt.Fprintf(cli.Out(c), "== %s\n", cl)
+		}
+		err := run(c, oo)
+		if err != nil && len(clones) > 1 {
+			// Only the worst error reaches cobra; each clone's reason is said here.
+			fmt.Fprintf(cli.Err(c), "archrun: %s: %v\n", cl, err)
+		}
+		var e *cli.Exit
+		switch {
+		case err == nil:
+		case errors.As(err, &e) && e.Code == 1:
+			found = err
+		default:
+			unanswered = err
+		}
+	}
+	if found != nil {
+		return found
+	}
+	return unanswered
 }
 
 func optRe(name, s string) (*regexp.Regexp, error) {
@@ -223,11 +273,14 @@ func (o *options) validate() error {
 		return cli.Unanswerable("--bench must not contain a quote or line break, --benchtime must be like 200ms or 5x")
 	}
 	if o.work == "" {
-		d, err := os.UserConfigDir()
+		// ~/.cache, not the platform's config or cache directory: on macOS
+		// those are long and one has a space ("Application Support"), and a
+		// Unix socket path holds 104 bytes. These are rebuildable binaries.
+		d, err := os.UserHomeDir()
 		if err != nil {
-			return cli.Unanswerable("no --work given and no user config directory: %v", err)
+			return cli.Unanswerable("no --work given and no home directory: %v", err)
 		}
-		o.work = filepath.Join(d, "archrun")
+		o.work = filepath.Join(d, ".cache", "archrun")
 	}
 	if inGit(o.work) {
 		return cli.Unanswerable("--work %s is inside a git directory: binaries do not belong in a repository", o.work)
@@ -297,8 +350,24 @@ type runner struct {
 	ctx context.Context
 }
 
+// muxOpts shares ONE ssh connection between every call of a run. A busy shared
+// host throttles new connections (a banner timeout is the usual symptom, and
+// several agents on one machine make it worse), and a run makes about five calls
+// per package: opening the connection once is what keeps it going. The socket
+// path must fit in 104 bytes, so a long --work disables the sharing rather than
+// breaking ssh.
+func (r *runner) muxOpts() []string {
+	p := filepath.Join(r.o.work, "m-%C")
+	// %C expands to 40 hex characters and ssh appends a 17-character suffix
+	// while it sets the master up: measure the path as ssh will build it.
+	if len(p)-2+40+17 > 104 || strings.ContainsAny(p, " \t\"'\\") {
+		return nil
+	}
+	return []string{"-o", "ControlMaster=auto", "-o", "ControlPath=" + p, "-o", "ControlPersist=120"}
+}
+
 func (r *runner) sshArgs(extra ...string) []string {
-	a := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "-o", "ServerAliveInterval=30"}
+	a := append([]string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "-o", "ServerAliveInterval=30"}, r.muxOpts()...)
 	if r.o.port != 0 {
 		a = append(a, "-p", strconv.Itoa(r.o.port))
 	}
@@ -306,7 +375,7 @@ func (r *runner) sshArgs(extra ...string) []string {
 }
 
 func (r *runner) scpArgs(extra ...string) []string {
-	a := []string{"-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30"}
+	a := append([]string{"-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30"}, r.muxOpts()...)
 	if r.o.port != 0 {
 		a = append(a, "-P", strconv.Itoa(r.o.port))
 	}
@@ -345,6 +414,11 @@ func run(c *cobra.Command, o options) error {
 		rep.Mode = "bench:" + o.bench
 	}
 
+	// The ssh control socket lives in --work: it must exist before the first call.
+	if err := os.MkdirAll(o.work, 0o700); err != nil {
+		return cli.Unanswerable("cannot create --work: %v", err)
+	}
+
 	// 1. The host is the machine it is said to be.
 	un := r.ssh(2*time.Minute, "uname -m")
 	if un.code != 0 {
@@ -364,9 +438,6 @@ func run(c *cobra.Command, o options) error {
 		return cli.Unanswerable("%s: no package with test files for linux/%s matched", o.clone, o.arch)
 	}
 
-	if err := os.MkdirAll(o.work, 0o700); err != nil {
-		return cli.Unanswerable("cannot create --work: %v", err)
-	}
 	if st := r.ssh(time.Minute, "mkdir -p "+o.remoteDir); st.code != 0 {
 		return cli.Unanswerable("cannot create %s on the host: %s", o.remoteDir, firstLine(st.out))
 	}

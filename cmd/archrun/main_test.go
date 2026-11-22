@@ -273,6 +273,80 @@ func TestUnsafeInputsAreRefused(t *testing.T) {
 	}
 }
 
+func TestSeveralClonesRunInTurnAndTheWorstOutcomeWins(t *testing.T) {
+	f := &fake{machine: "s390x", goList: "ex/a\t/x/a\n", runCode: map[string]int{"p0": 1}}
+	f.install(t)
+	dir := t.TempDir()
+	var o, e bytes.Buffer
+	args := append(base(t), "--report", filepath.Join(dir, "r.json"), "/a/one", "/b/two three")
+	code := cli.Drive(RootCmd(), args, &o, &e)
+	if code != 1 {
+		t.Fatalf("code %d, want 1: a failure outranks everything", code)
+	}
+	for _, want := range []string{"== /a/one", "== /b/two three"} {
+		if !strings.Contains(o.String(), want) {
+			t.Errorf("no %q in\n%s", want, o.String())
+		}
+	}
+	for _, name := range []string{"r.one.json", "r.two_three.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("report %s: %v", name, err)
+		}
+	}
+	var made, removedAll bool
+	for _, c := range f.calls {
+		if strings.HasSuffix(c, "mkdir -p scratch/one") {
+			made = true
+		}
+		if strings.HasSuffix(c, "rm -rf scratch") {
+			removedAll = true
+		}
+	}
+	if !made || !removedAll {
+		t.Fatalf("per-clone dir made %v, parent removed %v: %v", made, removedAll, f.calls)
+	}
+}
+
+func TestAnUnreachableCloneIsNoAnswerButAFailureIsStillReported(t *testing.T) {
+	f := &fake{machine: "s390x", goList: "ex/a\t/x/a\n"}
+	f.install(t)
+	// second clone cannot be listed: go list fails
+	n := 0
+	inner := exe
+	exe = func(ctx context.Context, env []string, dir, name string, args ...string) cmdResult {
+		if name == "go" && args[0] == "list" {
+			n++
+			if n == 2 {
+				return cmdResult{out: []byte("no go.mod"), code: 1}
+			}
+		}
+		return inner(ctx, env, dir, name, args...)
+	}
+	var o, e bytes.Buffer
+	if code := cli.Drive(RootCmd(), append(base(t), "/a", "/b"), &o, &e); code != 2 {
+		t.Fatalf("code %d, want 2\n%s%s", code, o.String(), e.String())
+	}
+}
+
+func TestOneConnectionIsSharedWhenTheSocketPathFits(t *testing.T) {
+	short := &runner{o: options{work: "/w", host: "h"}}
+	args := strings.Join(short.sshArgs("h", "x"), " ")
+	if !strings.Contains(args, "ControlMaster=auto") || !strings.Contains(args, "ControlPath=/w/m-%C") {
+		t.Fatalf("no sharing: %s", args)
+	}
+	if !strings.Contains(strings.Join(short.scpArgs("a", "b"), " "), "ControlPath=/w/m-%C") {
+		t.Fatal("scp does not share the connection")
+	}
+	spaced := &runner{o: options{work: "/Application Support/archrun"}}
+	if strings.Contains(strings.Join(spaced.sshArgs("h", "x"), " "), "Control") {
+		t.Fatal("a space in the path splits the ssh option: sharing must be off")
+	}
+	long := &runner{o: options{work: "/" + strings.Repeat("d", 80)}}
+	if strings.Contains(strings.Join(long.sshArgs("h", "x"), " "), "Control") {
+		t.Fatal("a socket path over the limit must disable sharing, not break ssh")
+	}
+}
+
 func TestStealBetween(t *testing.T) {
 	a := []uint64{100, 0, 100, 700, 0, 0, 0, 100}
 	b := []uint64{200, 0, 200, 1400, 0, 0, 0, 200}
