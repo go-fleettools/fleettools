@@ -34,6 +34,12 @@ func stubRunner(t *testing.T, f func(dir, toolchain string) (string, string, int
 	prev := runner
 	runner = func(_ context.Context, dir, toolchain string) (string, string, int, error) {
 		calls = append(calls, toolchain)
+		if len(calls) > 4 {
+			// judge retries once at most; answering here ends a loop that forgot
+			// that, as a failure instead of a hang.
+			t.Errorf("the runner was asked %d times for %s", len(calls), dir)
+			return "", "", 0, nil
+		}
 		return f(dir, toolchain)
 	}
 	t.Cleanup(func() { runner = prev })

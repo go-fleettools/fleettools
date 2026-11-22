@@ -27,15 +27,24 @@ func tidyStub(t *testing.T) *[]string {
 
 // main in hook mode answers on stdout and never reaches cobra's exit path.
 func TestMainInHookModeAnswersOnStdout(t *testing.T) {
-	oldArgs, oldStdin, oldStdout := os.Args, stdin, os.Stdout
-	f, err := os.Create(filepath.Join(t.TempDir(), "stdout"))
+	oldArgs, oldStdin, oldStdout, oldStderr := os.Args, stdin, os.Stdout, os.Stderr
+	d := t.TempDir()
+	f, err := os.Create(filepath.Join(d, "stdout"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Args, stdin, os.Stdout = oldArgs, oldStdin, oldStdout; f.Close() })
+	g, err := os.Create(filepath.Join(d, "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		os.Args, stdin, os.Stdout, os.Stderr = oldArgs, oldStdin, oldStdout, oldStderr
+		f.Close()
+		g.Close()
+	})
 	os.Args = []string{"modtidy", "--hook"}
 	stdin = strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"ls"}}`)
-	os.Stdout = f
+	os.Stdout, os.Stderr = f, g
 	main()
 	b, err := os.ReadFile(f.Name())
 	if err != nil {
@@ -43,6 +52,50 @@ func TestMainInHookModeAnswersOnStdout(t *testing.T) {
 	}
 	if string(b) != "{}\n" {
 		t.Errorf("hook answered %q, want {}", b)
+	}
+	// The staleness note is a network call, which a hook must not make: nothing
+	// reaches stderr.
+	if e, _ := os.ReadFile(g.Name()); len(e) != 0 {
+		t.Errorf("hook mode wrote %q to stderr", e)
+	}
+}
+
+// An unfinished retry loop is a hang, not a failure: the runner refuses to be
+// asked a third time, so a loop that forgets it has retried goes red.
+func TestTheRetryHappensOnceAndItsAnswerStands(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "go.mod"), "module example.com/x\n\ngo 1.99.9\n")
+	write(t, filepath.Join(root, "a.go"), "package x\n")
+	floor := "go.mod requires go >= 1.99.9 (running go 1.1; GOTOOLCHAIN=local)"
+	var tcs []string
+	prev := runner
+	t.Cleanup(func() { runner = prev })
+	runner = func(_ context.Context, _, tc string) (string, string, int, error) {
+		tcs = append(tcs, tc)
+		if len(tcs) > 2 {
+			return "", "", 0, nil
+		}
+		return "", floor, 1, nil
+	}
+	code, out, _ := run(t, root)
+	if code != 2 || !strings.Contains(out, "UNREAD  . (GOTOOLCHAIN=go1.99.9): "+floor) {
+		t.Errorf("code %d out %q", code, out)
+	}
+	if !reflect.DeepEqual(tcs, []string{"local", "go1.99.9"}) {
+		t.Errorf("toolchains tried %v", tcs)
+	}
+}
+
+// Only the module's own sources count: a .go file under a skipped directory
+// does not turn a Hugo-style module into one that `go mod tidy` may judge.
+func TestGoFilesUnderSkippedDirectoriesDoNotCount(t *testing.T) {
+	for _, d := range []string{"vendor", "testdata", ".hidden", "_under"} {
+		root := t.TempDir()
+		write(t, filepath.Join(root, "go.mod"), "module example.com/x\n\ngo 1.20\n")
+		write(t, filepath.Join(root, d, "x.go"), "package x\n")
+		if ok, err := hasGoSource(root); ok || err != nil {
+			t.Errorf("%s: hasGoSource = %v, %v; want false", d, ok, err)
+		}
 	}
 }
 
@@ -92,16 +145,34 @@ func TestMoreThanOneDirectoryIsAUsageError(t *testing.T) {
 
 func TestAnUnwalkableRootIsUnanswerable(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent")
-	code, out, e := run(t, missing)
-	if code != 2 || !strings.Contains(out+e, "modtidy: cannot walk "+missing) {
-		t.Errorf("code %d out %q err %q", code, out, e)
-	}
-	if _, err := findModules(missing); err == nil {
-		t.Error("findModules of a missing root succeeded")
-	}
-	if ok, err := hasGoSource(missing); ok || err == nil {
-		t.Errorf("hasGoSource of a missing dir = %v, %v", ok, err)
-	}
+	noPanic(t, "run on a missing root", func() {
+		code, out, e := run(t, missing)
+		if code != 2 || !strings.Contains(out+e, "modtidy: cannot walk "+missing) {
+			t.Errorf("code %d out %q err %q", code, out, e)
+		}
+	})
+	noPanic(t, "findModules", func() {
+		if _, err := findModules(missing); err == nil {
+			t.Error("findModules of a missing root succeeded")
+		}
+	})
+	noPanic(t, "hasGoSource", func() {
+		if ok, err := hasGoSource(missing); ok || err == nil {
+			t.Errorf("hasGoSource of a missing dir = %v, %v", ok, err)
+		}
+	})
+}
+
+// noPanic turns a crash into an assertion naming what crashed: the guards on
+// these errors protect a dereference, so removing one would otherwise panic.
+func noPanic(t *testing.T, what string, f func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("%s panicked: %v", what, r)
+		}
+	}()
+	f()
 }
 
 // report tolerates a nil context (a command run outside cobra).
@@ -158,7 +229,9 @@ func TestAFloorWithNoDirectiveStaysUnread(t *testing.T) {
 		write(t, filepath.Join(root, "go.mod"), gomod)
 		write(t, filepath.Join(root, "a.go"), "package x\n")
 		calls := stubRunner(t, func(_, _ string) (string, string, int, error) { return "", floor, 1, nil })
-		code, out, _ := run(t, root)
+		var code int
+		var out string
+		noPanic(t, "directive of "+name, func() { code, out, _ = run(t, root) })
 		if code != 2 || !strings.Contains(out, "UNREAD  .: "+floor+" (exit 1)") || strings.Contains(out, "GOTOOLCHAIN=go") {
 			t.Errorf("%s: code %d out %q", name, code, out)
 		}
@@ -166,9 +239,11 @@ func TestAFloorWithNoDirectiveStaysUnread(t *testing.T) {
 			t.Errorf("%s: toolchains tried %v, want only local", name, *calls)
 		}
 	}
-	if d := directive(t.TempDir()); d != "" {
-		t.Errorf("directive of a directory with no go.mod = %q", d)
-	}
+	noPanic(t, "directive of a directory with no go.mod", func() {
+		if d := directive(t.TempDir()); d != "" {
+			t.Errorf("directive of a directory with no go.mod = %q", d)
+		}
+	})
 }
 
 // A module whose go.mod cannot be read is not parsable, so it is never skipped.
