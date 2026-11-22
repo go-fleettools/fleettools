@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/flavors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,7 @@ type fakeCloud struct {
 	fail     map[string]int
 	calls    map[string]int
 	services []string
+	garbled  map[string]string // key -> body that lists fine but does not decode
 	denyAuth bool
 	nets     string
 	flavors  string
@@ -39,7 +41,7 @@ const (
 func newFake(t *testing.T) *fakeCloud {
 	t.Helper()
 	f := &fakeCloud{
-		fail: map[string]int{}, calls: map[string]int{},
+		fail: map[string]int{}, calls: map[string]int{}, garbled: map[string]string{},
 		services: []string{"compute", "network", "image", "identity"},
 		nets:     netsOne, flavors: flavorsOK, images: imagesOK,
 	}
@@ -63,6 +65,7 @@ func newFake(t *testing.T) *fakeCloud {
 		t.Fatal(err)
 	}
 	t.Setenv("OS_CLIENT_CONFIG_FILE", p)
+	curT = t
 	return f
 }
 
@@ -88,6 +91,9 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reply := func(code int, body string) {
+		if bad, ok := f.garbled[key]; ok {
+			body = bad
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(code)
 		fmt.Fprint(w, body)
@@ -147,12 +153,22 @@ func (f *fakeCloud) record(r *http.Request) {
 	f.mu.Unlock()
 }
 
+// curT is the running test; run reports a crash of the code under test as an
+// assertion failure, so a guard whose removal crashes is still caught by a
+// stated expectation and not by luck. Tests here do not run in parallel.
+var curT *testing.T
+
 func run(args ...string) (string, error) {
 	cmd := RootCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SetArgs(args)
+	defer func() {
+		if r := recover(); r != nil {
+			curT.Fatalf("a refusal was missing: the command crashed past it (%v)", r)
+		}
+	}()
 	err := cmd.Execute()
 	return out.String(), err
 }
@@ -299,24 +315,116 @@ func TestCreateEachCallFails(t *testing.T) {
 	if err := os.WriteFile(pub, []byte("ssh-ed25519 AAAAC3 test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// absent is progress the command must NOT have reported when that call fails.
 	cases := []struct {
-		key   string
-		limit int
+		key    string
+		limit  int
+		absent string
 	}{
-		{"GET /network/v2.0/networks", 0}, {"GET /compute/v2.1/flavors/detail", 0}, {"GET /image/v2/images", 0},
-		{"POST /compute/v2.1/os-keypairs", 0}, {"POST /network/v2.0/security-groups", 0},
-		{"POST /network/v2.0/security-group-rules", 0}, {"POST /compute/v2.1/servers", 0},
-		{"GET /compute/v2.1/servers/s1", 0}, {"GET /compute/v2.1/servers/s1", 1},
+		{"GET /network/v2.0/networks", 0, "plan:"}, {"GET /compute/v2.1/flavors/detail", 0, "plan:"}, {"GET /image/v2/images", 0, "plan:"},
+		{"POST /compute/v2.1/os-keypairs", 0, "secgroup created"}, {"POST /network/v2.0/security-groups", 0, "secgroup created"},
+		{"POST /network/v2.0/security-group-rules", 0, "secgroup created"}, {"POST /compute/v2.1/servers", 0, "server created"},
+		{"GET /compute/v2.1/servers/s1", 0, "server vm id="}, {"GET /compute/v2.1/servers/s1", 1, "server vm id="},
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprintf("%s after %d", c.key, c.limit), func(t *testing.T) {
 			f := newFake(t)
 			f.fail[c.key] = c.limit
 			args := []string{cloudArg, "create", "--name=vm", "--network=private-network", "--pubkey-file=" + pub, "--ssh-from=192.168.1.0/24"}
-			if _, err := run(args...); err == nil {
+			out, err := run(args...)
+			if err == nil {
 				t.Fatal("error swallowed")
 			}
+			if strings.Contains(out, c.absent) {
+				t.Errorf("went on past the failure (%q reported):\n%s", c.absent, out)
+			}
 		})
+	}
+}
+
+var undecodable = map[string]string{
+	"GET /compute/v2.1/servers/detail":  `{"servers":[{"id":5}]}`,
+	"GET /network/v2.0/networks":        `{"networks":[{"id":5}]}`,
+	"GET /network/v2.0/subnets":         `{"subnets":[{"id":5}]}`,
+	"GET /network/v2.0/floatingips":     `{"floatingips":[{"id":5}]}`,
+	"GET /compute/v2.1/os-keypairs":     `{"keypairs":[{"keypair":{"name":5}}]}`,
+	"GET /network/v2.0/security-groups": `{"security_groups":[{"id":5}]}`,
+	"GET /compute/v2.1/flavors/detail":  `{"flavors":[{"id":5}]}`,
+	"GET /image/v2/images":              `{"images":[{"id":5}]}`,
+}
+
+func TestInventoryUndecodableReplies(t *testing.T) {
+	for key, body := range undecodable {
+		t.Run(key, func(t *testing.T) {
+			f := newFake(t)
+			f.garbled[key] = body
+			if _, err := run(cloudArg, "inventory"); err == nil {
+				t.Fatal("undecodable reply accepted")
+			}
+		})
+	}
+}
+
+func TestCreateUndecodableReplies(t *testing.T) {
+	for _, key := range []string{"GET /network/v2.0/networks", "GET /compute/v2.1/flavors/detail", "GET /image/v2/images"} {
+		t.Run(key, func(t *testing.T) {
+			f := newFake(t)
+			f.garbled[key] = undecodable[key]
+			out, err := run(append(createArgs, "--dry-run")...)
+			if err == nil || strings.Contains(out, "plan:") {
+				t.Fatalf("undecodable reply accepted: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestCreateValidationRefusesBeforeAnyCall(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--network=n", "--keypair=k", "--ssh-from=10.0.0.0/8"}, "--name and --network"},
+		{[]string{"--name=a", "--keypair=k", "--ssh-from=10.0.0.0/8"}, "--name and --network"},
+		{[]string{"--name=a", "--network=n", "--ssh-from=10.0.0.0/8"}, "exactly one"},
+		{[]string{"--name=a", "--network=n", "--keypair=k", "--pubkey-file=f", "--ssh-from=10.0.0.0/8"}, "exactly one"},
+		{[]string{"--name=a", "--network=n", "--keypair=k"}, "--ssh-from is required"},
+		{[]string{"--name=a", "--network=n", "--keypair=k", "--ssh-from=0.0.0.0/0"}, "world-open"},
+		{[]string{"--name=a", "--network=n", "--keypair=k", "--ssh-from=junk"}, "--ssh-from"},
+	}
+	for _, c := range cases {
+		t.Run(c.want, func(t *testing.T) {
+			f := newFake(t)
+			_, err := run(append([]string{cloudArg, "create"}, c.args...)...)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want %q", err, c.want)
+			}
+			if len(f.calls) != 0 {
+				t.Errorf("reached the cloud: %v", f.calls)
+			}
+		})
+	}
+	newFake(t)
+	if _, err := run("create", "--name=a", "--network=n", "--keypair=k", "--ssh-from=10.0.0.0/8"); err == nil || !strings.Contains(err.Error(), "--cloud") {
+		t.Errorf("create without --cloud: %v", err)
+	}
+}
+
+func TestPickFlavorTieBreaks(t *testing.T) {
+	// Every pair is listed in the order that makes the wrong rule pick wrongly.
+	cases := []struct {
+		name string
+		all  []flavors.Flavor
+		want string
+	}{
+		{"ram first", []flavors.Flavor{{Name: "more-ram", RAM: 4096, VCPUs: 1, Disk: 10}, {Name: "less-ram", RAM: 2048, VCPUs: 8, Disk: 90}}, "less-ram"},
+		{"then vcpus", []flavors.Flavor{{Name: "two", RAM: 2048, VCPUs: 2, Disk: 10}, {Name: "one", RAM: 2048, VCPUs: 1, Disk: 90}}, "one"},
+		{"then disk", []flavors.Flavor{{Name: "big", RAM: 2048, VCPUs: 1, Disk: 50}, {Name: "small", RAM: 2048, VCPUs: 1, Disk: 10}}, "small"},
+	}
+	for _, c := range cases {
+		f, err := pickFlavor(c.all, "", 1024, 8)
+		if err != nil || f.Name != c.want {
+			t.Errorf("%s: got %q, %v; want %q", c.name, f.Name, err, c.want)
+		}
 	}
 }
 
