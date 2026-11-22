@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out the checker
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: go-fleettools/fleettools
           ref: main
@@ -89,11 +89,17 @@ jobs:
       # in front of it — the false red is the harmless half of that, since the
       # same blindness passes a change that deletes the cells.
       - name: check out the pages to judge
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: pages
 
-      - uses: actions/setup-go@v7
+      # ⛔ PINNED BY COMMIT SHA, not by `@v7`: a tag can be moved onto another
+      # commit by whoever owns it, and this job checks out two repositories and
+      # runs a compiler. `actionpin` (landed in #393) refuses anything else; the
+      # eight workflows already here still carry tags and are somebody's
+      # rollout, but a file added after the gate exists has no excuse. The tag
+      # stays in the comment because the SHA alone tells a reader nothing.
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: checker/go.mod
       # ⛔ SAY WHICH TOOLCHAIN RAN: a green check that does not record the
