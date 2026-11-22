@@ -1026,10 +1026,8 @@ func allow(out, errOut io.Writer, format string, a ...any) error {
 }
 
 func answer(out io.Writer, a hookAnswer) error {
-	b, err := json.Marshal(a)
-	if err != nil {
-		return nil
-	}
+	// A struct of two strings always encodes; the error is unreachable.
+	b, _ := json.Marshal(a)
 	fmt.Fprintln(out, string(b))
 	return nil
 }
@@ -1064,6 +1062,17 @@ func lastTurn(path string) (turnState, error) {
 		return turnState{}, err
 	}
 	defer f.Close()
+	return lastTurnOf(f)
+}
+
+// statReaderAt is the part of an open file lastTurnOf needs; a test supplies one
+// whose Stat fails, which an open *os.File practically never does.
+type statReaderAt interface {
+	io.ReaderAt
+	Stat() (os.FileInfo, error)
+}
+
+func lastTurnOf(f statReaderAt) (turnState, error) {
 	st, err := f.Stat()
 	if err != nil {
 		return turnState{}, err
@@ -1072,9 +1081,11 @@ func lastTurn(path string) (turnState, error) {
 	return s, err
 }
 
-const (
-	tailStart = 1 << 20
-	maxTail   = 32 << 20
+// They are variables only so a test can shrink the windows and reach the cap
+// without writing 32 MiB.
+var (
+	tailStart int64 = 1 << 20
+	maxTail   int64 = 32 << 20
 )
 
 // lastTurnAt is lastTurn over any io.ReaderAt; it also returns how many bytes
@@ -1299,10 +1310,8 @@ func runPretool(cmd *cobra.Command, o *options) error {
 	if n > o.maxBlocks {
 		return allow(out, errOut, "the turn was still refused after %d refusals; standing down for it", o.maxBlocks)
 	}
-	b, err := json.Marshal(preToolDeny{preToolDecision{"PreToolUse", "deny", reason}})
-	if err != nil {
-		return allow(out, errOut, "cannot encode the refusal: %v", err)
-	}
+	// A struct of strings always encodes; the error is unreachable.
+	b, _ := json.Marshal(preToolDeny{preToolDecision{"PreToolUse", "deny", reason}})
 	fmt.Fprintln(out, string(b))
 	return nil
 }
