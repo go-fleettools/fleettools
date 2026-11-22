@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/go-gitsafe/gitsafe/issuegate"
 )
 
 // fake is a GitHub stand-in: search results per scope, timelines per issue.
@@ -167,7 +168,9 @@ func TestAKeywordOnAnotherLineDoesNotCloseTheIssue(t *testing.T) {
 		{"keyword inside a fence", "o/r", "```\nCloses #5\n```", Review},
 		{"keyword inside an HTML comment", "o/r", "<!-- Closes #5 -->", Review},
 		{"only the first of a list closes", "o/r", "Closes #6, #5", Review},
-		{"Refs keeps it open", "o/r", "Refs #5", Review},
+		// `Refs` is not CLOSABLE either, which is all this test asks -- but it
+		// is not REVIEW: see TestARefsIsAStatedDecisionNotAMissingOne.
+		{"Refs keeps it open", "o/r", "Refs #5", Stated},
 		// ... and the positive controls, so the fix cannot pass by making
 		// everything REVIEW.
 		{"Closes #N on one line", "o/r", "Closes #5", Closable},
@@ -182,6 +185,74 @@ func TestAKeywordOnAnotherLineDoesNotCloseTheIssue(t *testing.T) {
 		}
 		if got, _ := Classify("o/r", 5, evs); got != c.want {
 			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// ⛔ WHAT THE MUTATION SWEEP COULD NOT REACH, settled by hand and quoted from
+// what the suite PRINTED (go-fleettools/fleettools#391: a small mutant count
+// over a changed file reads like coverage and is not one).
+//
+// `mutsweep -files cmd/openfixed/classify.go` reports 5 mutations, 5 caught, 0
+// survived -- and NONE of them is the decision this change adds: a `switch`
+// case is not an `if`, so `case stated:` is outside its reach, and so is a
+// struct field initialised from a comparison. Applied by hand:
+//
+//	`case stated:` -> `case false && stated:`      4 tests red, among them
+//	                                               `Refs keeps it open: got
+//	                                               "REVIEW", want "REFS"` and
+//	                                               `REVIEW 2, REFS 0`
+//	`kind == issuegate.Refs` -> `== issuegate.Closes`
+//	                                               the same 4, which is right:
+//	                                               no body in the fixtures
+//	                                               closes AND refs one issue
+//	`rank`: Review 2, default 1                    ONE test red, the position
+//	                                               assertion below, printing
+//	                                               `got positions 41, 177, 114`
+//	                                               with REFS above REVIEW
+//
+// The third is the one worth having: the counts stayed correct and only the
+// ORDER moved, which no count could have caught.
+//
+// ⛔ A STATED DECISION IS STILL PRINTED, AND PRINTED LAST. Not listing it would
+// hide an author who wrote `Refs` and was wrong; listing it among the rows that
+// need a decision is what made one organisation's REVIEW unreadable at 37 of 64
+// (go-fleettools/fleettools#204). So: its own word, its own count, and after the
+// REVIEW rows -- and --close must still refuse it, because `Refs` asked for the
+// issue to stay open.
+func TestAStatedDecisionIsListedLastAndCountedApart(t *testing.T) {
+	f := newFake(t)
+	f.issues["org:A"] = []string{"A/x#1|fixed one", "A/x#2|mentioned", "A/x#5|open on purpose"}
+	f.timelines["A/x#1"] = xref("A/x", 10, mergedAt, "Closes #1")
+	f.timelines["A/x#2"] = xref("A/z", 11, mergedAt, "related to A/x#2")
+	f.timelines["A/x#5"] = xref("A/z", 14, mergedAt, "Refs A/x#5")
+
+	code, out := drive(t, "--org", "A", "--close")
+	if code != 0 {
+		t.Fatalf("status %d\n%s", code, out)
+	}
+	for _, want := range []string{
+		"REFS     A/x#5  open on purpose  <- A/z#14 (merged 2026-11-01)",
+		"searched 3, listed 3, timelines read 3, skipped 0 | CLOSABLE 1, REVIEW 1, REFS 1",
+		"total: CLOSABLE 1, REVIEW 1, REFS 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// Order by POSITION, so the assertion does not move when a title changes.
+	iRefs, iRev, iCls := strings.Index(out, "REFS     A/x#5"), strings.Index(out, "REVIEW   A/x#2"), strings.Index(out, "CLOSABLE A/x#1")
+	if iCls < 0 || iRev < 0 || iRefs < 0 || !(iCls < iRev && iRev < iRefs) {
+		t.Errorf("want CLOSABLE, then REVIEW, then REFS; got positions %d, %d, %d:\n%s", iCls, iRev, iRefs, out)
+	}
+	// ⛔ --close was passed: exactly ONE issue may have been closed.
+	closed := strings.Count(out, "         closed\n")
+	if closed != 1 {
+		t.Errorf("%d issue(s) closed, want only the CLOSABLE one:\n%s", closed, out)
+	}
+	for _, p := range f.posts {
+		if strings.Contains(p, "A/x/issues/5") {
+			t.Errorf("a stated decision was written to: %q", p)
 		}
 	}
 }
@@ -210,8 +281,73 @@ func TestParseTimelineShapes(t *testing.T) {
 	if _, err := parseTimeline([]byte(`["x"]`)); err == nil {
 		t.Error("non-event page accepted")
 	}
-	if got := closingRef("", "o/r", "o/r", 1); got {
-		t.Error("empty body matched")
+	if got := refKind("", "o/r", "o/r", 1); got != issuegate.Bare {
+		t.Errorf("empty body matched: %v", got)
+	}
+}
+
+// ⛔ A `Refs` IS A STATED DECISION, NOT A MISSING ONE. The fleet's merge rule
+// makes `Refs #N` mandatory where there is no closing keyword, so every
+// correctly-classified reference used to land in REVIEW -- the bucket that means
+// "a person decides" -- and one organisation's REVIEW held 37 of its 64 open
+// issues (go-fleettools/fleettools#204). The words must differ, and the reading
+// of `Refs` must be the MERGE GATE'S OWN, so an issue is never audited under a
+// rule it was not merged under.
+func TestARefsIsAStatedDecisionNotAMissingOne(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		repo string
+		body string
+		want Class
+	}{
+		{"Refs, bare number", "o/r", "Refs #5", Stated},
+		{"Refs, cross-repository", "o/other", "Refs o/r#5", Stated},
+		// ⛔ NOT `See`. #204 asked for `Refs`/`See` to be read alike. The gate's
+		// keywords are clos(e|es|ed), fix(es|ed), resolv(e|es|ed) and ref(s),
+		// and issuegate's own documentation names `see #12` as the phrasing the
+		// gate exists to refuse -- it reads as a decision and is not one.
+		// Reading it here as one would have silenced the audit for exactly the
+		// sentence the fleet refuses at merge time.
+		{"See is NOT a stated decision", "o/r", "See #5", Review},
+		{"see also, lower case, likewise", "o/r", "see also #5", Review},
+		{"Refs is generous across a list", "o/r", "Refs #4, #5 and #6", Stated},
+		{"a bare mention states nothing", "o/r", "related to #5", Review},
+		{"Refs inside a fence states nothing", "o/r", "```\nRefs #5\n```", Review},
+		{"Refs about ANOTHER issue states nothing about this one", "o/r", "Refs #6", Review},
+		{"Closes outranks Refs in the same body", "o/r", "Refs #5\n\nCloses #5", Closable},
+	} {
+		evs, err := parseTimeline([]byte("[[" + xref(c.repo, 9, mergedAt, c.body) + "]]"))
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got, _ := Classify("o/r", 5, evs); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// ⛔ ONE `Refs` ANSWERS THE QUESTION, and a later reopening un-answers it. Two
+// pull requests may reference one issue: if either wrote `Refs`, somebody said
+// what becomes of the issue, so it is not waiting on a decision. But a reopening
+// AFTER the last merge is itself a later decision, and it says the opposite --
+// the row goes back to REVIEW whatever the bodies said.
+func TestOneRefsClassifiesItAndAReopeningUnclassifiesIt(t *testing.T) {
+	const later = "2026-11-02T00:00:00Z"
+	two := "[[" + xref("o/a", 9, mergedAt, "Refs o/r#5") + "," + xref("o/b", 10, mergedAt, "related to o/r#5") + "]]"
+	evs, err := parseTimeline([]byte(two))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, prs := Classify("o/r", 5, evs); got != Stated || len(prs) != 2 {
+		t.Fatalf("one Refs beside one bare mention: %q, %d pull request(s)", got, len(prs))
+	}
+	reopened := `[[{"event":"reopened","created_at":"` + later + `"},` + xref("o/a", 9, mergedAt, "Refs o/r#5") + `]]`
+	evs, err = parseTimeline([]byte(reopened))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := Classify("o/r", 5, evs); got != Review {
+		t.Fatalf("reopened after the merge: %q, want REVIEW", got)
 	}
 }
 
@@ -236,9 +372,9 @@ func TestDryRunReportsAndDenominator(t *testing.T) {
 		"CLOSABLE A/x#1  fixed one  <- A/x#10 (merged 2026-11-01)",
 		"REVIEW   A/x#2  mentioned  <- A/z#11 (merged 2026-11-01)",
 		"CLOSABLE B/y#7",
-		"A  ", "searched 4, listed 4, timelines read 4, skipped 0 | CLOSABLE 1, REVIEW 1",
-		"searched 1, listed 1, timelines read 1, skipped 0 | CLOSABLE 1, REVIEW 0",
-		"total: CLOSABLE 2, REVIEW 1",
+		"A  ", "searched 4, listed 4, timelines read 4, skipped 0 | CLOSABLE 1, REVIEW 1, REFS 0",
+		"searched 1, listed 1, timelines read 1, skipped 0 | CLOSABLE 1, REVIEW 0, REFS 0",
+		"total: CLOSABLE 2, REVIEW 1, REFS 0",
 		"nothing was closed",
 	} {
 		if !strings.Contains(out, want) {
