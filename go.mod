@@ -27,6 +27,8 @@ require (
 	github.com/go-pdfkit/reader v0.20.0
 	github.com/go-richdoc/markdown v0.13.0
 	github.com/go-richdoc/richdoc v0.10.0
+	github.com/gophercloud/gophercloud/v2 v2.16.0
+	github.com/gophercloud/utils/v2 v2.0.0-20260922174841-b4759ea0529b
 	github.com/mxschmitt/playwright-go v0.6401.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.1.0
@@ -69,9 +71,11 @@ require (
 	github.com/go-webengine/engine v0.18.1 // indirect
 	github.com/go-webengine/esbuildsandbox v0.1.0 // indirect
 	github.com/go-widgets/painter v0.16.0 // indirect
+	github.com/gofrs/uuid/v5 v5.5.1 // indirect
 	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.20.2 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/tannevaled/gobig2 v0.2.0 // indirect
@@ -80,4 +84,5 @@ require (
 	golang.org/x/sync v0.25.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/telemetry v0.0.0-20261116191925-e77a43154acb // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
