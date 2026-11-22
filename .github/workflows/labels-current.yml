@@ -1,0 +1,145 @@
+# A reusable check: are the version numbers this page states still the latest ones?
+#
+# ⛔ THE TRIGGER IS NOT THE SAME AS docs-current.yml'S, and that is the whole
+# design. `docs-current` fails when somebody CHANGES the landing, because what it
+# judges is the change. A version label goes stale when ANOTHER repository
+# publishes a tag — nothing in this repository moves — so a pull_request or push
+# trigger would paint a contributor's branch red for somebody else's release, in
+# a repository they did not touch. That is a gate nobody can keep green, and the
+# first response to it is to switch it off. Measured on
+# go-fleettools.github.io: 3 of 11 cells stale on 2026-11-22, one of which went
+# stale WHILE the pull request fixing the other two was being written.
+#
+# So the caller wires it to a schedule and to a hand, and to nothing else:
+#
+#   name: labels
+#   on:
+#     schedule:
+#       - cron: "37 6 * * *"
+#     workflow_dispatch:
+#   jobs:
+#     current:
+#       uses: go-fleettools/fleettools/.github/workflows/labels-current.yml@main
+#
+# A caller whose claims are spread over several pages states how many there are,
+# because nothing else can notice one disappearing:
+#
+#       with:
+#         files: content/en/repos/*.md
+#         min-cells: 11
+#
+# A red scheduled run blocks no pull request and no release. It is a standing
+# question with an owner, which is what go-fleettools/go-fleettools.github.io#20
+# asked for after three hand-runs of tagcells in one day left the file behind
+# again: "this is not a staleness problem, it is a missing check".
+#
+# ⛔ IT NEEDS NO TOKEN AT ALL, not even github.token. tagcells resolves the
+# latest release by asking `git ls-remote --tags` for the highest vX.Y.Z with no
+# prerelease — the same answer `go get module@latest` resolves — so it spends
+# nothing of the per-user REST budget that every session and Renovate share, and
+# a quota at zero cannot make this check lie. docs-current needs a token because
+# it LISTS an organisation; this one is told which modules to ask about by the
+# file it is judging.
+name: labels-current
+
+on:
+  workflow_call:
+    inputs:
+      org:
+        description: the organisation whose modules the page lists; defaults to the caller's owner
+        required: false
+        type: string
+      files:
+        description: the pages to judge, space separated, expanded in the runner
+        required: false
+        default: hugo.toml
+        type: string
+      # ⛔ WITHOUT THIS THE CHECK CANNOT NOTICE A CLAIM THAT DISAPPEARED.
+      # tagcells exits 2 when a run reads NO cell at all -- the right question
+      # about one hugo.toml, and nearly no question about thirteen pages: a
+      # sentence reworded past the shapes it reads leaves the other twelve
+      # reporting cheerfully, and the page nobody checks any more looks exactly
+      # like a page with nothing to state. A caller that says how many claims
+      # its pages hold turns that silence into a refusal; removing a page is
+      # then one line in the pull request that removes it. 0 keeps the old rule.
+      min-cells:
+        description: refuse if fewer than this many version claims were read in all
+        required: false
+        default: 0
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  current:
+    name: the versions this page states are the latest ones
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the checker
+        uses: actions/checkout@v7
+        with:
+          repository: go-fleettools/fleettools
+          ref: main
+          path: checker
+
+      # ⛔ THE CALLER'S OWN TREE, never the API's view of it. Every surface read
+      # over the API is served from the DEFAULT BRANCH, so a check that reads a
+      # repository through the API judges what is already merged and not what is
+      # in front of it — the false red is the harmless half of that, since the
+      # same blindness passes a change that deletes the cells.
+      - name: check out the pages to judge
+        uses: actions/checkout@v7
+        with:
+          path: pages
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: checker/go.mod
+      # ⛔ SAY WHICH TOOLCHAIN RAN: a green check that does not record the
+      # compiler behind it makes every figure measured under it unattributable.
+      - run: go version
+
+      # Built, not `go run`: the pages live in ANOTHER module, and `go run` on a
+      # directory outside the current main module is an error. The binary also
+      # has to run from the pages' own directory, because `files` may be a
+      # pattern and it is the runner's shell that expands it, relative to there.
+      - name: build the checker
+        working-directory: checker
+        run: go build -o "$RUNNER_TEMP/tagcells" ./cmd/tagcells
+
+      - name: read every version claim on these pages
+        env:
+          ORG: ${{ inputs.org || github.repository_owner }}
+          FILES: ${{ inputs.files }}
+          MIN: ${{ inputs.min-cells }}
+        working-directory: pages
+        run: |
+          set -o pipefail
+          "$RUNNER_TEMP/tagcells" --org "$ORG" --min-cells "$MIN" $FILES | tee "$RUNNER_TEMP/report.txt"
+          {
+            echo '## labels-current'
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/report.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: what a failure means
+        if: failure()
+        run: |
+          echo "::notice::A version this page states is not the latest release of that" \
+               "module, or a claim could not be read at all. The report above names each" \
+               "one, with the line it is on."
+          echo "::notice::Exit 1 is a stale claim. Exit 2 is a tag that could not be read," \
+               "or a run that found NO claim on any of these pages, or fewer than min-cells" \
+               "says there are — none of which is an up-to-date page: they are pages this" \
+               "check cannot speak for, and that must never look like a pass."
+          echo "::notice::Read the report for the lines ending 'no version claim ... found on" \
+               "this page'. One of those on a page that used to state a version is a claim" \
+               "that was reworded, not a page with nothing to check — and with min-cells left" \
+               "at 0 it is the ONLY trace of it, since the run stays green on the others."
+          echo "::notice::To fix: run tagcells --org <org> --write <files> on a branch and" \
+               "open a pull request. The diff names every cell it moved, which is the" \
+               "artefact a person wants to read. This job deliberately does not push:" \
+               "a lane that can rewrite the file it just judged is not a check."

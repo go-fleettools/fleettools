@@ -188,6 +188,24 @@ type result struct {
 	final  string // the URL after redirects, without the cache-buster
 	err    error
 	found  []bool
+
+	// cased[i] says that want i is absent as asked but present when case is
+	// ignored.
+	//
+	// ⛔ A BARE false CANNOT TELL "THE PAGE DOES NOT SAY THIS" FROM "I TYPED IT
+	// DIFFERENTLY". plain() folds typographic punctuation on both sides, so a
+	// curly apostrophe never produces a false negative -- but nothing folds
+	// case, and a heading copied from a sentence ("an explicit -interval...")
+	// reads exactly like an absent one when the page capitalises it ("An
+	// explicit -interval..."). That happened twice in one session, each time
+	// costing a published-page investigation for a typing mistake. The verdict
+	// stays false -- a page is wrong about nothing here, the question was --
+	// and the report now names which of the two it is.
+	//
+	// Empty for --raw: scanFor consumes the stream, so by the time a want is
+	// known to be missing there is nothing left to re-test, and a page too
+	// large to hold is exactly the one not to buffer for a diagnosis.
+	cased []bool
 }
 
 func (r result) ok() bool {
@@ -225,23 +243,48 @@ func report(target string, wants []string, o options, out, errOut io.Writer) boo
 	}
 	fmt.Fprintln(out, line)
 	for i, w := range wants {
-		fmt.Fprintf(out, "  %v %q\n", r.found[i], w)
+		fmt.Fprintf(out, "  %v %q%s\n", r.found[i], w, r.note(i))
 	}
 	return r.ok()
+}
+
+// note is what to add to want i's line: nothing, unless the only thing keeping
+// the want out is its case.
+func (r result) note(i int) string {
+	if i < len(r.cased) && r.cased[i] {
+		return "  <- present on the page, with a different case; fix the want, not the page"
+	}
+	return ""
 }
 
 func why(r result) string {
 	switch {
 	case r.err != nil:
-		return r.err.Error()
+		// fmt.Sprint, not r.err.Error(): the two print the same thing for a real
+		// error, and this one is also TOTAL. A guard whose body crashes when the
+		// guard is wrong can only ever be held by that crash -- "caught by
+		// PANIC" is luck, not a test, and the next line added above it turns it
+		// into a silent survivor. Printed as "<nil>", a wrong answer here fails
+		// an assertion instead.
+		return fmt.Sprint(r.err)
 	case r.status != http.StatusOK:
 		return "status " + strconv.Itoa(r.status)
 	}
-	n := 0
-	for _, f := range r.found {
-		if !f {
-			n++
+	n, cased := 0, 0
+	for i, f := range r.found {
+		if f {
+			continue
 		}
+		n++
+		if r.note(i) != "" {
+			cased++
+		}
+	}
+	// ⛔ SAY IT ON THE WAITING LINE, not only in the final report: a want that
+	// differs only in case will still be missing after every retry, and this
+	// line is the one a person reads while the retries run.
+	if cased > 0 {
+		return fmt.Sprintf("%d string(s) missing, %d of them only by case", n, cased)
 	}
 	return fmt.Sprintf("%d string(s) missing", n)
 }
@@ -279,8 +322,20 @@ func check(target string, wants []string, o options) result {
 			maxBody)}
 	}
 	hay := plain(textOf(body))
+	lower := ""
 	for _, w := range wants {
-		r.found = append(r.found, strings.Contains(hay, plain(collapse(w))))
+		needle := plain(collapse(w))
+		hit := strings.Contains(hay, needle)
+		r.found = append(r.found, hit)
+		switch {
+		case hit, needle == "":
+			r.cased = append(r.cased, false)
+		default:
+			if lower == "" {
+				lower = strings.ToLower(hay)
+			}
+			r.cased = append(r.cased, strings.Contains(lower, strings.ToLower(needle)))
+		}
 	}
 	return r
 }
@@ -297,6 +352,23 @@ func check(target string, wants []string, o options) result {
 // Memory is bounded by the window and the longest want; the number of bytes read
 // is bounded by the client's --timeout, which covers the body as well as the
 // headers.
+// lastErr remembers, verbatim, the last error the stream underneath it
+// returned. It exists because io.ReadFull's own ErrUnexpectedEOF is
+// indistinguishable from one the stream really produced, and only one of the
+// two means the body was complete.
+type lastErr struct {
+	r   io.Reader
+	err error
+}
+
+func (l *lastErr) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	if err != nil {
+		l.err = err
+	}
+	return n, err
+}
+
 func scanFor(body io.Reader, wants []string) ([]bool, error) {
 	found := make([]bool, len(wants))
 	needles := make([][]byte, len(wants))
@@ -328,8 +400,9 @@ func scanFor(body io.Reader, wants []string) ([]bool, error) {
 	}
 	buf := make([]byte, size)
 	n := 0
+	src := &lastErr{r: body}
 	for {
-		m, err := io.ReadFull(body, buf[n:])
+		m, err := io.ReadFull(src, buf[n:])
 		n += m
 		for i, needle := range needles {
 			if !found[i] && bytes.Contains(buf[:n], needle) {
@@ -341,6 +414,21 @@ func scanFor(body io.Reader, wants []string) ([]bool, error) {
 		case left == 0:
 			return found, nil // every want is settled; the rest of the body cannot change it
 		case err == io.EOF, err == io.ErrUnexpectedEOF:
+			// ⛔ THESE TWO SENTINELS DO NOT MEAN THE STREAM ENDED WELL.
+			// io.ReadFull SYNTHESISES io.ErrUnexpectedEOF whenever a clean end
+			// does not happen to fill the window, which is how every normal scan
+			// finishes -- and the HTTP client returns that SAME value for a body
+			// cut short under its declared Content-Length. Read through the
+			// sentinel to what the stream itself said: anything but io.EOF is a
+			// page we did not finish reading, and "the text is not there" is
+			// then a verdict about a page we never saw. The text path refuses
+			// such a body already (io.ReadAll propagates it); --raw used to
+			// report `false` for it, which is the one answer this command must
+			// never give. Reached only when a want is still outstanding: the
+			// left == 0 case above keeps an already-answered scan answered.
+			if src.err != nil && src.err != io.EOF {
+				return nil, src.err
+			}
 			return found, nil
 		case err != nil:
 			return nil, err

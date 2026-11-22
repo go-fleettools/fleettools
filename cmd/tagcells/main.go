@@ -27,7 +27,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/semver"
 
@@ -60,6 +62,59 @@ type options struct {
 	org   string
 	write bool
 	files []string
+	today string // YYYY-MM-DD written into a rewritten claim's date; empty = now
+
+	// minCells is how many cells the caller knows these pages hold.
+	//
+	// ⛔ WITHOUT IT, A PAGE THAT LOSES ITS CLAIM GOES QUIET INSTEAD OF RED.
+	// Exit 2 fires when a run reads NO cell at all, which is the right answer
+	// for one file and almost no answer for thirteen: a sentence reworded until
+	// the claim no longer matches leaves ten other pages reporting cheerfully,
+	// and the page nobody checks any more looks exactly like a page with nothing
+	// to check. That is how the eleven claims on the documentation site went
+	// unread from 2026-10-11 to 2026-11-22 -- not because anything was red, but
+	// because the count nobody stated could not fall.
+	//
+	// A caller that states the number turns a lost claim into a refusal, and a
+	// deliberate removal into a one-line change in the same pull request that
+	// removes the page. It defaults to 0, which is exactly today's rule.
+	minCells int
+}
+
+// writeAtomic replaces path without ever leaving it truncated: the new content
+// is written to a temporary file in the SAME directory (so the rename stays on
+// one filesystem), given the original's mode, and renamed over it. A kill at any
+// point leaves the old page or the new one, never an empty one.
+func writeAtomic(path string, data []byte) error {
+	st, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tagcells-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	fail := func(err error) error {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Chmod(st.Mode().Perm()); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 // RootCmd builds the command. Tests drive it through parseArgs, below.
@@ -81,6 +136,8 @@ func command(o *options) *cobra.Command {
 	f := c.Flags()
 	f.StringVar(&o.org, "org", "", "the GitHub organisation whose modules the pages list (required)")
 	f.BoolVar(&o.write, "write", false, "rewrite stale cells in place")
+	f.IntVar(&o.minCells, "min-cells", 0,
+		"refuse with exit 2 if fewer than N cells were read in all (0: only a run that read none at all)")
 	return c
 }
 
@@ -116,6 +173,10 @@ func run(o options, stdout, stderr io.Writer, latest func(org, repo string) (str
 		return t
 	}
 
+	today := o.today
+	if today == "" {
+		today = time.Now().Format("2006-01-02")
+	}
 	cellsSeen, stale := 0, 0
 	for _, f := range o.files {
 		b, err := os.ReadFile(f)
@@ -126,6 +187,11 @@ func run(o options, stdout, stderr io.Writer, latest func(org, repo string) (str
 		src := string(b)
 		cells := Find(src, o.org, strings.HasSuffix(f, ".toml"))
 		cellsSeen += len(cells)
+		if len(cells) == 0 {
+			// Named, not counted away: this file is one this command cannot
+			// speak for, and that is a different thing from a file it checked.
+			fmt.Fprintf(stdout, "%s  no version claim of %s found on this page\n", f, o.org)
+		}
 		want := map[string]string{}
 		for _, c := range cells {
 			t := lookup(c.Module)
@@ -140,8 +206,8 @@ func run(o options, stdout, stderr io.Writer, latest func(org, repo string) (str
 			}
 		}
 		if o.write {
-			if out := Rewrite(src, cells, want); out != src {
-				if err := os.WriteFile(f, []byte(out), 0o644); err != nil {
+			if out := Rewrite(src, cells, want, today); out != src {
+				if err := writeAtomic(f, []byte(out)); err != nil {
 					fmt.Fprintln(stderr, "tagcells:", err)
 					return 2
 				}
@@ -155,6 +221,11 @@ func run(o options, stdout, stderr io.Writer, latest func(org, repo string) (str
 		len(o.files), cellsSeen, len(known), stale, len(unread))
 	switch {
 	case cellsSeen == 0 || len(unread) > 0:
+		return 2
+	case cellsSeen < o.minCells:
+		fmt.Fprintf(stderr, "tagcells: %d cell(s) read, --min-cells says %d: a claim these pages used to state is gone,"+
+			" or was reworded past the shapes this command reads. The lines above name every page that holds none.\n",
+			cellsSeen, o.minCells)
 		return 2
 	case stale > 0 && !o.write:
 		return 1
