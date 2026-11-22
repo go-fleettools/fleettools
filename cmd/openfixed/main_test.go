@@ -208,8 +208,16 @@ func TestAKeywordOnAnotherLineDoesNotCloseTheIssue(t *testing.T) {
 //	                                               closes AND refs one issue
 //	`rank`: Review 2, default 1                    ONE test red, the position
 //	                                               assertion below, printing
-//	                                               `got positions 41, 177, 114`
-//	                                               with REFS above REVIEW
+//	                                               `got positions 41, 177, 234,
+//	                                               114` with REFS above both
+//	                                               REVIEW rows (re-measured
+//	                                               under the fixture as it
+//	                                               stands; the earlier run
+//	                                               printed three positions,
+//	                                               because there was one row
+//	                                               per class and neither line
+//	                                               of the comparator was
+//	                                               witnessed -- see below)
 //
 // The third is the one worth having: the counts stayed correct and only the
 // ORDER moved, which no count could have caught.
