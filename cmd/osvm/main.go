@@ -9,6 +9,14 @@
 // create refuses a world-open CIDR and never opens Kerberos (88) or SMB (445):
 // the only rule it adds is TCP 22 from --ssh-from.
 //
+//	osvm --cloud NAME allow --group G --from H/32 --port P... [--create-group] [--allow-shared]
+//	osvm --cloud NAME attach --group G --server NAME
+//	osvm --cloud NAME revoke --group G --from H/32 --port P...
+//	osvm --cloud NAME rules --group G
+//
+// allow refuses a group that more than one server carries unless --allow-shared
+// is given: a rule there opens every one of them.
+//
 // References (read 2026-11-22):
 //
 //	https://pkg.go.dev/github.com/gophercloud/utils/v2/openstack/clientconfig  clouds.yaml loading
@@ -23,6 +31,7 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -38,6 +47,7 @@ import (
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/groups"
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/rules"
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/networks"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/subnets"
 	"github.com/gophercloud/gophercloud/v2/pagination"
 	"github.com/gophercloud/utils/v2/openstack/clientconfig"
@@ -115,7 +125,66 @@ func RootCmd() *cobra.Command {
 	allow.Flags().StringVar(&a.Group, "group", "", "security group name (must match exactly one)")
 	allow.Flags().StringVar(&a.From, "from", "", "source host as a /32 (required)")
 	allow.Flags().IntSliceVar(&a.Ports, "port", nil, "TCP port (repeatable)")
+	allow.Flags().BoolVar(&a.CreateGroup, "create-group", false, "create the group when it does not exist")
+	allow.Flags().BoolVar(&a.AllowShared, "allow-shared", false, "allow a group that more than one server carries")
 	root.AddCommand(allow)
+
+	var r allowOpts
+	revoke := &cobra.Command{
+		Use:   "revoke",
+		Short: "delete the TCP ingress rules of one host (/32) and port(s) from a security group",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cloud == "" {
+				return errors.New("--cloud is required")
+			}
+			if err := r.validate(); err != nil {
+				return err
+			}
+			return revokeRules(cmd.Context(), cloud, r, cmd.OutOrStdout())
+		},
+	}
+	revoke.Flags().StringVar(&r.Group, "group", "", "security group name (must match exactly one)")
+	revoke.Flags().StringVar(&r.From, "from", "", "source host as a /32 (required)")
+	revoke.Flags().IntSliceVar(&r.Ports, "port", nil, "TCP port (repeatable)")
+	root.AddCommand(revoke)
+
+	var group, server string
+	attachCmd := &cobra.Command{
+		Use:   "attach",
+		Short: "add an existing security group to every port of one server, keeping its other groups",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cloud == "" {
+				return errors.New("--cloud is required")
+			}
+			if group == "" || server == "" {
+				return errors.New("--group and --server are required")
+			}
+			return attach(cmd.Context(), cloud, group, server, cmd.OutOrStdout())
+		},
+	}
+	attachCmd.Flags().StringVar(&group, "group", "", "security group name")
+	attachCmd.Flags().StringVar(&server, "server", "", "server name (exact)")
+	root.AddCommand(attachCmd)
+
+	var rg string
+	rulesCmd := &cobra.Command{
+		Use:   "rules",
+		Short: "list a security group's rules and the servers that carry it (read-only)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cloud == "" {
+				return errors.New("--cloud is required")
+			}
+			if rg == "" {
+				return errors.New("--group is required")
+			}
+			return listRules(cmd.Context(), cloud, rg, cmd.OutOrStdout())
+		},
+	}
+	rulesCmd.Flags().StringVar(&rg, "group", "", "security group name")
+	root.AddCommand(rulesCmd)
 
 	var o createOpts
 	create := &cobra.Command{
@@ -181,6 +250,9 @@ func checkCIDR(s string) error {
 type allowOpts struct {
 	Group, From string
 	Ports       []int
+	// CreateGroup makes the group when absent; AllowShared lets a rule go into
+	// a group that more than one server carries.
+	CreateGroup, AllowShared bool
 }
 
 func (a allowOpts) validate() error {
@@ -211,28 +283,169 @@ func allowRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) err
 	}
 	fmt.Fprintln(w, "project:", projectName(c.provider))
 	gs, err := collect(ctx, groups.List(c.network, groups.ListOpts{Name: a.Group}), groups.ExtractGroups)
-	if err != nil || len(gs) != 1 {
-		return fmt.Errorf("security group %q: want exactly one, got %d (%v)", a.Group, len(gs), err)
+	if err != nil {
+		return fmt.Errorf("security group %q: %w", a.Group, err)
 	}
-	have := map[int]bool{}
+	if len(gs) == 0 && a.CreateGroup {
+		g, err := groups.Create(ctx, c.network, groups.CreateOpts{Name: a.Group, Description: "created by osvm allow --create-group"}).Extract()
+		if err != nil {
+			return fmt.Errorf("create security group %q: %w", a.Group, err)
+		}
+		fmt.Fprintf(w, "group created: %s id=%s\n", g.Name, g.ID)
+		gs = []groups.SecGroup{*g}
+	}
+	if len(gs) != 1 {
+		return fmt.Errorf("security group %q: want exactly one, got %d", a.Group, len(gs))
+	}
+	users, err := attachedServers(ctx, c, a.Group)
+	if err != nil {
+		return err
+	}
+	if len(users) > 1 && !a.AllowShared {
+		return fmt.Errorf("security group %q is attached to %d servers (%s): a rule here opens all of them; pass --allow-shared to do it anyway, or use a group of its own", a.Group, len(users), strings.Join(users, ", "))
+	}
+	have := map[int]string{}
 	for _, r := range gs[0].Rules {
-		if r.Direction == "ingress" && r.Protocol == "tcp" && r.RemoteIPPrefix == a.From {
-			have[r.PortRangeMin] = r.PortRangeMin == r.PortRangeMax
+		if isHostRule(r, a.From) && r.PortRangeMin == r.PortRangeMax {
+			have[r.PortRangeMin] = r.ID
 		}
 	}
 	for _, p := range a.Ports {
-		if have[p] {
-			fmt.Fprintf(w, "rule exists: tcp/%d from %s in %s\n", p, a.From, gs[0].Name)
+		if id := have[p]; id != "" {
+			fmt.Fprintf(w, "rule exists: tcp/%d from %s in %s id=%s\n", p, a.From, gs[0].Name, id)
 			continue
 		}
-		if _, err := rules.Create(ctx, c.network, rules.CreateOpts{
+		r, err := rules.Create(ctx, c.network, rules.CreateOpts{
 			SecGroupID: gs[0].ID, Direction: rules.DirIngress, EtherType: rules.EtherType4,
 			Protocol: rules.ProtocolTCP, PortRangeMin: p, PortRangeMax: p, RemoteIPPrefix: a.From,
-		}).Extract(); err != nil {
+		}).Extract()
+		if err != nil {
 			return fmt.Errorf("rule tcp/%d: %w", p, err)
 		}
-		fmt.Fprintf(w, "rule added: tcp/%d from %s in %s\n", p, a.From, gs[0].Name)
+		fmt.Fprintf(w, "rule added: tcp/%d from %s in %s id=%s\n", p, a.From, gs[0].Name, r.ID)
 	}
+	return nil
+}
+
+func isHostRule(r rules.SecGroupRule, from string) bool {
+	return r.Direction == "ingress" && r.Protocol == "tcp" && r.RemoteIPPrefix == from
+}
+
+// attachedServers names the servers that carry the group.
+func attachedServers(ctx context.Context, c *clients, group string) ([]string, error) {
+	ss, err := collect(ctx, servers.List(c.compute, servers.ListOpts{}), servers.ExtractServers)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, s := range ss {
+		for _, g := range s.SecurityGroups {
+			if g["name"] == group {
+				names = append(names, s.Name)
+			}
+		}
+	}
+	return names, nil
+}
+
+// oneGroup finds exactly one security group by name.
+func oneGroup(ctx context.Context, c *clients, name string) (groups.SecGroup, error) {
+	gs, err := collect(ctx, groups.List(c.network, groups.ListOpts{Name: name}), groups.ExtractGroups)
+	if err != nil {
+		return groups.SecGroup{}, fmt.Errorf("security group %q: %w", name, err)
+	}
+	if len(gs) != 1 {
+		return groups.SecGroup{}, fmt.Errorf("security group %q: want exactly one, got %d", name, len(gs))
+	}
+	return gs[0], nil
+}
+
+// attach adds the group to every port of the named server, keeping the ports'
+// other groups.
+func attach(ctx context.Context, cloud, group, server string, w io.Writer) error {
+	c, err := connect(ctx, cloud)
+	if err != nil {
+		return err
+	}
+	g, err := oneGroup(ctx, c, group)
+	if err != nil {
+		return err
+	}
+	ss, err := collect(ctx, servers.List(c.compute, servers.ListOpts{}), servers.ExtractServers)
+	if err != nil {
+		return err
+	}
+	var hit []servers.Server
+	for _, s := range ss {
+		if s.Name == server {
+			hit = append(hit, s)
+		}
+	}
+	if len(hit) != 1 {
+		return fmt.Errorf("server %q: want exactly one, got %d", server, len(hit))
+	}
+	ps, err := collect(ctx, ports.List(c.network, ports.ListOpts{DeviceID: hit[0].ID}), ports.ExtractPorts)
+	if err != nil {
+		return err
+	}
+	if len(ps) == 0 {
+		return fmt.Errorf("server %q has no port", server)
+	}
+	for _, p := range ps {
+		ids := append([]string{}, p.SecurityGroups...)
+		if !slices.Contains(ids, g.ID) {
+			ids = append(ids, g.ID)
+			if _, err := ports.Update(ctx, c.network, p.ID, ports.UpdateOpts{SecurityGroups: &ids}).Extract(); err != nil {
+				return fmt.Errorf("port %s: %w", p.ID, err)
+			}
+		}
+		fmt.Fprintf(w, "attached: %s to %s port=%s groups=%d\n", g.Name, server, p.ID, len(ids))
+	}
+	return nil
+}
+
+// revokeRules deletes the ingress TCP rules of one host and port from a group.
+func revokeRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) error {
+	c, err := connect(ctx, cloud)
+	if err != nil {
+		return err
+	}
+	g, err := oneGroup(ctx, c, a.Group)
+	if err != nil {
+		return err
+	}
+	for _, p := range a.Ports {
+		for _, r := range g.Rules {
+			if isHostRule(r, a.From) && r.PortRangeMin == p && r.PortRangeMax == p {
+				if err := rules.Delete(ctx, c.network, r.ID).ExtractErr(); err != nil {
+					return fmt.Errorf("delete rule %s: %w", r.ID, err)
+				}
+				fmt.Fprintf(w, "rule deleted: tcp/%d from %s in %s id=%s\n", p, a.From, g.Name, r.ID)
+			}
+		}
+	}
+	return nil
+}
+
+// listRules prints a group's rules and the servers that carry it (read-only).
+func listRules(ctx context.Context, cloud, group string, w io.Writer) error {
+	c, err := connect(ctx, cloud)
+	if err != nil {
+		return err
+	}
+	g, err := oneGroup(ctx, c, group)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "group %s id=%s rules=%d\n", g.Name, g.ID, len(g.Rules))
+	for _, r := range g.Rules {
+		fmt.Fprintf(w, "rule id=%s %s %s %d-%d from=%s ethertype=%s\n", r.ID, r.Direction, r.Protocol, r.PortRangeMin, r.PortRangeMax, r.RemoteIPPrefix, r.EtherType)
+	}
+	users, err := attachedServers(ctx, c, group)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "attached to: %s\n", strings.Join(users, ", "))
 	return nil
 }
 

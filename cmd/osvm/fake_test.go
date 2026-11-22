@@ -30,6 +30,8 @@ type fakeCloud struct {
 	flavors  string
 	images   string
 	created  []string
+	// serversBody and portsBody replace the default listings when set.
+	serversBody, portsBody string
 }
 
 const (
@@ -113,7 +115,23 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 	case "GET /image/":
 		reply(200, `{"versions":[{"id":"v2.0","status":"CURRENT","links":[{"rel":"self","href":"`+f.srv.URL+`/image/v2/"}]}]}`)
 	case "GET /compute/v2.1/servers/detail":
+		if f.serversBody != "" {
+			reply(200, f.serversBody)
+			return
+		}
 		reply(200, serversList)
+	case "GET /network/v2.0/ports":
+		if f.portsBody != "" {
+			reply(200, f.portsBody)
+			return
+		}
+		reply(200, `{"ports":[{"id":"p1","security_groups":["g0"]}]}`)
+	case "PUT /network/v2.0/ports/p1":
+		f.record(r)
+		reply(200, `{"port":{"id":"p1"}}`)
+	case "DELETE /network/v2.0/security-group-rules/r88", "DELETE /network/v2.0/security-group-rules/r445":
+		f.record(r)
+		reply(204, ``)
 	case "GET /network/v2.0/networks":
 		reply(200, f.nets)
 	case "GET /network/v2.0/subnets":
@@ -397,7 +415,7 @@ func TestAllowAddsOneRulePerPortFromOneHost(t *testing.T) {
 func TestAllowIsIdempotent(t *testing.T) {
 	f := newFake(t)
 	f.groups = `{"security_groups":[{"id":"g1","name":"default","security_group_rules":[` +
-		`{"direction":"ingress","protocol":"tcp","remote_ip_prefix":"192.168.1.94/32","port_range_min":88,"port_range_max":88},` +
+		`{"id":"r88","direction":"ingress","protocol":"tcp","remote_ip_prefix":"192.168.1.94/32","port_range_min":88,"port_range_max":88},` +
 		`{"direction":"ingress","protocol":"tcp","remote_ip_prefix":"10.0.0.1/32","port_range_min":445,"port_range_max":445},` +
 		`{"direction":"egress","protocol":"tcp","remote_ip_prefix":"192.168.1.94/32","port_range_min":445,"port_range_max":445}]}]}`
 	out, err := run(allowArgs...)
@@ -480,6 +498,253 @@ func TestAllowGroupAndCallFailures(t *testing.T) {
 	f = newFake(t)
 	f.denyAuth = true
 	if _, err := run(allowArgs...); err == nil || !strings.Contains(err.Error(), "authenticate") {
+		t.Errorf("auth: %v", err)
+	}
+}
+
+const sharedServers = `{"servers":[` +
+	`{"id":"s1","name":"staging","security_groups":[{"name":"shared"}]},` +
+	`{"id":"s2","name":"prod","security_groups":[{"name":"shared"},{"name":"other"}]}]}`
+
+func TestAllowRefusesAGroupMoreThanOneServerCarries(t *testing.T) {
+	f := newFake(t)
+	f.serversBody = sharedServers
+	f.groups = `{"security_groups":[{"id":"g1","name":"shared"}]}`
+	args := []string{cloudArg, "allow", "--group=shared", "--from=192.168.1.94/32", "--port=88"}
+	_, err := run(args...)
+	if err == nil || !strings.Contains(err.Error(), "attached to 2 servers (staging, prod)") || !strings.Contains(err.Error(), "--allow-shared") {
+		t.Fatalf("shared group accepted: %v", err)
+	}
+	if len(ruleBodies(f)) != 0 {
+		t.Error("wrote a rule into a shared group")
+	}
+	out, err := run(append(args, "--allow-shared")...)
+	if err != nil || !strings.Contains(out, "rule added: tcp/88 from 192.168.1.94/32 in shared id=r1") {
+		t.Fatalf("explicit flag: %v\n%s", err, out)
+	}
+	f = newFake(t)
+	f.serversBody = sharedServers
+	f.groups = `{"security_groups":[{"id":"g1","name":"other"}]}`
+	if out, err := run(cloudArg, "allow", "--group=other", "--from=192.168.1.94/32", "--port=88"); err != nil {
+		t.Fatalf("group of one server refused: %v\n%s", err, out)
+	}
+	f = newFake(t)
+	f.fail["GET /compute/v2.1/servers/detail"] = 0
+	if _, err := run(allowArgs...); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Errorf("server listing failure: %v", err)
+	}
+}
+
+func TestAllowCreatesTheGroupOnlyWhenAsked(t *testing.T) {
+	f := newFake(t)
+	f.groups = `{"security_groups":[]}`
+	args := []string{cloudArg, "allow", "--group=mine", "--from=192.168.1.94/32", "--port=88"}
+	if _, err := run(args...); err == nil || !strings.Contains(err.Error(), "want exactly one, got 0") {
+		t.Fatalf("created without being asked: %v", err)
+	}
+	if len(f.created) != 0 {
+		t.Errorf("wrote: %v", f.created)
+	}
+	out, err := run(append(args, "--create-group")...)
+	if err != nil || !strings.Contains(out, "group created: vm-ssh id=g2") || !strings.Contains(out, "id=r1") {
+		t.Fatalf("create-group: %v\n%s", err, out)
+	}
+	if !strings.Contains(f.created[0], `"name":"mine"`) || !strings.Contains(f.created[1], `"security_group_id":"g2"`) {
+		t.Errorf("calls: %v", f.created)
+	}
+	f = newFake(t)
+	f.groups = `{"security_groups":[]}`
+	f.fail["POST /network/v2.0/security-groups"] = 0
+	if _, err := run(append(args, "--create-group")...); err == nil || !strings.Contains(err.Error(), "create security group") {
+		t.Errorf("create failure: %v", err)
+	}
+}
+
+func TestAttachKeepsTheOtherGroups(t *testing.T) {
+	f := newFake(t)
+	f.serversBody = sharedServers
+	f.groups = `{"security_groups":[{"id":"g1","name":"mine"}]}`
+	out, err := run(cloudArg, "attach", "--group=mine", "--server=staging")
+	if err != nil || !strings.Contains(out, "attached: mine to staging port=p1 groups=2") {
+		t.Fatalf("attach: %v\n%s", err, out)
+	}
+	if len(f.created) != 1 || !strings.Contains(f.created[0], `"security_groups":["g0","g1"]`) {
+		t.Errorf("update: %v", f.created)
+	}
+	f = newFake(t)
+	f.serversBody = sharedServers
+	f.groups = `{"security_groups":[{"id":"g0","name":"mine"}]}`
+	out, err = run(cloudArg, "attach", "--group=mine", "--server=staging")
+	if err != nil || len(f.created) != 0 || !strings.Contains(out, "groups=1") {
+		t.Errorf("already attached: %v %v\n%s", err, f.created, out)
+	}
+}
+
+func TestAttachRefusalsAndFailures(t *testing.T) {
+	newFake(t)
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"attach", "--server=staging"}, "--group and --server"},
+		{[]string{"attach", "--group=mine"}, "--group and --server"},
+	} {
+		if _, err := run(append([]string{cloudArg}, c.args...)...); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%v: %v", c.args, err)
+		}
+	}
+	if _, err := run("attach", "--group=mine", "--server=staging"); err == nil || !strings.Contains(err.Error(), "--cloud") {
+		t.Errorf("no cloud: %v", err)
+	}
+	mk := func() *fakeCloud {
+		f := newFake(t)
+		f.serversBody = sharedServers
+		f.groups = `{"security_groups":[{"id":"g1","name":"mine"}]}`
+		return f
+	}
+	at := []string{cloudArg, "attach", "--group=mine", "--server=staging"}
+	f := mk()
+	f.groups = `{"security_groups":[]}`
+	if _, err := run(at...); err == nil || !strings.Contains(err.Error(), "want exactly one") {
+		t.Errorf("no group: %v", err)
+	}
+	mk()
+	if _, err := run(cloudArg, "attach", "--group=mine", "--server=nobody"); err == nil || !strings.Contains(err.Error(), `server "nobody"`) {
+		t.Errorf("no server: %v", err)
+	}
+	f = mk()
+	f.portsBody = `{"ports":[]}`
+	if _, err := run(at...); err == nil || !strings.Contains(err.Error(), "has no port") {
+		t.Errorf("no port: %v", err)
+	}
+	f = mk()
+	f.fail["PUT /network/v2.0/ports/p1"] = 0
+	if _, err := run(at...); err == nil || !strings.Contains(err.Error(), "port p1") {
+		t.Errorf("update failure: %v", err)
+	}
+	f = mk()
+	f.fail["GET /network/v2.0/ports"] = 0
+	if _, err := run(at...); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Errorf("port listing failure: %v", err)
+	}
+	f = mk()
+	f.fail["GET /compute/v2.1/servers/detail"] = 0
+	if _, err := run(at...); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Errorf("server listing failure: %v", err)
+	}
+	f = mk()
+	f.denyAuth = true
+	if _, err := run(at...); err == nil || !strings.Contains(err.Error(), "authenticate") {
+		t.Errorf("auth: %v", err)
+	}
+}
+
+const ruledGroup = `{"security_groups":[{"id":"g1","name":"mine","security_group_rules":[` +
+	`{"id":"r88","direction":"ingress","protocol":"tcp","remote_ip_prefix":"192.168.1.94/32","port_range_min":88,"port_range_max":88},` +
+	`{"id":"r445","direction":"ingress","protocol":"tcp","remote_ip_prefix":"192.168.1.94/32","port_range_min":445,"port_range_max":445},` +
+	`{"id":"r22","direction":"ingress","protocol":"tcp","remote_ip_prefix":"192.168.1.94/32","port_range_min":22,"port_range_max":22},` +
+	`{"id":"rw","direction":"ingress","protocol":"tcp","remote_ip_prefix":"0.0.0.0/0","port_range_min":88,"port_range_max":88}]}]}`
+
+func TestRevokeDeletesOnlyTheMatchingRules(t *testing.T) {
+	f := newFake(t)
+	f.groups = ruledGroup
+	out, err := run(cloudArg, "revoke", "--group=mine", "--from=192.168.1.94/32", "--port=88", "--port=445")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"rule deleted: tcp/88 from 192.168.1.94/32 in mine id=r88", "rule deleted: tcp/445 from 192.168.1.94/32 in mine id=r445"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	if len(f.created) != 2 || strings.Contains(strings.Join(f.created, " "), "r22") || strings.Contains(strings.Join(f.created, " "), "rw") {
+		t.Errorf("deleted: %v", f.created)
+	}
+	for _, args := range [][]string{
+		{"revoke", "--group=mine", "--from=0.0.0.0/0", "--port=88"},
+		{"revoke", "--from=192.168.1.94/32", "--port=88"},
+	} {
+		f = newFake(t)
+		f.groups = ruledGroup
+		if _, err := run(append([]string{cloudArg}, args...)...); err == nil {
+			t.Errorf("%v accepted", args)
+		}
+		if len(f.created) != 0 {
+			t.Errorf("%v deleted: %v", args, f.created)
+		}
+	}
+	newFake(t)
+	if _, err := run("revoke", "--group=mine", "--from=192.168.1.94/32", "--port=88"); err == nil || !strings.Contains(err.Error(), "--cloud") {
+		t.Errorf("no cloud: %v", err)
+	}
+	f = newFake(t)
+	f.groups = ruledGroup
+	f.fail["DELETE /network/v2.0/security-group-rules/r88"] = 0
+	if _, err := run(cloudArg, "revoke", "--group=mine", "--from=192.168.1.94/32", "--port=88"); err == nil || !strings.Contains(err.Error(), "delete rule r88") {
+		t.Errorf("delete failure: %v", err)
+	}
+	f = newFake(t)
+	f.groups = `{"security_groups":[]}`
+	if _, err := run(cloudArg, "revoke", "--group=mine", "--from=192.168.1.94/32", "--port=88"); err == nil || !strings.Contains(err.Error(), "want exactly one") {
+		t.Errorf("no group: %v", err)
+	}
+	f = newFake(t)
+	f.denyAuth = true
+	if _, err := run(cloudArg, "revoke", "--group=mine", "--from=192.168.1.94/32", "--port=88"); err == nil || !strings.Contains(err.Error(), "authenticate") {
+		t.Errorf("auth: %v", err)
+	}
+}
+
+func TestGroupListingFailureIsReportedAsSuch(t *testing.T) {
+	for _, args := range [][]string{
+		{"rules", "--group=mine"},
+		{"attach", "--group=mine", "--server=staging"},
+		{"revoke", "--group=mine", "--from=192.168.1.94/32", "--port=88"},
+	} {
+		f := newFake(t)
+		f.fail["GET /network/v2.0/security-groups"] = 0
+		if _, err := run(append([]string{cloudArg}, args...)...); err == nil || !strings.Contains(err.Error(), "500") {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+}
+
+func TestRulesListsRulesAndServers(t *testing.T) {
+	f := newFake(t)
+	f.groups = ruledGroup
+	f.serversBody = sharedServers
+	out, err := run(cloudArg, "rules", "--group=mine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"group mine id=g1 rules=4", "rule id=r88 ingress tcp 88-88 from=192.168.1.94/32", "attached to: "} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	if len(f.created) != 0 {
+		t.Errorf("a read wrote: %v", f.created)
+	}
+	if _, err := run(cloudArg, "rules"); err == nil || !strings.Contains(err.Error(), "--group") {
+		t.Errorf("no group flag: %v", err)
+	}
+	if _, err := run("rules", "--group=mine"); err == nil || !strings.Contains(err.Error(), "--cloud") {
+		t.Errorf("no cloud: %v", err)
+	}
+	f = newFake(t)
+	f.groups = `{"security_groups":[]}`
+	if _, err := run(cloudArg, "rules", "--group=mine"); err == nil {
+		t.Error("missing group accepted")
+	}
+	f = newFake(t)
+	f.groups = ruledGroup
+	f.fail["GET /compute/v2.1/servers/detail"] = 0
+	if _, err := run(cloudArg, "rules", "--group=mine"); err == nil {
+		t.Error("server listing failure accepted")
+	}
+	f = newFake(t)
+	f.denyAuth = true
+	if _, err := run(cloudArg, "rules", "--group=mine"); err == nil || !strings.Contains(err.Error(), "authenticate") {
 		t.Errorf("auth: %v", err)
 	}
 }
