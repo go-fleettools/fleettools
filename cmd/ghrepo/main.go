@@ -79,6 +79,13 @@ const longHelp = `Repository-level GitHub writes, each after showing the reposit
   ghrepo <owner/repo> secret-set <NAME> (--value-file F | --value-stdin)
   ghrepo <owner/repo> pages <workflow|gh-pages>
   ghrepo <owner/repo> private-reporting <enable|disable|status>
+  ghrepo <owner/repo> issues <enable|disable|status>
+  ghrepo <owner/repo> actions <enable|status>
+
+issues switches the issues tab on or off (a fork starts with it off); the state
+is read back. actions turns GitHub Actions on and enables the workflows a fork
+left in "disabled_fork" (a fork's workflows stay off until someone enables
+them); workflows disabled by hand are listed, never switched on.
 
 transfer moves the repository to another user or organization, optionally
 renaming it (--name). It is refused when <new-owner>/<name> already exists. The
@@ -140,7 +147,7 @@ type opts struct {
 func RootCmd() *cobra.Command {
 	var o opts
 	cmd := &cobra.Command{
-		Use:          "ghrepo <owner/repo> <fork|edit|rename|archive|delete|transfer|sync|secret-set|pages|private-reporting> [arg]",
+		Use:          "ghrepo <owner/repo> <fork|edit|rename|archive|delete|transfer|sync|secret-set|pages|private-reporting|issues|actions> [arg]",
 		Short:        "Fork, edit, rename, archive, delete, sync a GitHub repository, or set an Actions secret",
 		Long:         longHelp,
 		Args:         cobra.RangeArgs(2, 3),
@@ -177,6 +184,7 @@ type repoInfo struct {
 	Fork          bool     `json:"fork"`
 	DefaultBranch string   `json:"default_branch"`
 	Description   string   `json:"description"`
+	HasIssues     *bool    `json:"has_issues"`
 	Homepage      string   `json:"homepage"`
 	Topics        []string `json:"topics"`
 	Parent        *struct {
@@ -260,12 +268,16 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 			return fmt.Errorf("pages: want \"workflow\" or \"gh-pages\", got %q", arg)
 		}
 		o.pagesMode = arg
-	case "private-reporting":
+	case "private-reporting", "issues":
 		if arg != "enable" && arg != "disable" && arg != "status" {
-			return fmt.Errorf("private-reporting: want enable, disable or status, got %q", arg)
+			return fmt.Errorf("%s: want enable, disable or status, got %q", verb, arg)
+		}
+	case "actions":
+		if arg != "enable" && arg != "status" {
+			return fmt.Errorf("actions: want enable or status, got %q", arg)
 		}
 	default:
-		return fmt.Errorf("unknown verb %q: want fork, edit, rename, archive, delete, transfer, sync, secret-set, pages or private-reporting", verb)
+		return fmt.Errorf("unknown verb %q: want fork, edit, rename, archive, delete, transfer, sync, secret-set, pages, private-reporting, issues or actions", verb)
 	}
 	if o.org != "" && verb != "fork" {
 		return errors.New("--org applies to fork only")
@@ -341,6 +353,10 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		return doPages(out, c, repoURL, tok, r, o)
 	case "private-reporting":
 		return doPrivateReporting(out, c, repoURL, tok, r, o, arg)
+	case "issues":
+		return doIssues(out, c, repoURL, tok, r, o, arg)
+	case "actions":
+		return doActions(out, c, repoURL, tok, r, o, arg)
 	default:
 		return doSecret(out, c, repoURL, tok, r, o, arg, secret)
 	}
