@@ -181,6 +181,14 @@ func recordVet(stderr io.Writer, dir string, f finding) {
 		fmt.Fprintf(stderr, "buildscan: no record: the CI declares no configuration, so the vet compiled nothing\n")
 		return
 	}
+	// The root is absolute with its symlinks resolved, so dir must be too: "." from
+	// the root, or a path through a symlink, is the root all the same. Abs fails only
+	// without a working directory and then returns "", which is not the root: the
+	// comparison below refuses it, so its error needs no branch of its own.
+	abs, _ := filepath.Abs(dir)
+	if a, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = a
+	}
 	if mods, err := modules(dir); err != nil || len(mods) == 0 {
 		fmt.Fprintf(stderr, "buildscan: no record: no module was found to vet\n")
 		return
@@ -193,7 +201,7 @@ func recordVet(stderr io.Writer, dir string, f finding) {
 	if a, err := filepath.EvalSymlinks(top); err == nil {
 		top = a
 	}
-	if top != filepath.Clean(dir) {
+	if top != abs {
 		fmt.Fprintf(stderr, "buildscan: no record: %s is not the repository root (%s), the vet covered part of it\n", dir, top)
 		return
 	}
@@ -217,7 +225,7 @@ func recordVet(stderr io.Writer, dir string, f finding) {
 		cfgs = append(cfgs, c.key())
 	}
 	sort.Strings(cfgs)
-	if err := storeRecord(passRecord{Tree: tree, Dir: dir, Configs: cfgs, At: time.Now().UTC()}); err != nil {
+	if err := storeRecord(passRecord{Tree: tree, Dir: abs, Configs: cfgs, At: time.Now().UTC()}); err != nil {
 		fmt.Fprintf(stderr, "buildscan: no record: %v\n", oneLine(err))
 		return
 	}

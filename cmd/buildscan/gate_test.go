@@ -388,6 +388,26 @@ func TestVetRecordsAPassForTheHeadTree(t *testing.T) {
 	}
 }
 
+// ⛔ `buildscan --dir . --vet` from the repository root is the way most people
+// type it. The root was compared with the directory AS GIVEN, so "." was never the
+// root and a passing vet was not recorded (fleettools#407).
+func TestVetRecordsAPassForARelativeDirAndASymlink(t *testing.T) {
+	dir := newClone(t, true)
+	commit(t, dir, "x_windows.go", "package a\n")
+	t.Chdir(dir)
+	if msg := vetRun(t, "."); !strings.Contains(msg, "recorded a vet pass") {
+		t.Fatalf("--dir . from the root: %q", msg)
+	}
+
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if msg := vetRun(t, link); !strings.Contains(msg, "recorded a vet pass") {
+		t.Fatalf("--dir through a symlink: %q", msg)
+	}
+}
+
 func TestVetRecordsNothingForADirtyTree(t *testing.T) {
 	dir := newClone(t, true)
 	commit(t, dir, "x_windows.go", "package a\n")
@@ -604,5 +624,36 @@ func TestTheHookFlagAnswersThroughTheCommand(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"permissionDecision":"deny"`) {
 		t.Fatalf("--hook did not deny: out=%q err=%q", out.String(), errOut.String())
+	}
+}
+
+// ⛔ fleettools#408: a package the CI vets with a check turned off was vetted
+// here with every check on, so a green CI read as a vet failure and the only way
+// to push was BUILDSCAN_SKIP.
+const seekGo = "package seeker\n\ntype F struct{}\n\n// Seek has the shape a third-party interface mandates; stdmethods objects.\nfunc (F) Seek(off int64, whence int) (int64, int) { return 0, 0 }\n"
+
+func ciWithVetLine(vetLine string) string {
+	return "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          go vet $(go list ./... | grep -v '/seeker$')\n" + vetLine
+}
+
+func TestVetHonoursTheFlagsTheCIPassesForAPackage(t *testing.T) {
+	dir := newClone(t, false)
+	write(t, dir, ".github/workflows/ci.yml", ciWithVetLine("          go vet -stdmethods=false ./seeker\n"))
+	write(t, dir, "seeker/seeker.go", seekGo)
+	commit(t, dir, "x_windows.go", "package a\n")
+	msg := vetRun(t, dir)
+	if !strings.Contains(msg, "recorded a vet pass") {
+		t.Fatalf("the CI's own vet flags were not honoured: %q", msg)
+	}
+}
+
+func TestVetStillFailsWithoutTheCIExemption(t *testing.T) {
+	dir := newClone(t, false)
+	write(t, dir, ".github/workflows/ci.yml", ciWithVetLine("          go test ./...\n"))
+	write(t, dir, "seeker/seeker.go", seekGo)
+	commit(t, dir, "x_windows.go", "package a\n")
+	msg := vetRun(t, dir)
+	if strings.Contains(msg, "recorded a vet pass") {
+		t.Fatalf("a package the CI does not exempt was vetted with a check off: %q", msg)
 	}
 }
