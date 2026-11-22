@@ -30,12 +30,54 @@ import (
 // only watches the primary budget and does not say so reads as "safe to
 // sweep". The secondary limit has no readable counter; the only control for it
 // is a real call, and the only remedy is time.
-var (
-	budgetMu       sync.Mutex
-	budgetLeft     int  // what the primary budget had, less the calls made since
-	budgetReserve  int  // the floor this package stops at, chosen
-	budgetTracking bool // false until StartBudget succeeds
+//
+// ⛔ ONE PROJECTION PER RESOURCE. GitHub's `core` (REST) and `graphql` budgets
+// are separate per-user counters: measured 2026-11-22, `renovatedup`, which only
+// speaks `gh api graphql`, was refused with "0 left" because REST was spent
+// while GraphQL was untouched. A call is charged to the resource it spends
+// (see [resourceOf]); GraphQL stays guarded, since Renovate spends it too.
+const (
+	resCore    = "core"
+	resGraphQL = "graphql"
 )
+
+// projection is what one resource had, less the calls made since.
+type projection struct {
+	left     int  // what the budget had, less the calls made since
+	reserve  int  // the floor this package stops at, chosen
+	tracking bool // false until a start succeeds
+	tried    bool // an automatic start has been attempted (budgetStartMu)
+}
+
+var (
+	budgetMu sync.Mutex // guards left, reserve, tracking of every projection
+	budgets  = map[string]*projection{resCore: {}, resGraphQL: {}}
+)
+
+// resourceOf names the budget a gh call is charged to: `gh api graphql ...`
+// spends the GraphQL one, everything else the REST `core` one.
+func resourceOf(args []string) string {
+	if len(args) > 1 && args[0] == "api" && args[1] == "graphql" {
+		return resGraphQL
+	}
+	return resCore
+}
+
+// reserveError is ErrBudgetReserve naming the resource that ran down.
+type reserveError struct {
+	resource      string
+	left, reserve int
+}
+
+func (e *reserveError) Error() string {
+	head := ErrBudgetReserve.Error()
+	if e.resource != resCore {
+		head = "fleet: stopped at the " + e.resource + " budget reserve"
+	}
+	return fmt.Sprintf("%s: %d left, %d reserved for everything else", head, e.left, e.reserve)
+}
+
+func (e *reserveError) Is(target error) bool { return target == ErrBudgetReserve }
 
 // ErrBudgetFloor means the budget was already below what the sweep asked for,
 // so it never began. Beginning anyway is what leaves a sweep half done and a
@@ -70,10 +112,7 @@ var AutoBudget = true
 // BudgetWarn is where an unguarded sweep is announced. A test redirects it.
 var BudgetWarn io.Writer = os.Stderr
 
-var (
-	budgetStartMu sync.Mutex
-	budgetTried   bool // an automatic start has been attempted
-)
+var budgetStartMu sync.Mutex // guards the tried flag of every projection
 
 // autoStart gives a projection to a caller that never asked for one.
 //
@@ -84,33 +123,34 @@ var (
 // it was before this change -- unguarded -- and writes one line saying so,
 // because the failure mode this whole file is about is a sweep nobody knew was
 // unprotected.
-func autoStart() {
+func autoStart(resource string) {
 	budgetStartMu.Lock()
 	defer budgetStartMu.Unlock()
-	if budgetTried {
+	p := budgets[resource]
+	if p.tried {
 		return
 	}
-	budgetTried = true
+	p.tried = true
 
 	// ⛔ READ THROUGH THE EXEC SEAM, NOT THROUGH GH: GH accounts for its calls
 	// with spend, which is what called us, and a projection that charged itself
 	// for being created would recurse.
-	out, _, err := run([]string{"api", "rate_limit", "--jq", ".resources.core.remaining"})
+	out, _, err := run([]string{"api", "rate_limit", "--jq", ".resources." + resource + ".remaining"})
 	var left int
 	if err == nil {
 		err = json.Unmarshal(trimSpaceBytes(out), &left)
 	}
 	if err != nil {
 		if BudgetWarn != nil {
-			fmt.Fprintf(BudgetWarn, "fleet: the hourly budget could not be read (%v); "+
-				"this sweep is UNGUARDED and may spend the share the fleet's Renovate runners need\n", err)
+			fmt.Fprintf(BudgetWarn, "fleet: the hourly %s budget could not be read (%v); "+
+				"this sweep is UNGUARDED and may spend the share the fleet's Renovate runners need\n", resource, err)
 		}
 		return
 	}
 
 	budgetMu.Lock()
 	defer budgetMu.Unlock()
-	budgetLeft, budgetReserve, budgetTracking = left, DefaultReserve, true
+	p.left, p.reserve, p.tracking = left, DefaultReserve, true
 }
 
 // DefaultReserve is how much of the hourly budget a sweep leaves behind.
@@ -146,7 +186,7 @@ func StartBudget(floor, reserve int) error {
 	// through spend, finds nothing tracking, and starts a SECOND projection
 	// from its own extra request.
 	budgetStartMu.Lock()
-	budgetTried = true
+	budgets[resCore].tried = true
 	budgetStartMu.Unlock()
 
 	b, err := GH("api", "rate_limit", "--jq", ".resources.core.remaining")
@@ -163,7 +203,8 @@ func StartBudget(floor, reserve int) error {
 
 	budgetMu.Lock()
 	defer budgetMu.Unlock()
-	budgetLeft, budgetReserve, budgetTracking = left, reserve, true
+	p := budgets[resCore]
+	p.left, p.reserve, p.tracking = left, reserve, true
 	return nil
 }
 
@@ -173,42 +214,48 @@ func StartBudget(floor, reserve int) error {
 func BudgetLeft() (left int, tracking bool) {
 	budgetMu.Lock()
 	defer budgetMu.Unlock()
-	return budgetLeft, budgetTracking
+	p := budgets[resCore]
+	return p.left, p.tracking
 }
 
-// StopBudget forgets the projection. A test uses it; a long-lived process that
-// starts a second sweep in a new hour would too.
+// StopBudget forgets every projection, REST and GraphQL. A test uses it; a
+// long-lived process that starts a second sweep in a new hour would too.
 func StopBudget() {
 	budgetStartMu.Lock()
-	budgetTried = false
+	for _, p := range budgets {
+		p.tried = false
+	}
 	budgetStartMu.Unlock()
 
 	budgetMu.Lock()
 	defer budgetMu.Unlock()
-	budgetLeft, budgetReserve, budgetTracking = 0, 0, false
+	for _, p := range budgets {
+		p.left, p.reserve, p.tracking = 0, 0, false
+	}
 }
 
-// spend accounts for one call and reports whether the reserve has been reached.
-// It is consulted BEFORE the call, so the reserve is a floor the sweep stops
-// at rather than one it crosses.
-func spend() error {
+// spend accounts for one call against the budget it spends and reports whether
+// that budget's reserve has been reached. It is consulted BEFORE the call, so
+// the reserve is a floor the sweep stops at rather than one it crosses.
+func spend(args []string) error {
+	resource := resourceOf(args)
+	p := budgets[resource]
 	budgetMu.Lock()
-	tracking := budgetTracking
+	tracking := p.tracking
 	budgetMu.Unlock()
 	if !tracking && AutoBudget {
-		autoStart()
+		autoStart(resource)
 	}
 
 	budgetMu.Lock()
 	defer budgetMu.Unlock()
-	if !budgetTracking {
+	if !p.tracking {
 		return nil
 	}
-	if budgetLeft <= budgetReserve {
-		return fmt.Errorf("%w: %d left, %d reserved for everything else",
-			ErrBudgetReserve, budgetLeft, budgetReserve)
+	if p.left <= p.reserve {
+		return &reserveError{resource: resource, left: p.left, reserve: p.reserve}
 	}
-	budgetLeft--
+	p.left--
 	return nil
 }
 
