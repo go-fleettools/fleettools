@@ -529,3 +529,13 @@ func TestAFailedStatReadPrintsNoSteal(t *testing.T) {
 		t.Fatalf("code %d\n%s", code, out)
 	}
 }
+
+func TestSshDisablesX11AndScpTheQoSMarking(t *testing.T) {
+	r := &runner{o: options{work: "/w", host: "h"}}
+	if a := r.sshArgs("h", "x"); a[0] != "-x" {
+		t.Fatalf("X11 forwarding noise would reach the output: %v", a)
+	}
+	if !strings.Contains(strings.Join(r.scpArgs("a", "b"), " "), "IPQoS=none") {
+		t.Fatal("scp lacks IPQoS=none")
+	}
+}

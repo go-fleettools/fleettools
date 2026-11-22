@@ -367,7 +367,9 @@ func (r *runner) muxOpts() []string {
 }
 
 func (r *runner) sshArgs(extra ...string) []string {
-	a := append([]string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "-o", "ServerAliveInterval=30"}, r.muxOpts()...)
+	// -x: some hosts (cfarm112) print "X11 forwarding request failed" into the
+	// output otherwise, and a program is run here, not a desktop.
+	a := append([]string{"-x", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "-o", "ServerAliveInterval=30"}, r.muxOpts()...)
 	if r.o.port != 0 {
 		a = append(a, "-p", strconv.Itoa(r.o.port))
 	}
@@ -375,7 +377,8 @@ func (r *runner) sshArgs(extra ...string) []string {
 }
 
 func (r *runner) scpArgs(extra ...string) []string {
-	a := append([]string{"-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30"}, r.muxOpts()...)
+	// IPQoS=none: scp to the z17 host stalls with the default QoS marking.
+	a := append([]string{"-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "-o", "IPQoS=none"}, r.muxOpts()...)
 	if r.o.port != 0 {
 		a = append(a, "-P", strconv.Itoa(r.o.port))
 	}
