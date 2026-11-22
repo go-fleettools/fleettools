@@ -254,7 +254,7 @@ func TestOrgOfReadsBothURLForms(t *testing.T) {
 	for url, want := range map[string]string{
 		"https://github.com/go-x/y.git": "go-x", "git@github.com:go-x/y": "go-x", "justaword": "", "/a/b": "a",
 	} {
-		got := orgOf(func(string, ...string) (string, error) { return url, nil }, ".")
+		got := orgOf(originOf(func(string, ...string) (string, error) { return url, nil }, "."))
 		if got != want {
 			t.Errorf("orgOf(%q) = %q, want %q", url, got, want)
 		}
@@ -267,5 +267,62 @@ func TestExecGitRunsGitLocally(t *testing.T) {
 	}
 	if _, err := ExecGit(t.TempDir(), "rev-parse", "--git-dir"); err == nil {
 		t.Error("git answered outside a repository")
+	}
+}
+
+func TestWorktreesOfOneOriginAreOneRepository(t *testing.T) {
+	root := t.TempDir()
+	for _, n := range []string{"w-one", "w-two", "w-three", "x-solo", "y-solo"} {
+		clone(t, root, n, map[string]string{
+			".git/HEAD": "x", "cmd/d/main.go": serverMain, "c/c.go": configGo,
+		})
+	}
+	git := func(dir string, args ...string) (string, error) {
+		switch args[0] {
+		case "config":
+			switch filepath.Base(dir) {
+			case "w-one":
+				return "https://github.com/go-x/y.git", nil
+			case "w-two":
+				return "git@github.com:Go-X/y", nil // same repository, other spelling
+			case "w-three":
+				return "https://github.com/go-x/y/", nil
+			}
+			return "", errors.New("no remote") // x-solo, y-solo: never merged
+		case "rev-parse":
+			return "", errors.New("git is broken here")
+		}
+		return "", errors.New("no upstream")
+	}
+	rep, err := Sweep(root, git, epoch, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := rep.Denominator
+	if d.Read != 5 || d.DaemonRepos != 3 || d.DaemonsPlaintext != 3 {
+		t.Errorf("denominator = %+v, want 5 clones read, 3 daemon repos, 3 with plaintext", d)
+	}
+	top := rep.Top(0)
+	if len(top) != 3 {
+		t.Fatalf("Top = %d findings, want 1 per repository (3): %+v", len(top), top)
+	}
+	if got := rep.Orgs(); len(got) != 2 || got[0].Org != "(unknown)" || got[0].Inputs != 2 || got[1].Org != "go-x" || got[1].Inputs != 1 {
+		t.Errorf("Orgs = %+v", got)
+	}
+}
+
+func TestOriginOfIsOneSpellingForHTTPSAndSSH(t *testing.T) {
+	for url, want := range map[string]string{
+		"https://github.com/Go-X/y.git": "github.com/go-x/y",
+		"git@github.com:go-x/y":         "github.com/go-x/y",
+		"ssh://git@github.com/go-x/y/":  "github.com/go-x/y",
+	} {
+		got := originOf(func(string, ...string) (string, error) { return url, nil }, ".")
+		if got != want {
+			t.Errorf("originOf(%q) = %q, want %q", url, got, want)
+		}
+	}
+	if (Clone{Dir: "d"}).Key() == (Clone{Dir: "e"}).Key() {
+		t.Error("two clones without an origin share a key")
 	}
 }
