@@ -550,26 +550,80 @@ func vetAll(f finding, dir string) []vetFailure {
 			continue
 		}
 		done[c.key()] = true
-		args := []string{"vet"}
-		if len(c.tags) > 0 {
-			args = append(args, "-tags="+strings.Join(c.tags, ","))
+		var exempt map[string][]string
+		if m == "." {
+			exempt = vetExemptions(dir)
 		}
-		args = append(args, "./...")
-		cmd := exec.Command("go", args...)
-		cmd.Dir = filepath.Join(dir, m)
-		cmd.Env = append(os.Environ(),
-			"GOOS="+c.goos, "GOARCH="+c.goarch,
-			// GOWORK=off so a workspace on this machine cannot change which
-			// version of a dependency is read, which is not what the lane
-			// will do.
-			"GOWORK=off")
-		b, err := cmd.CombinedOutput()
+		b, err := vetModule(c, filepath.Join(dir, m), exempt)
 		if err == nil {
 			continue
 		}
 		out = append(out, vetFailure{cfg: c, module: m, err: firstError(string(b), err)})
 	}
 	return out
+}
+
+// vetModule vets one module for one configuration. Packages the repository's CI
+// vets with checks turned off (vetExemptions) get exactly those flags here too;
+// every other package is vetted plainly. Only the root module has exemptions: the
+// CI lines read are the ones run at the root.
+func vetModule(c config, modDir string, exempt map[string][]string) ([]byte, error) {
+	env := append(os.Environ(),
+		"GOOS="+c.goos, "GOARCH="+c.goarch,
+		// GOWORK=off so a workspace on this machine cannot change which
+		// version of a dependency is read, which is not what the lane
+		// will do.
+		"GOWORK=off")
+	base := []string{"vet"}
+	if len(c.tags) > 0 {
+		base = append(base, "-tags="+strings.Join(c.tags, ","))
+	}
+	run := func(args ...string) ([]byte, error) {
+		cmd := exec.Command("go", args...)
+		cmd.Dir = modDir
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	}
+	if len(exempt) == 0 {
+		return run(append(base, "./...")...)
+	}
+	list, err := run("list", "-f", "{{.ImportPath}}\t{{.Dir}}", "./...")
+	if err != nil {
+		return list, err
+	}
+	var plain []string
+	for _, ln := range strings.Split(strings.TrimSpace(string(list)), "\n") {
+		ip, d, ok := strings.Cut(ln, "\t")
+		if !ok {
+			continue
+		}
+		rel, err := filepath.Rel(modDir, d)
+		if err != nil {
+			plain = append(plain, ip)
+			continue
+		}
+		if _, ex := exempt[filepath.ToSlash(rel)]; !ex {
+			plain = append(plain, ip)
+		}
+	}
+	var all []byte
+	var firstErr error
+	if len(plain) > 0 {
+		b, err := run(append(base, plain...)...)
+		if err != nil {
+			all, firstErr = append(all, b...), err
+		}
+	}
+	for pkg, flags := range exempt {
+		args := append(append(append([]string{}, base...), flags...), "./"+pkg)
+		if b, err := run(args...); err != nil {
+			all = append(all, b...)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return all, firstErr
 }
 
 // modules are the directories of the checkout holding a go.mod, relative to

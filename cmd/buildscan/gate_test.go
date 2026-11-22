@@ -606,3 +606,34 @@ func TestTheHookFlagAnswersThroughTheCommand(t *testing.T) {
 		t.Fatalf("--hook did not deny: out=%q err=%q", out.String(), errOut.String())
 	}
 }
+
+// ⛔ fleettools#408: a package the CI vets with a check turned off was vetted
+// here with every check on, so a green CI read as a vet failure and the only way
+// to push was BUILDSCAN_SKIP.
+const seekGo = "package seeker\n\ntype F struct{}\n\n// Seek has the shape a third-party interface mandates; stdmethods objects.\nfunc (F) Seek(off int64, whence int) (int64, int) { return 0, 0 }\n"
+
+func ciWithVetLine(vetLine string) string {
+	return "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          go vet $(go list ./... | grep -v '/seeker$')\n" + vetLine
+}
+
+func TestVetHonoursTheFlagsTheCIPassesForAPackage(t *testing.T) {
+	dir := newClone(t, false)
+	write(t, dir, ".github/workflows/ci.yml", ciWithVetLine("          go vet -stdmethods=false ./seeker\n"))
+	write(t, dir, "seeker/seeker.go", seekGo)
+	commit(t, dir, "x_windows.go", "package a\n")
+	msg := vetRun(t, dir)
+	if !strings.Contains(msg, "recorded a vet pass") {
+		t.Fatalf("the CI's own vet flags were not honoured: %q", msg)
+	}
+}
+
+func TestVetStillFailsWithoutTheCIExemption(t *testing.T) {
+	dir := newClone(t, false)
+	write(t, dir, ".github/workflows/ci.yml", ciWithVetLine("          go test ./...\n"))
+	write(t, dir, "seeker/seeker.go", seekGo)
+	commit(t, dir, "x_windows.go", "package a\n")
+	msg := vetRun(t, dir)
+	if strings.Contains(msg, "recorded a vet pass") {
+		t.Fatalf("a package the CI does not exempt was vetted with a check off: %q", msg)
+	}
+}
