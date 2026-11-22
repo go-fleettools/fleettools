@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/gophercloud/gophercloud/v2"
 	"github.com/gophercloud/gophercloud/v2/openstack"
 	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/flavors"
@@ -57,6 +58,7 @@ import (
 var osExit = os.Exit
 
 func main() {
+	fleet.WarnIfStale(os.Stderr)
 	if err := RootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "osvm:", err)
 		osExit(1)
