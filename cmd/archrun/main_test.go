@@ -404,3 +404,128 @@ func TestHelpIsNotARun(t *testing.T) {
 		t.Fatalf("code %d, calls %v", code, f.calls)
 	}
 }
+
+// wrap lets a test make one kind of call fail on top of the scripted host.
+func wrap(f *fake, fail func(name string, args []string) *cmdResult) {
+	inner := exe
+	exe = func(ctx context.Context, env []string, dir, name string, args ...string) cmdResult {
+		if r := fail(name, args); r != nil {
+			f.calls = append(f.calls, name+" "+strings.Join(args, " "))
+			return *r
+		}
+		return inner(ctx, env, dir, name, args...)
+	}
+}
+
+func remoteIs(args []string, suffix string) bool {
+	return len(args) > 0 && strings.HasSuffix(args[len(args)-1], suffix)
+}
+
+func TestAHelpFlagReturnsBeforeAnyWork(t *testing.T) {
+	f := &fake{machine: "s390x"}
+	f.install(t)
+	c := RootCmd()
+	c.InitDefaultHelpFlag()
+	if err := c.ParseFlags([]string{"--help"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RunE(c, nil); err != nil || len(f.calls) != 0 {
+		t.Fatalf("err %v, calls %v", err, f.calls)
+	}
+}
+
+func TestAFailureToRunIsNoAnswerAndSaysWhy(t *testing.T) {
+	td := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(td, "testdata"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	notDir := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(notDir, []byte("x"), 0o600)
+	for name, c := range map[string]struct {
+		goList string
+		fail   func(string, []string) *cmdResult
+		args   []string
+		want   string
+	}{
+		"go list fails": {"", func(n string, a []string) *cmdResult {
+			if n == "go" && a[0] == "list" {
+				return &cmdResult{out: []byte("boom"), code: 1}
+			}
+			return nil
+		}, nil, "go list failed"},
+		"line without a directory": {"ex/a\n", nil, nil, "without a directory"},
+		"host dir": {"ex/a\t" + td + "\n", func(n string, a []string) *cmdResult {
+			if n == "ssh" && remoteIs(a, "mkdir -p scratch") {
+				return &cmdResult{out: []byte("denied"), code: 1}
+			}
+			return nil
+		}, nil, "cannot create scratch on the host"},
+		"package dir": {"ex/a\t" + td + "\n", func(n string, a []string) *cmdResult {
+			if n == "ssh" && remoteIs(a, "/p0") {
+				return &cmdResult{out: []byte("denied"), code: 1}
+			}
+			return nil
+		}, nil, "mkdir on the host"},
+		"scp binary": {"ex/a\t" + td + "\n", func(n string, a []string) *cmdResult {
+			if n == "scp" && !strings.Contains(strings.Join(a, " "), " -r ") {
+				return &cmdResult{out: []byte("denied"), code: 1}
+			}
+			return nil
+		}, nil, "scp of the binary failed"},
+		"scp testdata": {"ex/a\t" + td + "\n", func(n string, a []string) *cmdResult {
+			if n == "scp" && strings.Contains(strings.Join(a, " "), " -r ") {
+				return &cmdResult{out: []byte("denied"), code: 1}
+			}
+			return nil
+		}, nil, "scp of testdata failed"},
+		"report path": {"ex/a\t/x/a\n", nil, []string{"--report", filepath.Join(td, "no", "dir", "r.json")}, "cannot write --report"},
+		"work is a file": {"ex/a\t/x/a\n", nil, []string{"--work", notDir}, "cannot create --work"},
+	} {
+		f := &fake{machine: "s390x", goList: c.goList, runCode: map[string]int{"p0": 0}}
+		f.install(t)
+		if c.fail != nil {
+			wrap(f, c.fail)
+		}
+		args := base(t)
+		args = append(args, c.args...)
+		code, out, errs := drive(t, args...)
+		if code != 2 || !strings.Contains(out+errs, c.want) {
+			t.Errorf("%s: code %d, want 2 with %q\n%s%s", name, code, c.want, out, errs)
+		}
+	}
+}
+
+func TestNoHomeAndNoWorkIsNoAnswer(t *testing.T) {
+	t.Setenv("HOME", "")
+	f := &fake{machine: "s390x", goList: "ex/a\t/x/a\n"}
+	f.install(t)
+	code, _, _ := drive(t, "--host", "h", "--arch", "s390x")
+	if code != 2 || len(f.calls) != 0 {
+		t.Fatalf("code %d, calls %v", code, f.calls)
+	}
+}
+
+func TestABadSkipExpressionIsRefused(t *testing.T) {
+	f := &fake{machine: "s390x", goList: "ex/a\t/x/a\n"}
+	f.install(t)
+	if code, _, _ := drive(t, append(base(t), "--skip", "(")...); code != 2 || len(f.calls) != 0 {
+		t.Fatalf("code %d, calls %v", code, f.calls)
+	}
+}
+
+func TestAFailedStatReadPrintsNoSteal(t *testing.T) {
+	f := &fake{machine: "s390x", goList: "ex/a\t/x/a\n", runCode: map[string]int{"p0": 0}}
+	f.install(t)
+	inner := exe
+	exe = func(ctx context.Context, env []string, dir, name string, args ...string) cmdResult {
+		r := inner(ctx, env, dir, name, args...)
+		if name == "ssh" && remoteIs(args, "head -1 /proc/stat") {
+			r.code = 1
+		}
+		return r
+	}
+	code, out, _ := drive(t, base(t)...)
+	if code != 0 || strings.Contains(out, "steal") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
