@@ -423,7 +423,7 @@ func TestAllowRefusals(t *testing.T) {
 		{[]string{"--group=default", "--from=192.168.1.0/24", "--port=88"}, "/32"},
 		{[]string{"--group=default", "--from=0.0.0.0/0", "--port=88"}, "/32"},
 		{[]string{"--group=default", "--from=fe80::1/128", "--port=88"}, "/32"},
-		{[]string{"--group=default", "--from=junk", "--port=88"}, "--from"},
+		{[]string{"--group=default", "--from=junk", "--port=88"}, "ParsePrefix"},
 		{[]string{"--group=default", "--port=88"}, "--from"},
 		{[]string{"--group=default", "--from=192.168.1.94/32", "--port=0"}, "out of range"},
 		{[]string{"--group=default", "--from=192.168.1.94/32", "--port=65536"}, "out of range"},
