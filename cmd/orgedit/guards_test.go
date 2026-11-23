@@ -18,7 +18,7 @@ func (w *world) armFirst(prog, pattern, word string) {
 	if err != nil {
 		w.t.Fatal(err)
 	}
-	arm := "case \"$*\" in\n  *" + pattern + "*) echo " + word + " >&2; exit 1 ;;\n"
+	arm := "case \"$*\" in\n  *\"" + pattern + "\"*) echo " + word + " >&2; exit 1 ;;\n"
 	s := strings.Replace(string(b), "case \"$*\" in\n", arm, 1)
 	if s == string(b) {
 		w.t.Fatalf("no case in the fake %s", prog)
@@ -41,11 +41,11 @@ func TestEachProgramFailingOnItsOwnStopsTheRunWithItsWords(t *testing.T) {
 		{"git", "set-head", false},
 		{"git", "symbolic-ref", false},
 		{"git", "switch", false},
-		{"git", " add ", false},
+		{"git", "add --", false},
 		{"git", "commit", false},
 		{"git", "rev-parse", false},
-		{"gh", `"pr list"`, false},
-		{"gh", `"pr create"`, false},
+		{"gh", "pr list", false},
+		{"gh", "pr create", false},
 		{"gh", "statusCheckRollup", false},
 	} {
 		w := newWorld(t, map[string]answer{"go-a": ok(target1)})
