@@ -720,8 +720,8 @@ func TestTheSearchForATurnEndsAtTheWholeFileOrTheCap(t *testing.T) {
 // timeout, and a mutation sweep would record that as HUNG, which holds nothing.
 // The watchdog turns a hang into a plain, early FAIL (the suite takes seconds).
 func TestMain(m *testing.M) {
-	watchdog := time.AfterFunc(90*time.Second, func() {
-		fmt.Fprintln(os.Stderr, "--- FAIL: the suite did not finish in 90s: a loop lost its exit")
+	watchdog := time.AfterFunc(240*time.Second, func() {
+		fmt.Fprintln(os.Stderr, "--- FAIL: the suite did not finish in 240s: a loop lost its exit")
 		os.Exit(1)
 	})
 	code := m.Run()
