@@ -44,9 +44,13 @@ type Vintage struct {
 	Command string
 }
 
+// readBuildInfo is the seam for a binary built without build info, which a test
+// binary never is.
+var readBuildInfo = debug.ReadBuildInfo
+
 // BuildVintage reads the stamps out of the running binary.
 func BuildVintage() Vintage {
-	info, ok := debug.ReadBuildInfo()
+	info, ok := readBuildInfo()
 	if !ok {
 		return Vintage{}
 	}

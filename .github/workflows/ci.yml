@@ -145,6 +145,19 @@ jobs:
       - name: vet for darwin
         run: GOOS=darwin go vet ./...
 
+      # ⛔ THE HOOK GATES RUN ON EVERY SESSION OF THE FLEET (#414), so a statement
+      # no test enters is a refusal nobody has watched fire. Each gate is held at
+      # 100% of its own package and of every in-module package it imports -- which
+      # is `go list -deps -f '{{if and .Module .Module.Main}}{{.ImportPath}}{{end}}'
+      # ./cmd/<gate>` -- by the merged profile of the gate's tests and those
+      # packages' own. covblocks counts BLOCKS, not a percentage rounded to one
+      # decimal, and refuses an empty profile. WRITTEN OUT PER GATE rather than
+      # looped, as above; when a gate imports a new internal package, add it here.
+      - name: coverage of modelgate (100%)
+        run: |
+          go test --count=1 --coverpkg=github.com/go-fleettools/fleettools/internal/cli,github.com/go-fleettools/fleettools/internal/fleet,github.com/go-fleettools/fleettools/cmd/modelgate --coverprofile=cover-modelgate.out ./cmd/modelgate ./internal/cli ./internal/fleet
+          go run ./cmd/covblocks --max 0 cover-modelgate.out
+
       # ⛔ THE govulncheck GATE LIVES IN vuln.yml NOW, AND IT MOVED RATHER THAN
       # BEING COPIED. It was here, under the same job name -- "govulncheck,
       # judged by vulngate" -- and it only ever ran when somebody pushed, which
