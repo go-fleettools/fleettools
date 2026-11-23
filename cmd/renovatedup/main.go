@@ -125,12 +125,21 @@ func buildQuery() string {
 	return b.String()
 }
 
+// ghAnswer is the gh seam; a test replaces it.
+var ghAnswer = fleet.GHAnswer
+
 func fetchGraphQL(org, cursor string) ([]byte, error) {
 	args := []string{"api", "graphql", "-f", "query=" + buildQuery(), "-f", "org=" + org}
 	if cursor != "" {
 		args = append(args, "-f", "cursor="+cursor)
 	}
-	return fleet.GH(args...)
+	out, err := ghAnswer(args...)
+	if err != nil && json.Valid(out) {
+		// gh exits non-zero when the answer carries `errors`, but prints the
+		// answer all the same: decodePage judges which errors are tolerable.
+		return out, nil
+	}
+	return out, err
 }
 
 type blob struct {
@@ -154,8 +163,19 @@ type page struct {
 		} `json:"organization"`
 	} `json:"data"`
 	Errors []struct {
+		Type    string `json:"type"`
 		Message string `json:"message"`
+		Path    []any  `json:"path"`
 	} `json:"errors"`
+
+	// noGithub: the answer carried the one tolerated error, NOT_FOUND on
+	// organization.cfg -- the organisation has no .github repository.
+	noGithub bool
+}
+
+// isNoGithub: exactly NOT_FOUND at ["organization","cfg"].
+func isNoGithub(typ string, path []any) bool {
+	return typ == "NOT_FOUND" && len(path) == 2 && path[0] == "organization" && path[1] == "cfg"
 }
 
 func decodePage(b []byte) (*page, error) {
@@ -163,11 +183,17 @@ func decodePage(b []byte) (*page, error) {
 	if err := json.Unmarshal(b, &p); err != nil {
 		return nil, fmt.Errorf("decoding the GraphQL answer: %w", err)
 	}
-	if len(p.Errors) > 0 {
-		return nil, fmt.Errorf("GraphQL: %s", p.Errors[0].Message)
+	for _, e := range p.Errors {
+		if !isNoGithub(e.Type, e.Path) {
+			return nil, fmt.Errorf("GraphQL: %s", e.Message)
+		}
+		p.noGithub = true
 	}
 	if p.Data.Organization == nil {
 		return nil, errors.New("GraphQL answered no organisation")
+	}
+	if p.noGithub && p.Data.Organization.Cfg != nil {
+		return nil, errors.New("GraphQL: NOT_FOUND on .github yet a .github answer")
 	}
 	return &p, nil
 }
@@ -225,6 +251,10 @@ func scanOrg(org string, stdout io.Writer, t *tally, fetch fetchFunc) error {
 		}
 		o := p.Data.Organization
 		if first {
+			if p.noGithub {
+				fmt.Fprintf(stdout, "%s  no .github repository (nothing inherited, nothing to duplicate)\n", org)
+				return nil
+			}
 			text := ""
 			if o.Cfg != nil && o.Cfg.Object != nil && o.Cfg.Object.Text != nil {
 				if o.Cfg.Object.IsTruncated {
