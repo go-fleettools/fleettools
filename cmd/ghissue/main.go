@@ -118,6 +118,13 @@ issue. It shows what it is about to delete first, refuses a pull request (GitHub
 does not delete those), and reads GraphQL's errors, which arrive behind an HTTP
 200. It exists because an edit does NOT undo a published disclosure.
 
+⛔ THE PULL-REQUEST GATE. Posting text (a comment, or --new) is REFUSED unless
+--instead-of-pr "<why this is not a pull request>" is given: findings go into a
+PR (a regression test plus the fix, or a draft PR carrying a prototype), and
+issues resolve nothing. The reason is printed on stderr with the posted URL and
+is NOT added to the GitHub text. --close, --reopen without text, --edit and
+--delete are not covered.
+
 ⛔ THE GATE. Every body and title this command sends is scanned first, and one
 that names a person's own file system — a home directory, the account name
 inside it, or a project or document name taken from the path, each of them also
@@ -158,25 +165,26 @@ func main() {
 // RootCmd builds the command; tests drive it with SetArgs/SetOut/SetErr.
 func RootCmd() *cobra.Command {
 	var (
-		base     string
-		tokFile  string
-		bodyFile string
-		reason   string
-		title    string
-		dryRun   bool
-		doClose  bool
-		doReopen bool
-		doNew    bool
-		doEdit   bool
-		addLab   []string
-		remLab   []string
-		waiver   string
-		doDelete bool
-		confirm  string
-		prior    string
-		priorWv  string
-		parityWv string
-		commentI int64
+		base      string
+		tokFile   string
+		bodyFile  string
+		reason    string
+		title     string
+		dryRun    bool
+		doClose   bool
+		doReopen  bool
+		doNew     bool
+		doEdit    bool
+		addLab    []string
+		remLab    []string
+		waiver    string
+		doDelete  bool
+		confirm   string
+		prior     string
+		priorWv   string
+		parityWv  string
+		commentI  int64
+		insteadPR string
 	)
 	cmd := &cobra.Command{
 		Use:          "ghissue <owner/repo> <number> | <owner/repo> --new --title <t> --body-file <f>",
@@ -212,6 +220,16 @@ func RootCmd() *cobra.Command {
 			}
 			if doDelete {
 				return runDelete(cmd, args, o)
+			}
+			// ⛔ Posting text (a comment, or --new) needs a reason it is not a
+			// pull request; see insteadgate.go. --edit, --close and --reopen
+			// without text are not covered.
+			if doNew || (!doEdit && bodyFile != "") {
+				r, err := gateInsteadOfPR(insteadPR)
+				if err != nil {
+					return err
+				}
+				o.insteadOfPR = r
 			}
 			if doNew {
 				if len(addLab)+len(remLab) > 0 {
@@ -271,6 +289,8 @@ func RootCmd() *cobra.Command {
 	// text, like the two above.
 	f.StringVar(&parityWv, "parity-waiver", "",
 		"why this text may defer a performance change because it breaks bit identity (STAMPED into the text)")
+	f.StringVar(&insteadPR, "instead-of-pr", "",
+		"required to post text (a comment, or --new): why this is not a pull request (findings go into a PR: a regression test plus the fix, or a draft PR with a prototype); printed on stderr, NOT added to the GitHub text")
 	f.Int64Var(&commentI, "comment", 0,
 		"with --edit: the id of an existing comment whose body --body-file REPLACES (no issue number; an edit does not retract)")
 	return cmd
@@ -294,6 +314,9 @@ type opts struct {
 	// commentID names one existing comment to edit, by its own id; see
 	// comment.go. Zero means the command is about an issue.
 	commentID int64
+	// insteadOfPR is the reason posted text is not a pull request; see
+	// insteadgate.go. Printed on stderr, never published.
+	insteadOfPR string
 }
 
 // count says how many of the acts were asked for.
@@ -369,6 +392,7 @@ func runNew(cmd *cobra.Command, args []string, o opts) error {
 		return err
 	}
 	fmt.Fprintf(out, "created: %s#%d %s\n", r.FullName, iss.Number, iss.HTMLURL)
+	reportInsteadOfPR(cmd.ErrOrStderr(), iss.HTMLURL, o.insteadOfPR)
 	return nil
 }
 
@@ -545,6 +569,7 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 			return err
 		}
 		fmt.Fprintf(out, "commented: %s\n", url)
+		reportInsteadOfPR(cmd.ErrOrStderr(), url, o.insteadOfPR)
 	}
 	if o.doClose || o.doReopen {
 		state := "closed"

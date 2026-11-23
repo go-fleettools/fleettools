@@ -60,7 +60,7 @@ func runGhissue(t *testing.T, args ...string) (string, error) {
 	var out bytes.Buffer
 	c.SetOut(&out)
 	c.SetErr(&out)
-	c.SetArgs(args)
+	c.SetArgs(append(args[:len(args):len(args)], "--instead-of-pr", "test fixture"))
 	err := c.Execute()
 	return out.String(), err
 }

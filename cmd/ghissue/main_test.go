@@ -71,7 +71,15 @@ func (s *server) record(r *http.Request) {
 	s.bodies = append(s.bodies, string(b))
 }
 
+// exec runs ghissue with --instead-of-pr already answered, so the tests of
+// everything else exercise their own subject; execBare runs the line as given
+// (insteadgate_test.go).
 func exec(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	return execBare(t, append(args[:len(args):len(args)], "--instead-of-pr", "test fixture")...)
+}
+
+func execBare(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	cmd := RootCmd()
 	var out strings.Builder
