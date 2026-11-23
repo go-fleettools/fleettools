@@ -126,7 +126,8 @@ func RootCmd() *cobra.Command {
 	}
 	allow.Flags().StringVar(&a.Group, "group", "", "security group name (must match exactly one)")
 	allow.Flags().StringVar(&a.From, "from", "", "source host as a /32 (required)")
-	allow.Flags().IntSliceVar(&a.Ports, "port", nil, "TCP port (repeatable)")
+	allow.Flags().IntSliceVar(&a.Ports, "port", nil, "port (repeatable)")
+	allow.Flags().StringVar(&a.Proto, "proto", "tcp", "protocol of the rule: tcp or udp")
 	allow.Flags().BoolVar(&a.CreateGroup, "create-group", false, "create the group when it does not exist")
 	allow.Flags().BoolVar(&a.AllowShared, "allow-shared", false, "allow a group that more than one server carries")
 	root.AddCommand(allow)
@@ -148,7 +149,8 @@ func RootCmd() *cobra.Command {
 	}
 	revoke.Flags().StringVar(&r.Group, "group", "", "security group name (must match exactly one)")
 	revoke.Flags().StringVar(&r.From, "from", "", "source host as a /32 (required)")
-	revoke.Flags().IntSliceVar(&r.Ports, "port", nil, "TCP port (repeatable)")
+	revoke.Flags().IntSliceVar(&r.Ports, "port", nil, "port (repeatable)")
+	revoke.Flags().StringVar(&r.Proto, "proto", "tcp", "protocol of the rules to delete: tcp or udp")
 	root.AddCommand(revoke)
 
 	var group, server string
@@ -251,7 +253,9 @@ func checkCIDR(s string) error {
 
 type allowOpts struct {
 	Group, From string
-	Ports       []int
+	// Proto is "tcp" (also when empty) or "udp".
+	Proto string
+	Ports []int
 	// CreateGroup makes the group when absent; AllowShared lets a rule go into
 	// a group that more than one server carries.
 	CreateGroup, AllowShared bool
@@ -266,6 +270,9 @@ func (a allowOpts) validate() error {
 			return fmt.Errorf("--port %d out of range", p)
 		}
 	}
+	if a.proto() == "" {
+		return fmt.Errorf("--proto %q: tcp or udp", a.Proto)
+	}
 	pre, err := netip.ParsePrefix(a.From)
 	if err != nil {
 		return fmt.Errorf("--from: %w", err)
@@ -276,7 +283,18 @@ func (a allowOpts) validate() error {
 	return nil
 }
 
-// allowRules adds one ingress TCP rule per port from a single host, skipping a
+// proto is the rule protocol, "" when it is neither tcp nor udp.
+func (a allowOpts) proto() rules.RuleProtocol {
+	switch a.Proto {
+	case "", "tcp":
+		return rules.ProtocolTCP
+	case "udp":
+		return rules.ProtocolUDP
+	}
+	return ""
+}
+
+// allowRules adds one ingress rule (TCP, or UDP with --proto udp) per port from a single host, skipping a
 // rule the group already has, so a repeat changes nothing.
 func allowRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) error {
 	c, err := connect(ctx, cloud)
@@ -308,29 +326,29 @@ func allowRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) err
 	}
 	have := map[int]string{}
 	for _, r := range gs[0].Rules {
-		if isHostRule(r, a.From) && r.PortRangeMin == r.PortRangeMax {
+		if isHostRule(r, a.From, a.proto()) && r.PortRangeMin == r.PortRangeMax {
 			have[r.PortRangeMin] = r.ID
 		}
 	}
 	for _, p := range a.Ports {
 		if id := have[p]; id != "" {
-			fmt.Fprintf(w, "rule exists: tcp/%d from %s in %s id=%s\n", p, a.From, gs[0].Name, id)
+			fmt.Fprintf(w, "rule exists: %s/%d from %s in %s id=%s\n", a.proto(), p, a.From, gs[0].Name, id)
 			continue
 		}
 		r, err := rules.Create(ctx, c.network, rules.CreateOpts{
 			SecGroupID: gs[0].ID, Direction: rules.DirIngress, EtherType: rules.EtherType4,
-			Protocol: rules.ProtocolTCP, PortRangeMin: p, PortRangeMax: p, RemoteIPPrefix: a.From,
+			Protocol: a.proto(), PortRangeMin: p, PortRangeMax: p, RemoteIPPrefix: a.From,
 		}).Extract()
 		if err != nil {
-			return fmt.Errorf("rule tcp/%d: %w", p, err)
+			return fmt.Errorf("rule %s/%d: %w", a.proto(), p, err)
 		}
-		fmt.Fprintf(w, "rule added: tcp/%d from %s in %s id=%s\n", p, a.From, gs[0].Name, r.ID)
+		fmt.Fprintf(w, "rule added: %s/%d from %s in %s id=%s\n", a.proto(), p, a.From, gs[0].Name, r.ID)
 	}
 	return nil
 }
 
-func isHostRule(r rules.SecGroupRule, from string) bool {
-	return r.Direction == "ingress" && r.Protocol == "tcp" && r.RemoteIPPrefix == from
+func isHostRule(r rules.SecGroupRule, from string, proto rules.RuleProtocol) bool {
+	return r.Direction == "ingress" && r.Protocol == string(proto) && r.RemoteIPPrefix == from
 }
 
 // attachedServers names the servers that carry the group.
@@ -418,11 +436,11 @@ func revokeRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) er
 	}
 	for _, p := range a.Ports {
 		for _, r := range g.Rules {
-			if isHostRule(r, a.From) && r.PortRangeMin == p && r.PortRangeMax == p {
+			if isHostRule(r, a.From, a.proto()) && r.PortRangeMin == p && r.PortRangeMax == p {
 				if err := rules.Delete(ctx, c.network, r.ID).ExtractErr(); err != nil {
 					return fmt.Errorf("delete rule %s: %w", r.ID, err)
 				}
-				fmt.Fprintf(w, "rule deleted: tcp/%d from %s in %s id=%s\n", p, a.From, g.Name, r.ID)
+				fmt.Fprintf(w, "rule deleted: %s/%d from %s in %s id=%s\n", a.proto(), p, a.From, g.Name, r.ID)
 			}
 		}
 	}
