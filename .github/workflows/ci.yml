@@ -157,6 +157,26 @@ jobs:
         run: |
           go test --count=1 --coverpkg=github.com/go-fleettools/fleettools/internal/cli,github.com/go-fleettools/fleettools/internal/fleet,github.com/go-fleettools/fleettools/cmd/modelgate --coverprofile=cover-modelgate.out ./cmd/modelgate ./internal/cli ./internal/fleet
           go run ./cmd/covblocks --max 0 cover-modelgate.out
+      - name: coverage of recur (100%)
+        run: |
+          go test --count=1 --coverpkg=github.com/go-fleettools/fleettools/internal/cli,github.com/go-fleettools/fleettools/internal/fleet,github.com/go-fleettools/fleettools/cmd/recur --coverprofile=cover-recur.out ./cmd/recur ./internal/cli ./internal/fleet
+          go run ./cmd/covblocks --max 0 cover-recur.out
+      - name: coverage of handlayout (100%)
+        run: |
+          go test --count=1 --coverpkg=github.com/go-fleettools/fleettools/internal/cli,github.com/go-fleettools/fleettools/internal/fleet,github.com/go-fleettools/fleettools/cmd/handlayout --coverprofile=cover-handlayout.out ./cmd/handlayout ./internal/cli ./internal/fleet
+          go run ./cmd/covblocks --max 0 cover-handlayout.out
+      - name: coverage of ctxgate (100%)
+        run: |
+          go test --count=1 --coverpkg=github.com/go-fleettools/fleettools/internal/cli,github.com/go-fleettools/fleettools/internal/fleet,github.com/go-fleettools/fleettools/cmd/ctxgate --coverprofile=cover-ctxgate.out ./cmd/ctxgate ./internal/cli ./internal/fleet
+          go run ./cmd/covblocks --max 0 cover-ctxgate.out
+      - name: coverage of replystamp (100%)
+        run: |
+          go test --count=1 --coverpkg=github.com/go-fleettools/fleettools/internal/cli,github.com/go-fleettools/fleettools/internal/fleet,github.com/go-fleettools/fleettools/cmd/replystamp --coverprofile=cover-replystamp.out ./cmd/replystamp ./internal/cli ./internal/fleet
+          go run ./cmd/covblocks --max 0 cover-replystamp.out
+      - name: coverage of modtidy (100%)
+        run: |
+          go test --count=1 --coverpkg=github.com/go-fleettools/fleettools/internal/cli,github.com/go-fleettools/fleettools/internal/fleet,github.com/go-fleettools/fleettools/cmd/modtidy --coverprofile=cover-modtidy.out ./cmd/modtidy ./internal/cli ./internal/fleet
+          go run ./cmd/covblocks --max 0 cover-modtidy.out
 
       # ⛔ THE govulncheck GATE LIVES IN vuln.yml NOW, AND IT MOVED RATHER THAN
       # BEING COPIED. It was here, under the same job name -- "govulncheck,
