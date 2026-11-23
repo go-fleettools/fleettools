@@ -338,10 +338,9 @@ func readDenials(n int) (recs []denyRecord, bad int, path string, err error) {
 		return nil, 0, "", fmt.Errorf("no state directory to read the deny log from")
 	}
 	for _, p := range []string{path + ".1", path} {
-		b, rerr := os.ReadFile(p)
-		if rerr != nil {
-			continue
-		}
+		// A half that is missing or unreadable reads as empty: ReadFile
+		// returns no bytes with its error.
+		b, _ := os.ReadFile(p)
 		for _, l := range bytes.Split(b, []byte{'\n'}) {
 			if len(bytes.TrimSpace(l)) == 0 {
 				continue

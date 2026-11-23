@@ -238,8 +238,12 @@ func TestLoggingNeverChangesTheVerdict(t *testing.T) {
 	// asked directly for the unwritable cases.
 	cwd := t.TempDir()
 	t.Chdir(cwd)
-	if recordDeny("pretool", "no-text", "s", "x", "") != "" {
-		t.Error("recorded without a state directory")
+	savedOpen := openLog
+	t.Cleanup(func() { openLog = savedOpen })
+	opened := 0
+	openLog = func(string) (io.WriteCloser, error) { opened++; return brokenWriter{}, nil }
+	if recordDeny("pretool", "no-text", "s", "x", "") != "" || opened != 0 {
+		t.Errorf("recorded without a state directory (log opened %d times)", opened)
 	}
 	if left, _ := os.ReadDir(cwd); len(left) != 0 {
 		t.Errorf("with no state directory the log went to the working directory: %v", left)
@@ -254,9 +258,17 @@ func TestLoggingNeverChangesTheVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	withState(t, func() (string, error) { return filepath.Join(blocker, "sub"), nil })
-	if recordDeny("pretool", "no-text", "s", "x", "") != "" {
-		t.Error("recorded under a file")
+	opened = 0
+	if recordDeny("pretool", "no-text", "s", "x", "") != "" || opened != 0 {
+		t.Errorf("recorded under a file (log opened %d times)", opened)
 	}
+	// An open that fails is a failure even when it hands back a writer.
+	withState(t, func() (string, error) { return dir, nil })
+	openLog = func(string) (io.WriteCloser, error) { return brokenWriter{}, errors.New("denied") }
+	if recordDeny("pretool", "no-text", "s", "x", "") != "" {
+		t.Error("recorded although the log could not be opened")
+	}
+	openLog = savedOpen
 
 	withState(t, func() (string, error) { return dir, nil })
 	if err := os.Mkdir(filepath.Join(dir, denyLogName), 0o755); err != nil {
