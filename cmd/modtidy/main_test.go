@@ -281,6 +281,25 @@ func TestHookModeFromRawArgv(t *testing.T) {
 	}
 }
 
+// `<<<` is a here-string, not a heredoc: it has no body, so the next line is a
+// command. Reading its last two `<` as a heredoc start swallowed that line and
+// hid the push behind it.
+func TestAHereStringIsNotAHeredoc(t *testing.T) {
+	var parts []string
+	for _, s := range segments("cat <<< x\ngitpush\n") {
+		parts = append(parts, strings.Join(s, "|"))
+	}
+	if got, want := strings.Join(parts, ";"), "cat|<<<|x;gitpush"; got != want {
+		t.Fatalf("segments = %q, want %q", got, want)
+	}
+	root := mkRepo(t, true)
+	gitInit(t, root)
+	out, _ := hookRun(t, payloadFor(t, root, "cat <<< x\ngitpush"))
+	if !strings.Contains(out, `"permissionDecision":"deny"`) {
+		t.Errorf("a push after a here-string was not seen: %s", out)
+	}
+}
+
 func TestSegments(t *testing.T) {
 	got := segments(`A=1 gitpush "a b" && echo 'x;y' | cat; (ls)`)
 	var parts []string
