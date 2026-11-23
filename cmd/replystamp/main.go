@@ -214,15 +214,14 @@ func driveHook(args []string, stdout, stderr io.Writer) {
 // covers four cases out of seven.
 func hookMode(args []string) bool {
 	for _, a := range args {
-		name, value, hasValue := strings.Cut(a, "=")
+		name, value, _ := strings.Cut(a, "=")
 		// --pretool is a hook too, and a worse one to wedge: it sits in front
 		// of EVERY tool call.
 		if name != "--hook" && name != "-hook" && name != "--pretool" && name != "-pretool" {
 			continue
 		}
-		if !hasValue {
-			return true
-		}
+		// A bare flag has value "", which ParseBool rejects, so it reads as a
+		// hook by the rule below.
 		// ⛔⛔ A VALUE pflag REJECTS STILL MEANT "HOOK". Review measured the
 		// residual after the ParseBool fix: `--hook=yes` exits 2, which the
 		// Stop protocol reads as a BLOCK — the wedge again, for a typo.
@@ -245,13 +244,11 @@ func hookMode(args []string) bool {
 // does not.
 func clockMode(args []string) bool {
 	for _, a := range args {
-		name, value, hasValue := strings.Cut(a, "=")
+		name, value, _ := strings.Cut(a, "=")
 		if name != "--clock" && name != "-clock" {
 			continue
 		}
-		if !hasValue {
-			return true
-		}
+		// A bare flag has value "", which ParseBool rejects: it is clock mode.
 		if on, err := strconv.ParseBool(value); err != nil || on {
 			return true
 		}
@@ -481,9 +478,7 @@ func scanEntries(r io.Reader, fn func(e entry, m message)) error {
 // decodeEntry decodes one transcript line; ok is false for a line that is
 // empty, undecodable or a sidechain entry.
 func decodeEntry(line []byte) (entry, message, bool) {
-	if len(line) == 0 {
-		return entry{}, message{}, false
-	}
+	// An empty line is not JSON, so the Unmarshal below refuses it.
 	var e entry
 	if err := json.Unmarshal(line, &e); err != nil {
 		// A transcript is append-only and a half-written last line is
@@ -560,9 +555,7 @@ func isUserTurn(e entry, m message) bool {
 	if e.IsMeta || m.Role != "user" {
 		return false
 	}
-	if len(m.Content) == 0 {
-		return false
-	}
+	// No content is not JSON: both Unmarshals below refuse it.
 	var s string
 	if json.Unmarshal(m.Content, &s) == nil {
 		return strings.TrimSpace(s) != ""
@@ -610,9 +603,7 @@ func judgedAgainst(f aReply) time.Time {
 }
 
 func firstText(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 {
-		return "", false
-	}
+	// No content is not JSON: both Unmarshals below refuse it.
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
 		if strings.TrimSpace(s) == "" {
@@ -1326,10 +1317,8 @@ func pretoolPath(session string) (string, bool) {
 }
 
 func pretoolCount(path string) (int, string) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0, ""
-	}
+	// An unreadable file leaves b empty, and "" is not a count: Atoi refuses it.
+	b, _ := os.ReadFile(path)
 	count, turn, _ := strings.Cut(strings.TrimSpace(string(b)), " ")
 	n, err := strconv.Atoi(count)
 	if err != nil {
@@ -1359,14 +1348,10 @@ func countPath(session string) (string, bool) {
 // blocksSoFar returns how many consecutive refusals this session has had, and
 // the UUID of the reply the last one was about.
 func blocksSoFar(session string) (int, string) {
-	p, ok := countPath(session)
-	if !ok {
-		return 0, ""
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return 0, ""
-	}
+	// A session it cannot name gives p == "" and an unreadable file leaves b
+	// empty: ReadFile("") fails and "" is not a count, so both read as no state.
+	p, _ := countPath(session)
+	b, _ := os.ReadFile(p)
 	count, uuid, _ := strings.Cut(strings.TrimSpace(string(b)), " ")
 	n, err := strconv.Atoi(count)
 	if err != nil {
@@ -1376,13 +1361,10 @@ func blocksSoFar(session string) (int, string) {
 }
 
 func recordBlock(session string, n int, uuid string) {
-	p, ok := countPath(session)
-	if !ok {
-		return
-	}
-	if os.MkdirAll(filepath.Dir(p), 0o755) != nil {
-		return
-	}
+	// A session it cannot name gives p == "", and a directory that cannot be
+	// created leaves nowhere to write: WriteFile fails in both, and is ignored.
+	p, _ := countPath(session)
+	_ = os.MkdirAll(filepath.Dir(p), 0o755)
 	// ⛔ The UUID goes on the same line as the count, and a uuid is written by
 	// this program alone — but it still travels through a file, so it is read
 	// back with Cut rather than parsed, and a line of any other shape reads as
