@@ -727,6 +727,12 @@ func segments(cmd string) [][]string {
 			flushSeg()
 		case c == ' ' || c == '\t' || c == '\r':
 			flushWord()
+		case c == '<' && i+2 < len(r) && r[i+1] == '<' && r[i+2] == '<':
+			// A here-string has no body: its three `<` are one word, so the
+			// last two are never read as the start of a heredoc.
+			word.WriteString("<<<")
+			inWord = true
+			i += 2
 		case c == '<' && i+2 < len(r) && r[i+1] == '<' && r[i+2] != '<':
 			flushWord()
 			i += 2
