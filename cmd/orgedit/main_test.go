@@ -79,7 +79,7 @@ f=`+w.dir+`/prlist-$(echo $repo | tr / _)
 case "$*" in
   *rate_limit*) `+rate+` ;;
   *"pr list"*) cat $f ;;
-  *"pr create"*) echo '[{"number":7,"headRefOid":"abc123"}]' > $f; echo https://github.com/$repo/pull/7 ;;
+  *"pr create"*) echo '[{"number":7,"headRefOid":"abc123","state":"OPEN"}]' > $f; echo https://github.com/$repo/pull/7 ;;
   *statusCheckRollup*) cat `+w.dir+`/view ;;
   *"--json headRefOid"*) echo '{"headRefOid":"abc123"}' ;;
   *) echo "unexpected gh $*" >&2; exit 1 ;;
@@ -195,12 +195,12 @@ func TestATargetIsEditedPushedWaitedForAndMerged(t *testing.T) {
 	l := w.logged()
 	order := []string{
 		"agentsync claim --note orgedit: pin-renovate go-a/.github",
+		"prbody " + w.body + " --repo go-a/.github",
+		"paritycheck text " + w.body,
 		"git switch -C pin-renovate origin/main",
 		"git add -- " + ciFile,
 		"git commit -F " + w.commit,
 		"gitpush origin pin-renovate",
-		"prbody " + w.body + " --repo go-a/.github",
-		"paritycheck text " + w.body,
 		"gh pr create --repo go-a/.github --head pin-renovate --title ci: pin the validator --body-file " + w.body,
 		"prwait -repo go-a/.github 7",
 		"ghmerge go-a/.github 7",
@@ -369,7 +369,7 @@ func TestAHeldClaimSkipsTheOrganisationAndTheRunGoesOn(t *testing.T) {
 
 func TestAnOpenPullRequestFromTheBranchIsResumedNotDoubled(t *testing.T) {
 	w := newWorld(t, map[string]answer{"go-a": ok(target1)})
-	if err := os.WriteFile(filepath.Join(w.dir, "prlist-go-a_.github"), []byte(`[{"number":41,"headRefOid":"abc123"}]`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(w.dir, "prlist-go-a_.github"), []byte(`[{"number":41,"headRefOid":"abc123","state":"OPEN"}]`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	st, out, errOut := w.drive("--orgs", "go-a")
@@ -389,7 +389,7 @@ func TestAnOpenPullRequestFromTheBranchIsResumedNotDoubled(t *testing.T) {
 
 func TestTwoOpenPullRequestsStopTheRun(t *testing.T) {
 	w := newWorld(t, map[string]answer{"go-a": ok(target1)})
-	if err := os.WriteFile(filepath.Join(w.dir, "prlist-go-a_.github"), []byte(`[{"number":41,"headRefOid":"a"},{"number":42,"headRefOid":"b"}]`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(w.dir, "prlist-go-a_.github"), []byte(`[{"number":41,"headRefOid":"a","state":"OPEN"},{"number":42,"headRefOid":"b","state":"OPEN"}]`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	st, _, errOut := w.drive("--orgs", "go-a")
@@ -501,7 +501,7 @@ func TestAPullRequestThatIsNotListedAfterCreateStopsTheRun(t *testing.T) {
 	w := newWorld(t, map[string]answer{"go-a": ok(target1)})
 	w.clone("go-a", target1)
 	b, _ := os.ReadFile(filepath.Join(w.bin, "gh"))
-	s := strings.Replace(string(b), `echo '[{"number":7,"headRefOid":"abc123"}]' > $f;`, ``, 1)
+	s := strings.Replace(string(b), `echo '[{"number":7,"headRefOid":"abc123","state":"OPEN"}]' > $f;`, ``, 1)
 	if err := os.WriteFile(filepath.Join(w.bin, "gh"), []byte(s), 0o755); err != nil {
 		t.Fatal(err)
 	}

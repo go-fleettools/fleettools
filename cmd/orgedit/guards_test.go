@@ -69,8 +69,8 @@ func TestEachProgramFailingOnItsOwnStopsTheRunWithItsWords(t *testing.T) {
 func TestAnAnswerOfPrListThatIsUnreadableOrIncompleteStopsTheRun(t *testing.T) {
 	for name, tc := range map[string]struct{ list, want string }{
 		"garbage":   {"garbage", "answered something unreadable"},
-		"no number": {`[{"number":0,"headRefOid":"abc123"}]`, "no number or head"},
-		"no head":   {`[{"number":9,"headRefOid":""}]`, "no number or head"},
+		"no number": {`[{"number":0,"headRefOid":"abc123","state":"OPEN"}]`, "no number or head"},
+		"no head":   {`[{"number":9,"headRefOid":"","state":"OPEN"}]`, "no number or head"},
 	} {
 		w := newWorld(t, map[string]answer{"go-a": ok(target1)})
 		if err := os.WriteFile(filepath.Join(w.dir, "prlist-go-a_.github"), []byte(tc.list), 0o644); err != nil {
@@ -86,7 +86,7 @@ func TestAnAnswerOfPrListThatIsUnreadableOrIncompleteStopsTheRun(t *testing.T) {
 func TestAnUnreadableListAfterCreateStopsTheRun(t *testing.T) {
 	w := newWorld(t, map[string]answer{"go-a": ok(target1)})
 	b, _ := os.ReadFile(filepath.Join(w.bin, "gh"))
-	s := strings.Replace(string(b), `echo '[{"number":7,"headRefOid":"abc123"}]' > $f;`, `echo garbage > $f;`, 1)
+	s := strings.Replace(string(b), `echo '[{"number":7,"headRefOid":"abc123","state":"OPEN"}]' > $f;`, `echo garbage > $f;`, 1)
 	if s == string(b) {
 		t.Fatal("create arm not found")
 	}
