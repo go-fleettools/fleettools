@@ -431,18 +431,26 @@ func judgeChecks(out, want string) (reason string, red bool) {
 type prRef struct {
 	Number int    `json:"number"`
 	Head   string `json:"headRefOid"`
+	State  string `json:"state"`
 }
 
-// openPR returns the open pull request from the branch, if any.
+// openPR returns the open pull request from the branch, if any. A pull request
+// from the branch in any other state (closed, merged, or one whose state was
+// not read) stops the run: it is neither re-opened nor doubled.
 func openPR(repo, branch string) (*prRef, error) {
-	out, err := rollout.Call("", "gh", "pr", "list", "-R", repo, "--head", branch, "--state", "open",
-		"--json", "number,headRefOid")
+	out, err := rollout.Call("", "gh", "pr", "list", "-R", repo, "--head", branch, "--state", "all",
+		"--json", "number,headRefOid,state")
 	if err != nil {
 		return nil, err
 	}
 	var l []prRef
 	if err := json.Unmarshal([]byte(out), &l); err != nil {
 		return nil, fmt.Errorf("gh pr list answered something unreadable")
+	}
+	for _, p := range l {
+		if p.State != "OPEN" {
+			return nil, fmt.Errorf("pull request #%d from %s is %q, not open: not re-opening it and not opening another", p.Number, branch, p.State)
+		}
 	}
 	switch len(l) {
 	case 0:
@@ -497,13 +505,16 @@ func land(repo, org string, o options) (string, error) {
 	var sha string
 	if pr == nil {
 		dir := filepath.Join(o.root, org+"-"+o.repo+"-"+strings.Trim(slugRe.ReplaceAllString(o.branch, "-"), "-"))
+		// The body is judged before anything is cloned or pushed: a refusal
+		// must not leave a branch behind. Its references resolve against each
+		// repository, so the check is per organisation.
+		if _, err := rollout.Call("", "prbody", o.bodyFile, "--repo", repo); err != nil {
+			return "", err
+		}
+		if _, err := rollout.Call("", "paritycheck", "text", o.bodyFile); err != nil {
+			return "", err
+		}
 		if sha, err = edit(repo, dir, o); err != nil {
-			return "", err
-		}
-		if _, err := rollout.Call(dir, "prbody", o.bodyFile, "--repo", repo); err != nil {
-			return "", err
-		}
-		if _, err := rollout.Call(dir, "paritycheck", "text", o.bodyFile); err != nil {
 			return "", err
 		}
 		if _, err := rollout.Call(dir, "gh", "pr", "create", "--repo", repo, "--head", o.branch,
@@ -542,6 +553,39 @@ func land(repo, org string, o options) (string, error) {
 	return number, nil
 }
 
+// leftover judges a branch that already exists on the remote at remote. It is
+// our own leftover, and reused as it is, only when it is exactly one commit
+// ahead of the default branch and its --file is what the edit produces from the
+// default branch's. Anything else is an error naming the remote commit.
+func leftover(dir, repo, base, remote string, o options) (string, error) {
+	stop := func(why string) error {
+		return fmt.Errorf("branch %s of %s exists on the remote at %s and is not our leftover (%s): not pushing, not forcing, not deleting it",
+			o.branch, repo, remote, why)
+	}
+	n, err := rollout.Call(dir, "git", "rev-list", "--count", base+".."+remote)
+	if err != nil {
+		return "", err
+	}
+	if n = strings.TrimSpace(n); n != "1" {
+		return "", stop(n + " commit(s) ahead of " + base + ", not 1")
+	}
+	baseSrc, err := rollout.Call(dir, "git", "show", base+":"+o.file)
+	if err != nil {
+		return "", err
+	}
+	if v, why := judge(baseSrc, o); v != vTarget {
+		return "", fmt.Errorf("%s of %s is no longer a target (%s %s) although the API read said so", o.file, base, v, why)
+	}
+	branchSrc, err := rollout.Call(dir, "git", "show", remote+":"+o.file)
+	if err != nil {
+		return "", err
+	}
+	if branchSrc != strings.ReplaceAll(baseSrc, o.old, o.new) {
+		return "", stop(o.file + " is not what the edit produces from " + base)
+	}
+	return remote, nil
+}
+
 // edit prepares the clone, cuts the branch from the fresh default branch,
 // applies the edit, commits and pushes. It returns the pushed commit.
 func edit(repo, dir string, o options) (string, error) {
@@ -567,6 +611,17 @@ func edit(repo, dir string, o options) (string, error) {
 	base := strings.TrimSpace(head)
 	if !strings.HasPrefix(base, "origin/") {
 		return "", fmt.Errorf("the default branch of %s is unreadable: %q", repo, base)
+	}
+	// A branch already on the remote (a run that stopped after its push) is
+	// never pushed over: it is reused if it is our own leftover, else a stop.
+	refs, err := rollout.Call(dir, "git", "for-each-ref", "--format=%(objectname) %(refname)", "refs/remotes/origin/"+o.branch)
+	if err != nil {
+		return "", err
+	}
+	for _, ln := range strings.Split(refs, "\n") {
+		if f := strings.Fields(ln); len(f) == 2 && f[1] == "refs/remotes/origin/"+o.branch {
+			return leftover(dir, repo, base, f[0], o)
+		}
 	}
 	if _, err := rollout.Call(dir, "git", "switch", "-C", o.branch, base); err != nil {
 		return "", err
