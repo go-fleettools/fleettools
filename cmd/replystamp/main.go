@@ -126,6 +126,17 @@ payload's tool_use_id is in the transcript tail, then judges; after 3 s without
 it, it ALLOWS. With the tool_use already there the wait is ~0. A payload with
 no tool_use_id is ALLOWED: the transcript cannot be known complete.
 
+Every deny (--pretool and --hook) appends one JSON line to denials.jsonl in the
+state directory (os.UserConfigDir()/fleettools/replystamp), and the deny message
+names that file. The line holds the time, session, transcript path, the anchor
+entry it judged from (line, uuid, kind: user, compaction or notification) and
+every entry from the anchor to the refused call: line, type, uuid, block kinds
+and the FIRST 40 characters of text blocks -- never a full text, a tool input or
+a tool result. The file is 0600 and rotates at 1 MiB to denials.jsonl.1, so it
+never exceeds about 2 MiB. A refusal called false is settled by reading it:
+
+  replystamp why [--last N]         print the latest records (default 5)
+
   replystamp --clock                print the current time as hook context
 
 --clock is the cure for the stale stamp, where the others only refuse it: wired
@@ -335,6 +346,7 @@ func RootCmd() *cobra.Command {
 	c.RunE = func(cmd *cobra.Command, args []string) error {
 		return run(cmd, &o)
 	}
+	c.AddCommand(whyCmd())
 	return c
 }
 
@@ -405,6 +417,11 @@ type entry struct {
 	IsSidechain bool `json:"isSidechain"`
 	// Timestamp is when the entry was recorded, RFC 3339.
 	Timestamp string `json:"timestamp"`
+	// What opened a turn, read only by the deny log: the resume after a
+	// compaction, or a background task finishing.
+	IsCompactSummary bool   `json:"isCompactSummary"`
+	TurnOrigin       string `json:"turnOrigin"`
+	PromptSource     string `json:"promptSource"`
 }
 
 type message struct {
@@ -1006,7 +1023,7 @@ func runHook(cmd *cobra.Command, o *options) error {
 		return allow(out, errOut, "the reply is still unstamped after %d refusals; standing down until a stamped reply comes through", o.maxBlocks)
 	}
 	recordBlock(p.SessionID, n, f.uuid)
-	return answer(out, hookAnswer{Decision: "block", Reason: v.reason()})
+	return answer(out, hookAnswer{Decision: "block", Reason: logged(v.reason(), recordDeny("stop", kindLabels[v.kind], p.SessionID, p.TranscriptPath, ""))})
 }
 
 func allow(out, errOut io.Writer, format string, a ...any) error {
@@ -1082,6 +1099,14 @@ var (
 // lastTurnAt is lastTurn over any io.ReaderAt; it also returns how many bytes
 // it read, which a test asserts stays far under the size.
 func lastTurnAt(r io.ReaderAt, size int64) (turnState, int64, error) {
+	return tailScan(r, size, func(buf []byte, _ int64) (turnState, bool) { return newestTurn(buf) })
+}
+
+// tailScan is the windowed read behind lastTurnAt and the deny trace: find is
+// handed whole lines and the absolute offset of the first one, and the scan
+// stops at the first window for which it answers true.
+func tailScan[T any](r io.ReaderAt, size int64, find func(buf []byte, base int64) (T, bool)) (T, int64, error) {
+	var zero T
 	var total int64
 	for win := int64(tailStart); ; win *= 2 {
 		if win > maxTail {
@@ -1094,9 +1119,10 @@ func lastTurnAt(r io.ReaderAt, size int64) (turnState, int64, error) {
 		n, err := r.ReadAt(buf, size-win)
 		total += int64(n)
 		if err != nil && err != io.EOF {
-			return turnState{}, total, err
+			return zero, total, err
 		}
 		buf = buf[:n]
+		base := size - win
 		whole := win == size
 		if !whole {
 			// The window starts mid-line, probably: drop the partial first line.
@@ -1105,13 +1131,14 @@ func lastTurnAt(r io.ReaderAt, size int64) (turnState, int64, error) {
 				buf = nil
 			} else {
 				buf = buf[i+1:]
+				base += int64(i + 1)
 			}
 		}
-		if s, ok := newestTurn(buf); ok {
+		if s, ok := find(buf, base); ok {
 			return s, total, nil
 		}
 		if whole || win >= maxTail {
-			return turnState{}, total, nil
+			return zero, total, nil
 		}
 	}
 }
@@ -1265,7 +1292,7 @@ func runPretool(cmd *cobra.Command, o *options) error {
 	if !s.found {
 		return allow(out, errOut, "no user turn located in the transcript")
 	}
-	reason := pretoolReason()
+	reason, label := pretoolReason(), "no-text"
 	if s.hasText {
 		// Every text of the turn is judged exactly as --hook judges a reply, and
 		// ONE valid stamp is enough: the deny asks for a NEW stamped line, and
@@ -1281,6 +1308,7 @@ func runPretool(cmd *cobra.Command, o *options) error {
 			}
 		}
 		reason = unstampedReason(firstVerdict)
+		label = kindLabels[firstVerdict.kind]
 	}
 	// ⛔ IF IT CANNOT COUNT, IT MUST NOT REFUSE (same invariant as --hook), and
 	// here the count is keyed on session AND turn, so a turn with no uuid cannot
@@ -1302,6 +1330,7 @@ func runPretool(cmd *cobra.Command, o *options) error {
 		return allow(out, errOut, "the turn was still refused after %d refusals; standing down for it", o.maxBlocks)
 	}
 	// A struct of strings always encodes; the error is unreachable.
+	reason = logged(reason, recordDeny("pretool", label, p.SessionID, p.TranscriptPath, p.ToolUseID))
 	b, _ := json.Marshal(preToolDeny{preToolDecision{"PreToolUse", "deny", reason}})
 	fmt.Fprintln(out, string(b))
 	return nil
