@@ -9,15 +9,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	"github.com/go-fleettools/fleettools/internal/rollout"
 	"github.com/spf13/cobra"
 )
 
@@ -127,81 +126,13 @@ func sweep(stdout, stderr io.Writer, args []string, o options) int {
 	return 0
 }
 
-// budget refuses to start another pull request when the REST reserve is
-// spent or the hourly cap is reached. An unreadable answer is a refusal too.
+func (o options) ledgerFile() rollout.Ledger { return rollout.Ledger{Path: o.ledger, Now: o.now} }
+
 func budget(stderr io.Writer, o options) int {
-	out, err := call("", "gh", "api", "rate_limit")
-	if err != nil {
-		fmt.Fprintf(stderr, "dashfix: could not read the rate limit: %v\n", err)
-		return 2
-	}
-	var rl struct {
-		Resources struct {
-			Core struct {
-				Remaining *int `json:"remaining"`
-			} `json:"core"`
-		} `json:"resources"`
-	}
-	if json.Unmarshal([]byte(out), &rl) != nil || rl.Resources.Core.Remaining == nil {
-		fmt.Fprintln(stderr, "dashfix: the rate limit answer was unreadable")
-		return 2
-	}
-	if *rl.Resources.Core.Remaining < o.reserve {
-		fmt.Fprintf(stderr, "dashfix: stopped at the budget reserve: %d left, %d reserved\n",
-			*rl.Resources.Core.Remaining, o.reserve)
-		return 2
-	}
-	n, err := inLastHour(o)
-	if err != nil {
-		fmt.Fprintf(stderr, "dashfix: %v\n", err)
-		return 2
-	}
-	if n >= o.max {
-		fmt.Fprintf(stderr, "dashfix: stopped at the hourly cap: %d merged in the last hour, cap %d\n", n, o.max)
-		return 2
-	}
-	return 0
+	return rollout.Budget(stderr, "dashfix", o.ledgerFile(), o.reserve, o.max)
 }
 
-// inLastHour counts ledger lines (unix seconds, a space, the target) newer
-// than an hour. A missing ledger is zero; an unreadable line is an error.
-func inLastHour(o options) (int, error) {
-	b, err := os.ReadFile(o.ledger)
-	if os.IsNotExist(err) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-		if line == "" {
-			continue
-		}
-		f := strings.Fields(line)
-		sec, err := strconv.ParseInt(f[0], 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("ledger line %q is unreadable", line)
-		}
-		if o.now().Sub(time.Unix(sec, 0)) < time.Hour {
-			n++
-		}
-	}
-	return n, nil
-}
-
-func record(o options, target string) error {
-	if err := os.MkdirAll(filepath.Dir(o.ledger), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(o.ledger, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = fmt.Fprintf(f, "%d %s\n", o.now().Unix(), target)
-	return err
-}
+func call(dir, name string, args ...string) (string, error) { return rollout.Call(dir, name, args...) }
 
 var (
 	dashBool   = regexp.MustCompile(`(?m)^(\s*dependencyDashboard:\s*)true(\s*,)`)
@@ -323,7 +254,7 @@ func fix(stdout io.Writer, repo, number string, o options) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := headIs(repo, number, strings.TrimSpace(sha)); err != nil {
+	if err := rollout.HeadIs(repo, number, strings.TrimSpace(sha)); err != nil {
 		return "", err
 	}
 	if _, err := call(dir, "prwait", "-repo", repo, number); err != nil {
@@ -332,37 +263,10 @@ func fix(stdout io.Writer, repo, number string, o options) (string, error) {
 	if _, err := call(dir, "ghmerge", repo, number); err != nil {
 		return "", err
 	}
-	if err := record(o, repo+"#"+number); err != nil {
+	if err := o.ledgerFile().Record(repo + "#" + number); err != nil {
 		return "", err
 	}
 	return "", nil
-}
-
-// Overridable by tests.
-var (
-	headPollEvery = 5 * time.Second
-	headPollTries = 24
-)
-
-// headIs waits until the pull request's head is the commit just pushed.
-// ⛔ prwait judges the head it reads, and right after a push GitHub still
-// answers the old one: measured on go-ndarray/.github#25, where prwait judged
-// the previous, red head and the run stopped on a fix that was in fact green.
-func headIs(repo, number, want string) error {
-	for i := 0; i < headPollTries; i++ {
-		out, err := call("", "gh", "pr", "view", number, "-R", repo, "--json", "headRefOid")
-		if err != nil {
-			return err
-		}
-		var v struct {
-			Head string `json:"headRefOid"`
-		}
-		if json.Unmarshal([]byte(out), &v) == nil && v.Head == want {
-			return nil
-		}
-		time.Sleep(headPollEvery)
-	}
-	return fmt.Errorf("the head of %s#%s has not moved to the pushed commit %.7s", repo, number, want)
 }
 
 // pinned reports whether a workflow carries the RENOVATE_VERSION half of the
@@ -375,17 +279,4 @@ func pinned(dir string) bool {
 		}
 	}
 	return false
-}
-
-// call runs a program with stdin closed. A non-zero exit is an error carrying
-// the program's own words.
-func call(dir, name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	var buf bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &buf, &buf
-	if err := cmd.Run(); err != nil {
-		return buf.String(), fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, strings.TrimSpace(buf.String()))
-	}
-	return buf.String(), nil
 }

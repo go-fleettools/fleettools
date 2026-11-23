@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-fleettools/fleettools/internal/rollout"
 )
 
 func TestMigrateRewritesTheBoolean(t *testing.T) {
@@ -37,7 +39,7 @@ type env struct {
 	root, ledger, log, head string
 }
 
-func init() { headPollEvery = 0; headPollTries = 3 }
+func init() { rollout.HeadPollEvery = 0; rollout.HeadPollTries = 3 }
 
 // ⛔ The race that stopped the first real run: prwait, started the instant after
 // the push, judged the pull request's OLD head — which was red — because GitHub
