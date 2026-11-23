@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -713,4 +714,17 @@ func TestTheSearchForATurnEndsAtTheWholeFileOrTheCap(t *testing.T) {
 	if s.found || err != nil || total != 16+32 {
 		t.Errorf("capped: %+v, read %d, %v; want 48 bytes and no turn", s, total, err)
 	}
+}
+
+// A loop that never exits would hang the suite until go test's own ten-minute
+// timeout, and a mutation sweep would record that as HUNG, which holds nothing.
+// The watchdog turns a hang into a plain, early FAIL (the suite takes seconds).
+func TestMain(m *testing.M) {
+	watchdog := time.AfterFunc(90*time.Second, func() {
+		fmt.Fprintln(os.Stderr, "--- FAIL: the suite did not finish in 90s: a loop lost its exit")
+		os.Exit(1)
+	})
+	code := m.Run()
+	watchdog.Stop()
+	os.Exit(code)
 }
