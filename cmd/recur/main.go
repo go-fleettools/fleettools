@@ -595,9 +595,6 @@ func hookMode(out, errOut io.Writer, o opts, stdin io.Reader) int {
 		fmt.Fprintf(errOut, "recur: %v; allowing (a refusal is not a verdict)\n", err)
 		return 0
 	}
-	if len(open) == 0 {
-		return 0
-	}
 	open, warn := scopeByOwner(open, o, payload.SessionID, clock(), readOrigin)
 	for _, w := range warn {
 		fmt.Fprintf(errOut, "recur: warning: %s %s; owned by session %s, who is refused now. Other sessions are refused after %s unaccounted (%s left).\n",
@@ -717,6 +714,13 @@ func shortID(s string) string {
 	return s
 }
 
+// statFile and originOf are test seams: a file read a moment ago cannot be made
+// to fail the next call without them.
+var (
+	statFile = os.Stat
+	originOf = readOrigin
+)
+
 // readOrigin reads originSessionId and modified from a memory's frontmatter; when
 // `modified` is missing or not a timestamp the file's mtime stands in for it.
 func readOrigin(dir, lesson string) (origin, error) {
@@ -745,7 +749,7 @@ func readOrigin(dir, lesson string) (origin, error) {
 		org.modified, org.stated = t, true
 		return org, nil
 	}
-	info, err := os.Stat(path)
+	info, err := statFile(path)
 	if err != nil {
 		return origin{}, err
 	}
@@ -1272,7 +1276,7 @@ func pointer(line, dir, self string) bool {
 	if i := strings.IndexByte(target, '#'); i >= 0 {
 		target = target[:i]
 	}
-	if target == "" || target != filepath.Base(target) || !strings.HasSuffix(target, ".md") {
+	if target != filepath.Base(target) || !strings.HasSuffix(target, ".md") {
 		return false
 	}
 	// ⛔ A link is not a quotation. The target must be ANOTHER memory that scan
@@ -1283,10 +1287,8 @@ func pointer(line, dir, self string) bool {
 	if target == self || target == ledgerName || target == "MEMORY.md" {
 		return false
 	}
-	tb, err := os.ReadFile(filepath.Join(dir, target))
-	if err != nil {
-		return false
-	}
+	// An unreadable target leaves tb nil, and quotes of nothing is false.
+	tb, _ := os.ReadFile(filepath.Join(dir, target))
 	return quotes(line[len(m[0]):], tb)
 }
 

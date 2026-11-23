@@ -115,7 +115,7 @@ func jsonReport(out, errOut io.Writer, dir string, known map[string]entry) int {
 		lesson := strings.TrimSuffix(name, ".md")
 		mark := markOf(hits)
 		found = append(found, recorded{lesson, mark})
-		org, err := readOrigin(dir, lesson)
+		org, err := originOf(dir, lesson)
 		if err != nil {
 			doc.Unreadable = append(doc.Unreadable, jsonUnreadable{name, err.Error()})
 			continue

@@ -121,13 +121,11 @@ func main() {
 // does not.
 func hookMode(args []string) bool {
 	for _, a := range args {
-		name, value, hasValue := strings.Cut(a, "=")
+		name, value, _ := strings.Cut(a, "=")
 		if name != "--hook" && name != "-hook" {
 			continue
 		}
-		if !hasValue {
-			return true
-		}
+		// A bare --hook has no value, and ParseBool("") fails: that is "hook" too.
 		if on, err := strconv.ParseBool(value); err != nil || on {
 			return true
 		}
@@ -260,6 +258,10 @@ func hasGoSource(dir string) (bool, error) {
 	return found, err
 }
 
+// sourceOf is replaceable by tests: findModules walks the same tree first, so a
+// real filesystem cannot make hasGoSource fail after it succeeded.
+var sourceOf = hasGoSource
+
 // hugoConfigNames are the files that make a directory a Hugo site.
 //
 // ⛔ The presence of one is REPORTED, never what decides. Hugo mounts a theme
@@ -314,10 +316,8 @@ func parsableGoMod(dir string) bool {
 // read. It is the authority for which toolchain the module asks for; the error
 // text only says that the local one is too old.
 func directive(dir string) string {
-	b, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-	if err != nil {
-		return ""
-	}
+	// An unreadable file leaves b empty, which parses to a file with no go line.
+	b, _ := os.ReadFile(filepath.Join(dir, "go.mod"))
 	f, err := modfile.Parse("go.mod", b, nil)
 	if err != nil || f.Go == nil {
 		return ""
@@ -338,7 +338,7 @@ func check(ctx context.Context, root string) ([]result, error) {
 	for _, m := range mods {
 		rel, _ := filepath.Rel(root, m)
 		r := result{dir: rel, abs: m}
-		src, serr := hasGoSource(m)
+		src, serr := sourceOf(m)
 		switch {
 		case serr != nil:
 			r.state, r.text = unread, serr.Error()
@@ -506,11 +506,8 @@ func runHook(in io.Reader, stdout, stderr io.Writer) {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
+	// No push on the line: the loop below has nothing to judge and allows.
 	pushes := findPushes(p.ToolInput.Command, cwd)
-	if len(pushes) == 0 {
-		allow("")
-		return
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 	defer cancel()
 	seen := map[string]bool{}
