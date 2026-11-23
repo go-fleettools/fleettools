@@ -129,7 +129,7 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 	case "PUT /network/v2.0/ports/p1":
 		f.record(r)
 		reply(200, `{"port":{"id":"p1"}}`)
-	case "DELETE /network/v2.0/security-group-rules/r88", "DELETE /network/v2.0/security-group-rules/r445":
+	case "DELETE /network/v2.0/security-group-rules/r88", "DELETE /network/v2.0/security-group-rules/r445", "DELETE /network/v2.0/security-group-rules/u1":
 		f.record(r)
 		reply(204, ``)
 	case "GET /network/v2.0/networks":
@@ -409,6 +409,46 @@ func TestAllowAddsOneRulePerPortFromOneHost(t *testing.T) {
 		if !strings.Contains(out, "rule added: tcp/"+port+" from 192.168.1.94/32 in default") {
 			t.Errorf("no report for %s:\n%s", port, out)
 		}
+	}
+}
+
+func TestAllowUDPAddsAUDPRuleAndSeesOnlyUDPAsExisting(t *testing.T) {
+	f := newFake(t)
+	// A TCP rule on the same port and host is not the UDP one.
+	f.groups = `{"security_groups":[{"id":"g1","name":"default","security_group_rules":[` +
+		`{"id":"t1","direction":"ingress","protocol":"tcp","remote_ip_prefix":"192.168.1.94/32","port_range_min":51820,"port_range_max":51820}]}]}`
+	out, err := run(cloudArg, "allow", "--group=default", "--from=192.168.1.94/32", "--port=51820", "--proto=udp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := ruleBodies(f)
+	if len(rs) != 1 || !strings.Contains(rs[0], `"protocol":"udp"`) || !strings.Contains(rs[0], `"port_range_min":51820`) {
+		t.Fatalf("rules = %v", rs)
+	}
+	if !strings.Contains(out, "rule added: udp/51820 from 192.168.1.94/32 in default") {
+		t.Errorf("out:\n%s", out)
+	}
+	f = newFake(t)
+	f.groups = `{"security_groups":[{"id":"g1","name":"default","security_group_rules":[` +
+		`{"id":"u1","direction":"ingress","protocol":"udp","remote_ip_prefix":"192.168.1.94/32","port_range_min":51820,"port_range_max":51820}]}]}`
+	out, err = run(cloudArg, "allow", "--group=default", "--from=192.168.1.94/32", "--port=51820", "--proto=udp")
+	if err != nil || len(ruleBodies(f)) != 0 || !strings.Contains(out, "rule exists: udp/51820") {
+		t.Errorf("not idempotent: %v %v\n%s", err, ruleBodies(f), out)
+	}
+	f = newFake(t)
+	if _, err := run(cloudArg, "allow", "--group=default", "--from=192.168.1.94/32", "--port=1", "--proto=sctp"); err == nil || !strings.Contains(err.Error(), "tcp or udp") || len(f.calls) != 0 {
+		t.Errorf("a bad --proto: %v %v", err, f.calls)
+	}
+}
+
+func TestRevokeUDPDeletesOnlyTheUDPRule(t *testing.T) {
+	f := newFake(t)
+	f.groups = `{"security_groups":[{"id":"g1","name":"mine","security_group_rules":[` +
+		`{"id":"t1","direction":"ingress","protocol":"tcp","remote_ip_prefix":"192.168.1.94/32","port_range_min":51820,"port_range_max":51820},` +
+		`{"id":"u1","direction":"ingress","protocol":"udp","remote_ip_prefix":"192.168.1.94/32","port_range_min":51820,"port_range_max":51820}]}]}`
+	out, err := run(cloudArg, "revoke", "--group=mine", "--from=192.168.1.94/32", "--port=51820", "--proto=udp")
+	if err != nil || !strings.Contains(out, "rule deleted: udp/51820 from 192.168.1.94/32 in mine id=u1") || len(f.created) != 1 || strings.Contains(f.created[0], "t1") {
+		t.Fatalf("%v %v\n%s", err, f.created, out)
 	}
 }
 
