@@ -270,7 +270,10 @@ func TestImageBuildTimesOutAndStillDeletes(t *testing.T) {
 	f.srvStatus = "ACTIVE" // never powers off
 	f.console = "booting...\n"
 	out, err := run(append(buildArgs, "--timeout=1500ms")...)
-	if err == nil || !strings.Contains(err.Error(), "yet (status ACTIVE") {
+	// The deadline may land between two polls ("no marker yet") or inside a
+	// request ("builder status: ... context deadline exceeded"): both are a
+	// timeout, and which one it is is a race (seen red once on CI).
+	if err == nil || !strings.Contains(err.Error(), "builder never finished") || !strings.Contains(err.Error(), "context deadline exceeded") {
 		t.Fatalf("err = %v", err)
 	}
 	if has(f, "DELETE /compute/v2.1/servers/s1") == "" || !strings.Contains(out, "builder deleted: s1") {
