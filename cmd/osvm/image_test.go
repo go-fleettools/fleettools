@@ -340,6 +340,34 @@ func TestImageUploadFileRefusals(t *testing.T) {
 	}
 }
 
+func TestImageUploadLocalFileUnreadableOrOversized(t *testing.T) {
+	f := newFake(t)
+	pe, at := pollEvery, activeTimeout
+	pollEvery, activeTimeout = time.Millisecond, 5*time.Second
+	t.Cleanup(func() { pollEvery, activeTimeout = pe, at })
+	// a directory opens but cannot be read: refused before any image is created
+	if _, err := run(cloudArg, "image-upload", "--file="+t.TempDir(), "--name=n"); err == nil {
+		t.Error("a directory was accepted as an image")
+	}
+	if len(f.created) != 0 {
+		t.Errorf("an image was created from an unreadable file: %v", f.created)
+	}
+	file := filepath.Join(t.TempDir(), "big.qcow2")
+	if err := os.WriteFile(file, []byte(imgBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := maxImageBytes
+	maxImageBytes = int64(len(imgBody)) - 1
+	t.Cleanup(func() { maxImageBytes = old })
+	if _, err := run(cloudArg, "image-upload", "--file="+file, "--name=n"); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Errorf("oversized: %v", err)
+	}
+	maxImageBytes = int64(len(imgBody)) // exactly the limit is allowed
+	if _, err := run(cloudArg, "image-upload", "--file="+file, "--name=n"); err != nil {
+		t.Errorf("at the limit: %v", err)
+	}
+}
+
 func TestQuotaListsComputeAndVolume(t *testing.T) {
 	newFake(t)
 	out, err := run(cloudArg, "quota")
