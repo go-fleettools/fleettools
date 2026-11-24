@@ -71,7 +71,7 @@ func buildUserData(pkgs []string) string {
 		fmt.Fprintf(&b, "dpkg -s %s >/dev/null; ", p)
 	}
 	b.WriteString("test -f /etc/udev/rules.d/99-kvm-open.rules; apt-get clean; echo " + buildMarker + " >/dev/console\"]\n")
-	b.WriteString("power_state:\n  mode: poweroff\n  message: osvm image-build done\n  timeout: 30\n  condition: true\n")
+	b.WriteString("power_state:\n  mode: poweroff\n  message: osvm image-build done\n  delay: \"+1\"\n  timeout: 30\n  condition: true\n")
 	return b.String()
 }
 
@@ -177,17 +177,17 @@ func imageBuild(ctx context.Context, cloud string, o buildOpts, w io.Writer) err
 		fmt.Fprintln(w, "builder deleted:", srv.ID)
 	}()
 
+	// Nova serves no console log once the guest is powered off ("Guest does not
+	// have a console available", measured on ccdps-ci), so the marker is read
+	// while the builder still runs; power_state delays the poweroff to leave
+	// time for it.
+	if err := waitMarker(bctx, c, srv.ID); err != nil {
+		return fmt.Errorf("builder never finished: %w", err)
+	}
+	fmt.Fprintln(w, "builder verified: every package installed, udev rule present")
 	if err := waitPoweredOff(bctx, c, srv.ID); err != nil {
 		return fmt.Errorf("builder never powered off: %w", err)
 	}
-	out, err := servers.ShowConsoleOutput(bctx, c.compute, srv.ID, servers.ShowConsoleOutputOpts{Length: 400}).Extract()
-	if err != nil {
-		return fmt.Errorf("console log of the builder: %w", err)
-	}
-	if !strings.Contains(out, buildMarker) {
-		return fmt.Errorf("the builder's console has no %s: a package or the udev rule is missing, no image taken", buildMarker)
-	}
-	fmt.Fprintln(w, "builder verified: every package installed, udev rule present")
 
 	id, err := servers.CreateImage(bctx, c.compute, srv.ID, servers.CreateImageOpts{Name: o.Name}).ExtractImageID()
 	if err != nil {
@@ -204,6 +204,33 @@ func imageBuild(ctx context.Context, cloud string, o buildOpts, w io.Writer) err
 	deleted = true
 	fmt.Fprintln(w, "builder deleted:", srv.ID)
 	return nil
+}
+
+// waitMarker polls until the builder's console shows the marker. A console that
+// cannot be read yet is not an error while the builder runs; one that is still
+// unreadable or markerless once the builder is SHUTOFF is the failure.
+func waitMarker(ctx context.Context, c *clients, id string) error {
+	for {
+		got, err := servers.Get(ctx, c.compute, id).Extract()
+		if err != nil {
+			return fmt.Errorf("builder status: %w", err)
+		}
+		if got.Status == "ERROR" {
+			return errors.New("builder ended in status ERROR")
+		}
+		out, cerr := servers.ShowConsoleOutput(ctx, c.compute, id, servers.ShowConsoleOutputOpts{Length: 400}).Extract()
+		if cerr == nil && strings.Contains(out, buildMarker) {
+			return nil
+		}
+		if got.Status == "SHUTOFF" {
+			return fmt.Errorf("the builder powered off without %s on its console: a package or the udev rule is missing, no image taken (console read: %v)", buildMarker, cerr)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("no %s yet (status %s, console read: %v): %w", buildMarker, got.Status, cerr, ctx.Err())
+		case <-time.After(pollEvery):
+		}
+	}
 }
 
 // waitPoweredOff polls until the server is SHUTOFF. It stops at once on ERROR:
