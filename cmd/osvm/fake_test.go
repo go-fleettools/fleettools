@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,7 @@ type fakeCloud struct {
 	failNth  map[string]int    // key -> the one call number that fails
 	garbled  map[string]string // key -> body that lists fine but does not decode
 	denyAuth bool
+	console  string
 	nets     string
 	flavors  string
 	images   string
@@ -170,6 +172,8 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 		reply(202, `{"server":{"id":"s1"}}`)
 	case "GET /compute/v2.1/servers/s1":
 		reply(200, serverBody)
+	case "POST /compute/v2.1/servers/s1/action":
+		reply(200, `{"output":`+strconv.Quote(f.console)+`}`)
 	case "POST /image/v2/images":
 		f.record(r)
 		reply(201, `{"id":"img1","name":"new","status":"queued"}`)
