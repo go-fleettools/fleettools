@@ -32,6 +32,7 @@ type fakeCloud struct {
 	created  []string
 	// serversBody and portsBody replace the default listings when set.
 	serversBody, portsBody string
+	imgStates              []string
 }
 
 const (
@@ -46,7 +47,7 @@ func newFake(t *testing.T) *fakeCloud {
 	t.Helper()
 	f := &fakeCloud{
 		fail: map[string]int{}, calls: map[string]int{}, garbled: map[string]string{}, failNth: map[string]int{},
-		services: []string{"compute", "network", "image", "identity"},
+		services: []string{"compute", "network", "image", "identity", "volumev3"},
 		nets:     netsOne, flavors: flavorsOK, images: imagesOK,
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
@@ -75,7 +76,7 @@ func newFake(t *testing.T) *fakeCloud {
 
 func (f *fakeCloud) token() string {
 	var cat []string
-	paths := map[string]string{"compute": "/compute/v2.1/", "network": "/network/", "image": "/image/", "identity": "/v3/"}
+	paths := map[string]string{"compute": "/compute/v2.1/", "network": "/network/", "image": "/image/", "identity": "/v3/", "volumev3": "/volume/v3/p1/"}
 	for _, s := range f.services {
 		cat = append(cat, fmt.Sprintf(`{"type":%q,"name":%q,"id":%q,"endpoints":[{"interface":"public","region":"RegionOne","region_id":"RegionOne","url":%q,"id":"e"}]}`,
 			s, s, s, f.srv.URL+paths[s]))
@@ -149,6 +150,11 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 	case "GET /compute/v2.1/flavors/detail":
 		reply(200, f.flavors)
 	case "GET /image/v2/images":
+		// a name filter matches only the one image the fake holds
+		if n := r.URL.Query().Get("name"); n != "" && n != "debian-13-genericcloud" {
+			reply(200, `{"images":[]}`)
+			return
+		}
 		reply(200, f.images)
 	case "POST /compute/v2.1/os-keypairs":
 		f.record(r)
@@ -164,9 +170,44 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 		reply(202, `{"server":{"id":"s1"}}`)
 	case "GET /compute/v2.1/servers/s1":
 		reply(200, serverBody)
+	case "POST /image/v2/images":
+		f.record(r)
+		reply(201, `{"id":"img1","name":"new","status":"queued"}`)
+	case "PUT /image/v2/images/img1/file":
+		f.record(r)
+		reply(204, ``)
+	case "GET /image/v2/images/img1":
+		reply(200, f.imageStatus())
+	case "GET /compute/v2.1/os-quota-sets/p1/detail":
+		reply(200, `{"quota_set":{"id":"p1","instances":{"in_use":1,"reserved":0,"limit":10},"cores":{"in_use":4,"reserved":0,"limit":64},"ram":{"in_use":8192,"reserved":0,"limit":131072}}}`)
+	case "GET /volume/v3/p1/os-quota-sets/p1":
+		reply(200, `{"quota_set":{"id":"p1","volumes":{"in_use":0,"reserved":0,"limit":10},"gigabytes":{"in_use":0,"reserved":0,"limit":1000}}}`)
+	case "POST /volume/v3/p1/volumes":
+		f.record(r)
+		reply(202, `{"volume":{"id":"v1","name":"vm-data","size":200}}`)
+	case "GET /volume/v3/p1/volumes/v1":
+		reply(200, `{"volume":{"id":"v1","status":"available"}}`)
+	case "POST /compute/v2.1/servers/s1/os-volume_attachments":
+		f.record(r)
+		reply(200, `{"volumeAttachment":{"id":"v1","volumeId":"v1"}}`)
 	default:
 		reply(404, `{}`)
 	}
+}
+
+// imageStatus answers GET of the uploaded image: each status in imgStates
+// once, the last one forever (default: active).
+func (f *fakeCloud) imageStatus() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := "active"
+	if len(f.imgStates) > 0 {
+		st = f.imgStates[0]
+		if len(f.imgStates) > 1 {
+			f.imgStates = f.imgStates[1:]
+		}
+	}
+	return `{"id":"img1","name":"new","status":"` + st + `"}`
 }
 
 func (f *fakeCloud) record(r *http.Request) {
