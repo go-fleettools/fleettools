@@ -138,6 +138,7 @@ func RootCmd() *cobra.Command {
 	allow.Flags().StringVar(&a.From, "from", "", "source host as a /32 (required)")
 	allow.Flags().StringVar(&a.FromURL, "from-json-url", "", "https URL of a JSON document whose --json-key array lists the source CIDRs (instead of --from)")
 	allow.Flags().StringVar(&a.JSONKey, "json-key", "", "key of the CIDR array in the --from-json-url document, e.g. hooks")
+	allow.Flags().StringVar(&a.FromGroup, "from-group", "", "name of the security group whose members are the source (remote-group rule, IPv4 and IPv6), instead of --from")
 	allow.Flags().IntSliceVar(&a.Ports, "port", nil, "port (repeatable)")
 	allow.Flags().StringVar(&a.Proto, "proto", "tcp", "protocol of the rule: tcp or udp")
 	allow.Flags().BoolVar(&a.CreateGroup, "create-group", false, "create the group when it does not exist")
@@ -233,7 +234,7 @@ func RootCmd() *cobra.Command {
 	f.IntVar(&o.VolumeGB, "volume-gb", 0, "create and attach a data volume of this many GB (0: none)")
 	f.BoolVar(&o.DryRun, "dry-run", false, "resolve everything, create nothing")
 	root.AddCommand(create)
-	root.AddCommand(imageCmd(&cloud), quotaCmd(&cloud), hostKeysCmd(&cloud))
+	root.AddCommand(imageCmd(&cloud), quotaCmd(&cloud), hostKeysCmd(&cloud), groupCmd(&cloud), imageBuildCmd(&cloud))
 	return root
 }
 
@@ -284,6 +285,9 @@ type allowOpts struct {
 	// FromURL and JSONKey read the sources from a JSON document (for GitHub,
 	// https://api.github.com/meta and "hooks") instead of one --from host.
 	FromURL, JSONKey string
+	// FromGroup names a security group as the source (a remote-group rule): the
+	// members of that group, and nobody else, reach the ports.
+	FromGroup string
 	// Proto is "tcp" (also when empty) or "udp".
 	Proto string
 	Ports []int
@@ -314,6 +318,12 @@ func (a allowOpts) validate() error {
 	}
 	if a.proto() == "" {
 		return fmt.Errorf("--proto %q: tcp or udp", a.Proto)
+	}
+	if a.FromGroup != "" {
+		if a.From != "" || a.FromURL != "" || a.JSONKey != "" {
+			return errors.New("--from-group is exclusive with --from and --from-json-url")
+		}
+		return nil
 	}
 	if a.FromURL != "" {
 		if a.From != "" {
@@ -346,6 +356,8 @@ func (a allowOpts) validateWorldACME() error {
 		return errors.New("--world-acme: exclusive with --from")
 	case a.FromURL != "" || a.JSONKey != "":
 		return errors.New("--world-acme: exclusive with --from-json-url")
+	case a.FromGroup != "":
+		return errors.New("--world-acme: exclusive with --from-group")
 	case a.AllowShared:
 		return errors.New("--world-acme: exclusive with --allow-shared")
 	case a.CreateGroup:
@@ -411,6 +423,9 @@ func allowRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) err
 	}
 	if len(users) > 1 && !a.AllowShared {
 		return fmt.Errorf("security group %q is attached to %d servers (%s): a rule here opens all of them; pass --allow-shared to do it anyway, or use a group of its own", a.Group, len(users), strings.Join(users, ", "))
+	}
+	if a.FromGroup != "" {
+		return allowFromGroup(ctx, c, gs[0], a, w)
 	}
 	for _, src := range sources {
 		have := map[int]string{}
