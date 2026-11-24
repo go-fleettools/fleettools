@@ -142,6 +142,7 @@ func RootCmd() *cobra.Command {
 	allow.Flags().StringVar(&a.Proto, "proto", "tcp", "protocol of the rule: tcp or udp")
 	allow.Flags().BoolVar(&a.CreateGroup, "create-group", false, "create the group when it does not exist")
 	allow.Flags().BoolVar(&a.AllowShared, "allow-shared", false, "allow a group that more than one server carries")
+	allow.Flags().BoolVar(&a.WorldACME, "world-acme", false, "open tcp/80 from 0.0.0.0/0 and ::/0 (with --port 80): Let's Encrypt HTTP-01 publishes no validation source addresses, so no narrower rule can work; exclusive with --from, --from-json-url, --allow-shared and --create-group, and the group must be carried by exactly one server")
 	root.AddCommand(allow)
 
 	var r allowOpts
@@ -163,6 +164,7 @@ func RootCmd() *cobra.Command {
 	revoke.Flags().StringVar(&r.From, "from", "", "source host as a /32 (required)")
 	revoke.Flags().IntSliceVar(&r.Ports, "port", nil, "port (repeatable)")
 	revoke.Flags().StringVar(&r.Proto, "proto", "tcp", "protocol of the rules to delete: tcp or udp")
+	revoke.Flags().BoolVar(&r.WorldACME, "world-acme", false, "close the tcp/80 world rules that allow --world-acme opened (with --port 80)")
 	root.AddCommand(revoke)
 
 	var group, server string
@@ -288,9 +290,20 @@ type allowOpts struct {
 	// CreateGroup makes the group when absent; AllowShared lets a rule go into
 	// a group that more than one server carries.
 	CreateGroup, AllowShared bool
+	// WorldACME opens (or, for revoke, closes) tcp/80 from the whole internet
+	// and nothing else: Let's Encrypt publishes no HTTP-01 validation source
+	// addresses, so no narrower rule can work.
+	WorldACME bool
 }
 
+// worldSources are the prefixes --world-acme opens; they are the only world
+// prefixes osvm will ever write.
+var worldSources = []string{"0.0.0.0/0", "::/0"}
+
 func (a allowOpts) validate() error {
+	if a.WorldACME {
+		return a.validateWorldACME()
+	}
 	if a.Group == "" || len(a.Ports) == 0 {
 		return errors.New("--group and at least one --port are required")
 	}
@@ -321,6 +334,30 @@ func (a allowOpts) validate() error {
 	return nil
 }
 
+// validateWorldACME refuses everything but tcp/80 on an existing group, with
+// no other source and no sharing: the flag is one narrow exception, not a
+// way to open anything.
+func (a allowOpts) validateWorldACME() error {
+	if a.Group == "" {
+		return errors.New("--group is required")
+	}
+	switch {
+	case a.From != "":
+		return errors.New("--world-acme: exclusive with --from")
+	case a.FromURL != "" || a.JSONKey != "":
+		return errors.New("--world-acme: exclusive with --from-json-url")
+	case a.AllowShared:
+		return errors.New("--world-acme: exclusive with --allow-shared")
+	case a.CreateGroup:
+		return errors.New("--world-acme: exclusive with --create-group")
+	case a.Proto != "" && a.Proto != "tcp":
+		return errors.New("--world-acme: tcp only")
+	case len(a.Ports) != 1 || a.Ports[0] != 80:
+		return errors.New("--world-acme: port 80 only (--port 80)")
+	}
+	return nil
+}
+
 // proto is the rule protocol, "" when it is neither tcp nor udp.
 func (a allowOpts) proto() rules.RuleProtocol {
 	switch a.Proto {
@@ -336,6 +373,9 @@ func (a allowOpts) proto() rules.RuleProtocol {
 // rule the group already has, so a repeat changes nothing.
 func allowRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) error {
 	sources := []string{a.From}
+	if a.WorldACME {
+		sources = worldSources
+	}
 	if a.FromURL != "" {
 		var err error
 		if sources, err = fetchCIDRs(ctx, a.FromURL, a.JSONKey); err != nil {
@@ -365,6 +405,9 @@ func allowRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) err
 	users, err := attachedServers(ctx, c, a.Group)
 	if err != nil {
 		return err
+	}
+	if a.WorldACME && len(users) != 1 {
+		return fmt.Errorf("--world-acme: security group %q must be carried by exactly one server, it is carried by %d", a.Group, len(users))
 	}
 	if len(users) > 1 && !a.AllowShared {
 		return fmt.Errorf("security group %q is attached to %d servers (%s): a rule here opens all of them; pass --allow-shared to do it anyway, or use a group of its own", a.Group, len(users), strings.Join(users, ", "))
@@ -545,13 +588,19 @@ func revokeRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) er
 	if err != nil {
 		return err
 	}
-	for _, p := range a.Ports {
-		for _, r := range g.Rules {
-			if isHostRule(r, a.From, a.proto()) && r.PortRangeMin == p && r.PortRangeMax == p {
-				if err := rules.Delete(ctx, c.network, r.ID).ExtractErr(); err != nil {
-					return fmt.Errorf("delete rule %s: %w", r.ID, err)
+	sources := []string{a.From}
+	if a.WorldACME {
+		sources = worldSources
+	}
+	for _, src := range sources {
+		for _, p := range a.Ports {
+			for _, r := range g.Rules {
+				if isHostRule(r, src, a.proto()) && r.PortRangeMin == p && r.PortRangeMax == p {
+					if err := rules.Delete(ctx, c.network, r.ID).ExtractErr(); err != nil {
+						return fmt.Errorf("delete rule %s: %w", r.ID, err)
+					}
+					fmt.Fprintf(w, "rule deleted: %s/%d from %s in %s id=%s\n", a.proto(), p, src, g.Name, r.ID)
 				}
-				fmt.Fprintf(w, "rule deleted: %s/%d from %s in %s id=%s\n", a.proto(), p, a.From, g.Name, r.ID)
 			}
 		}
 	}
