@@ -299,6 +299,47 @@ func TestImageUploadValidation(t *testing.T) {
 	}
 }
 
+func TestImageUploadFromALocalFile(t *testing.T) {
+	f := newFake(t)
+	pe, at := pollEvery, activeTimeout
+	pollEvery, activeTimeout = time.Millisecond, 5*time.Second
+	t.Cleanup(func() { pollEvery, activeTimeout = pe, at })
+	file := filepath.Join(t.TempDir(), "local.qcow2")
+	if err := os.WriteFile(file, []byte(imgBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(cloudArg, "image-upload", "--file="+file, "--name=obsd-test", "--min-disk=20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"local file: " + file, "sha512 " + sha(imgBody), "image active: obsd-test id=img1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if all := strings.Join(f.created, "\n"); !strings.Contains(all, imgBody) || !strings.Contains(all, `"min_disk":20`) {
+		t.Errorf("requests:\n%s", all)
+	}
+}
+
+func TestImageUploadFileRefusals(t *testing.T) {
+	newFake(t)
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{cloudArg, "image-upload", "--file=f", "--url=https://h/i"}, "excludes"},
+		{[]string{cloudArg, "image-upload", "--file=f", "--dir=d"}, "excludes"},
+		{[]string{cloudArg, "image-upload", "--file=f"}, "needs --name"},
+		{[]string{cloudArg, "image-upload", "--file=" + filepath.Join(t.TempDir(), "absent"), "--name=n"}, "no such file"},
+	}
+	for _, c := range cases {
+		if _, err := run(c.args...); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%v: err=%v, want %q", c.args, err, c.want)
+		}
+	}
+}
+
 func TestQuotaListsComputeAndVolume(t *testing.T) {
 	newFake(t)
 	out, err := run(cloudArg, "quota")
