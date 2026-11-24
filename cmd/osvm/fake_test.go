@@ -35,6 +35,10 @@ type fakeCloud struct {
 	// serversBody and portsBody replace the default listings when set.
 	serversBody, portsBody string
 	imgStates              []string
+	// srvStatus replaces the status GET of server s1 answers (default ACTIVE).
+	srvStatus string
+	// groupsByName answers a security-group listing filtered by ?name=.
+	groupsByName map[string]string
 }
 
 const (
@@ -144,6 +148,14 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 	case "GET /compute/v2.1/os-keypairs":
 		reply(200, `{"keypairs":[{"keypair":{"name":"k","fingerprint":"aa:bb"}}]}`)
 	case "GET /network/v2.0/security-groups":
+		if len(f.groupsByName) > 0 {
+			body, ok := f.groupsByName[r.URL.Query().Get("name")]
+			if !ok {
+				body = `{"security_groups":[]}`
+			}
+			reply(200, body)
+			return
+		}
 		if f.groups != "" {
 			reply(200, f.groups)
 			return
@@ -171,8 +183,26 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 		f.record(r)
 		reply(202, `{"server":{"id":"s1"}}`)
 	case "GET /compute/v2.1/servers/s1":
+		if f.srvStatus != "" {
+			reply(200, strings.Replace(serverBody, `"ACTIVE"`, strconv.Quote(f.srvStatus), 1))
+			return
+		}
 		reply(200, serverBody)
+	case "DELETE /compute/v2.1/servers/s1":
+		f.record(r)
+		reply(204, ``)
 	case "POST /compute/v2.1/servers/s1/action":
+		var b bytes.Buffer
+		_, _ = b.ReadFrom(r.Body)
+		if strings.Contains(b.String(), "createImage") {
+			f.mu.Lock()
+			f.created = append(f.created, "POST "+r.URL.Path+" "+b.String())
+			f.mu.Unlock()
+			w.Header().Set("X-OpenStack-Nova-API-Version", "2.1")
+			w.Header().Set("Location", f.srv.URL+"/compute/v2.1/images/img1")
+			reply(202, ``)
+			return
+		}
 		reply(200, `{"output":`+strconv.Quote(f.console)+`}`)
 	case "POST /image/v2/images":
 		f.record(r)
