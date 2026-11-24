@@ -29,6 +29,12 @@ func TestConsoleCommandCloudFailures(t *testing.T) {
 		out, err := run(cloudArg, "console", "--server=vm")
 		if err == nil || out != "" {
 			t.Errorf("%s: err = %v, out = %q, want a refusal and no output", name, err, out)
+			continue
+		}
+		// The listing failure must be reported as the server's 500, not
+		// disguised as "want exactly one, got 0" by the check that follows it.
+		if name != "auth" && !strings.Contains(err.Error(), "500") {
+			t.Errorf("%s: err = %v, want the server's 500", name, err)
 		}
 	}
 }
