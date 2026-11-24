@@ -203,6 +203,18 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 			reply(202, ``)
 			return
 		}
+		if strings.Contains(b.String(), `"resize"`) || strings.Contains(b.String(), `"confirmResize"`) {
+			f.mu.Lock()
+			f.created = append(f.created, "POST "+r.URL.Path+" "+b.String())
+			if strings.Contains(b.String(), `"confirmResize"`) {
+				f.srvStatus = "ACTIVE"
+			} else {
+				f.srvStatus = "VERIFY_RESIZE"
+			}
+			f.mu.Unlock()
+			reply(202, ``)
+			return
+		}
 		reply(200, `{"output":`+strconv.Quote(f.console)+`}`)
 	case "POST /image/v2/images":
 		f.record(r)
