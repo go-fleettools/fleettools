@@ -46,7 +46,7 @@ func newFake(t *testing.T) *fakeCloud {
 	t.Helper()
 	f := &fakeCloud{
 		fail: map[string]int{}, calls: map[string]int{}, garbled: map[string]string{}, failNth: map[string]int{},
-		services: []string{"compute", "network", "image", "identity"},
+		services: []string{"compute", "network", "image", "identity", "volumev3"},
 		nets:     netsOne, flavors: flavorsOK, images: imagesOK,
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
@@ -75,7 +75,7 @@ func newFake(t *testing.T) *fakeCloud {
 
 func (f *fakeCloud) token() string {
 	var cat []string
-	paths := map[string]string{"compute": "/compute/v2.1/", "network": "/network/", "image": "/image/", "identity": "/v3/"}
+	paths := map[string]string{"compute": "/compute/v2.1/", "network": "/network/", "image": "/image/", "identity": "/v3/", "volumev3": "/volume/v3/p1/"}
 	for _, s := range f.services {
 		cat = append(cat, fmt.Sprintf(`{"type":%q,"name":%q,"id":%q,"endpoints":[{"interface":"public","region":"RegionOne","region_id":"RegionOne","url":%q,"id":"e"}]}`,
 			s, s, s, f.srv.URL+paths[s]))
@@ -164,6 +164,14 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 		reply(202, `{"server":{"id":"s1"}}`)
 	case "GET /compute/v2.1/servers/s1":
 		reply(200, serverBody)
+	case "POST /volume/v3/p1/volumes":
+		f.record(r)
+		reply(202, `{"volume":{"id":"v1","name":"vm-data","size":200}}`)
+	case "GET /volume/v3/p1/volumes/v1":
+		reply(200, `{"volume":{"id":"v1","status":"available"}}`)
+	case "POST /compute/v2.1/servers/s1/os-volume_attachments":
+		f.record(r)
+		reply(200, `{"volumeAttachment":{"id":"v1","volumeId":"v1"}}`)
 	default:
 		reply(404, `{}`)
 	}

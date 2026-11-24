@@ -14,6 +14,12 @@
 //	osvm --cloud NAME revoke --group G --from H/32 --port P...
 //	osvm --cloud NAME rules --group G
 //
+// create works on a shared public network as on a private one (the network is
+// found by name; no floating IP is needed). --sg-name names its dedicated
+// group and --volume-gb creates and attaches a data volume. allow takes its
+// sources from one --from /32, or from --from-json-url/--json-key (for GitHub
+// webhooks: https://api.github.com/meta and hooks), refusing a world-open prefix.
+//
 // allow refuses a group that more than one server carries unless --allow-shared
 // is given: a rule there opens every one of them.
 //
@@ -26,9 +32,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/netip"
 	"os"
 	"slices"
@@ -39,9 +47,11 @@ import (
 	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/gophercloud/gophercloud/v2"
 	"github.com/gophercloud/gophercloud/v2/openstack"
+	"github.com/gophercloud/gophercloud/v2/openstack/blockstorage/v3/volumes"
 	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/flavors"
 	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/keypairs"
 	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servers"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/volumeattach"
 	"github.com/gophercloud/gophercloud/v2/openstack/identity/v3/tokens"
 	"github.com/gophercloud/gophercloud/v2/openstack/image/v2/images"
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/layer3/floatingips"
@@ -126,6 +136,8 @@ func RootCmd() *cobra.Command {
 	}
 	allow.Flags().StringVar(&a.Group, "group", "", "security group name (must match exactly one)")
 	allow.Flags().StringVar(&a.From, "from", "", "source host as a /32 (required)")
+	allow.Flags().StringVar(&a.FromURL, "from-json-url", "", "https URL of a JSON document whose --json-key array lists the source CIDRs (instead of --from)")
+	allow.Flags().StringVar(&a.JSONKey, "json-key", "", "key of the CIDR array in the --from-json-url document, e.g. hooks")
 	allow.Flags().IntSliceVar(&a.Ports, "port", nil, "port (repeatable)")
 	allow.Flags().StringVar(&a.Proto, "proto", "tcp", "protocol of the rule: tcp or udp")
 	allow.Flags().BoolVar(&a.CreateGroup, "create-group", false, "create the group when it does not exist")
@@ -193,7 +205,7 @@ func RootCmd() *cobra.Command {
 	var o createOpts
 	create := &cobra.Command{
 		Use:   "create",
-		Short: "boot a VM on a private network with an SSH-only security group",
+		Short: "boot a VM on a private or shared network with an SSH-only security group (optional data volume)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if cloud == "" {
@@ -215,6 +227,8 @@ func RootCmd() *cobra.Command {
 	f.StringVar(&o.SSHFrom, "ssh-from", "", "CIDR allowed to reach TCP 22 (required, never 0.0.0.0/0)")
 	f.IntVar(&o.MinDisk, "min-disk", 8, "smallest root disk, GB")
 	f.IntVar(&o.MinRAM, "min-ram", 1024, "smallest RAM, MB")
+	f.StringVar(&o.SGName, "sg-name", "", "name of the dedicated security group to create (default <name>-ssh)")
+	f.IntVar(&o.VolumeGB, "volume-gb", 0, "create and attach a data volume of this many GB (0: none)")
 	f.BoolVar(&o.DryRun, "dry-run", false, "resolve everything, create nothing")
 	root.AddCommand(create)
 	return root
@@ -222,8 +236,16 @@ func RootCmd() *cobra.Command {
 
 type createOpts struct {
 	Name, Network, ImageMatch, Flavor, PubKeyFile, Keypair, SSHFrom string
-	MinDisk, MinRAM                                                 int
+	SGName                                                          string
+	MinDisk, MinRAM, VolumeGB                                       int
 	DryRun                                                          bool
+}
+
+func (o createOpts) sgName() string {
+	if o.SGName != "" {
+		return o.SGName
+	}
+	return o.Name + "-ssh"
 }
 
 func (o createOpts) validate() error {
@@ -232,6 +254,9 @@ func (o createOpts) validate() error {
 	}
 	if (o.PubKeyFile == "") == (o.Keypair == "") {
 		return errors.New("exactly one of --pubkey-file and --keypair is required")
+	}
+	if o.VolumeGB < 0 || o.VolumeGB > 16000 {
+		return fmt.Errorf("--volume-gb %d out of range", o.VolumeGB)
 	}
 	return checkCIDR(o.SSHFrom)
 }
@@ -253,6 +278,9 @@ func checkCIDR(s string) error {
 
 type allowOpts struct {
 	Group, From string
+	// FromURL and JSONKey read the sources from a JSON document (for GitHub,
+	// https://api.github.com/meta and "hooks") instead of one --from host.
+	FromURL, JSONKey string
 	// Proto is "tcp" (also when empty) or "udp".
 	Proto string
 	Ports []int
@@ -272,6 +300,15 @@ func (a allowOpts) validate() error {
 	}
 	if a.proto() == "" {
 		return fmt.Errorf("--proto %q: tcp or udp", a.Proto)
+	}
+	if a.FromURL != "" {
+		if a.From != "" {
+			return errors.New("--from and --from-json-url are exclusive")
+		}
+		if a.JSONKey == "" {
+			return errors.New("--from-json-url needs --json-key")
+		}
+		return nil
 	}
 	pre, err := netip.ParsePrefix(a.From)
 	if err != nil {
@@ -297,6 +334,13 @@ func (a allowOpts) proto() rules.RuleProtocol {
 // allowRules adds one ingress rule (TCP, or UDP with --proto udp) per port from a single host, skipping a
 // rule the group already has, so a repeat changes nothing.
 func allowRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) error {
+	sources := []string{a.From}
+	if a.FromURL != "" {
+		var err error
+		if sources, err = fetchCIDRs(ctx, a.FromURL, a.JSONKey); err != nil {
+			return err
+		}
+	}
 	c, err := connect(ctx, cloud)
 	if err != nil {
 		return err
@@ -324,27 +368,93 @@ func allowRules(ctx context.Context, cloud string, a allowOpts, w io.Writer) err
 	if len(users) > 1 && !a.AllowShared {
 		return fmt.Errorf("security group %q is attached to %d servers (%s): a rule here opens all of them; pass --allow-shared to do it anyway, or use a group of its own", a.Group, len(users), strings.Join(users, ", "))
 	}
-	have := map[int]string{}
-	for _, r := range gs[0].Rules {
-		if isHostRule(r, a.From, a.proto()) && r.PortRangeMin == r.PortRangeMax {
-			have[r.PortRangeMin] = r.ID
+	for _, src := range sources {
+		have := map[int]string{}
+		for _, r := range gs[0].Rules {
+			if isHostRule(r, src, a.proto()) && r.PortRangeMin == r.PortRangeMax {
+				have[r.PortRangeMin] = r.ID
+			}
 		}
-	}
-	for _, p := range a.Ports {
-		if id := have[p]; id != "" {
-			fmt.Fprintf(w, "rule exists: %s/%d from %s in %s id=%s\n", a.proto(), p, a.From, gs[0].Name, id)
-			continue
+		et := rules.EtherType4
+		if pre, _ := netip.ParsePrefix(src); pre.Addr().Is6() {
+			et = rules.EtherType6
 		}
-		r, err := rules.Create(ctx, c.network, rules.CreateOpts{
-			SecGroupID: gs[0].ID, Direction: rules.DirIngress, EtherType: rules.EtherType4,
-			Protocol: a.proto(), PortRangeMin: p, PortRangeMax: p, RemoteIPPrefix: a.From,
-		}).Extract()
-		if err != nil {
-			return fmt.Errorf("rule %s/%d: %w", a.proto(), p, err)
+		for _, p := range a.Ports {
+			if id := have[p]; id != "" {
+				fmt.Fprintf(w, "rule exists: %s/%d from %s in %s id=%s\n", a.proto(), p, src, gs[0].Name, id)
+				continue
+			}
+			r, err := rules.Create(ctx, c.network, rules.CreateOpts{
+				SecGroupID: gs[0].ID, Direction: rules.DirIngress, EtherType: et,
+				Protocol: a.proto(), PortRangeMin: p, PortRangeMax: p, RemoteIPPrefix: src,
+			}).Extract()
+			if err != nil {
+				return fmt.Errorf("rule %s/%d from %s: %w", a.proto(), p, src, err)
+			}
+			fmt.Fprintf(w, "rule added: %s/%d from %s in %s id=%s\n", a.proto(), p, src, gs[0].Name, r.ID)
 		}
-		fmt.Fprintf(w, "rule added: %s/%d from %s in %s id=%s\n", a.proto(), p, a.From, gs[0].Name, r.ID)
 	}
 	return nil
+}
+
+// httpClient fetches --from-json-url; tests replace it.
+var httpClient = &http.Client{Timeout: 15 * time.Second}
+
+// maxSources bounds how many CIDRs one source may open in a group.
+const maxSources = 200
+
+// fetchCIDRs reads the array under key of the JSON object at url and returns
+// its CIDRs, refusing anything that is not an https URL, a well-formed prefix
+// or that would open the world. It is read at run time so the list is never
+// copied into a script.
+func fetchCIDRs(ctx context.Context, url, key string) ([]string, error) {
+	if !strings.HasPrefix(url, "https://") {
+		return nil, errors.New("--from-json-url: https only")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("--from-json-url: %w", err)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("--from-json-url: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("--from-json-url: %s answered %d", url, resp.StatusCode)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&doc); err != nil {
+		return nil, fmt.Errorf("--from-json-url: %w", err)
+	}
+	var list []string
+	if raw, ok := doc[key]; !ok {
+		return nil, fmt.Errorf("--from-json-url: no key %q in the reply", key)
+	} else if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, fmt.Errorf("--from-json-url: key %q is not a list of strings: %w", key, err)
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("--from-json-url: key %q is empty", key)
+	}
+	if len(list) > maxSources {
+		return nil, fmt.Errorf("--from-json-url: %d prefixes, more than %d", len(list), maxSources)
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, s := range list {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return nil, fmt.Errorf("--from-json-url: %w", err)
+		}
+		if p.Bits() == 0 {
+			return nil, fmt.Errorf("--from-json-url: refusing a world-open prefix %s", s)
+		}
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out, nil
 }
 
 func isHostRule(r rules.SecGroupRule, from string, proto rules.RuleProtocol) bool {
@@ -529,6 +639,8 @@ type clients struct {
 	compute  *gophercloud.ServiceClient
 	network  *gophercloud.ServiceClient
 	image    *gophercloud.ServiceClient
+	// volume is nil-safe to leave unresolved: only create --volume-gb needs it.
+	volume *gophercloud.ServiceClient
 }
 
 func connect(ctx context.Context, cloud string) (*clients, error) {
@@ -546,6 +658,10 @@ func connect(ctx context.Context, cloud string) (*clients, error) {
 	}
 	if c.image, err = openstack.NewImageV2(pc, eo); err != nil {
 		return nil, err
+	}
+	// Block storage is optional: a catalog without it only refuses --volume-gb.
+	if v, err := openstack.NewBlockStorageV3(pc, eo); err == nil {
+		c.volume = v
 	}
 	return c, nil
 }
@@ -649,12 +765,35 @@ func inventory(ctx context.Context, cloud string, w io.Writer) error {
 	return nil
 }
 
+// attachVolume creates a blank volume, waits until it is available and
+// attaches it to the server (it shows as a new block device in the guest).
+func attachVolume(ctx context.Context, c *clients, serverID, name string, gb int, w io.Writer) error {
+	v, err := volumes.Create(ctx, c.volume, volumes.CreateOpts{Name: name, Size: gb}, nil).Extract()
+	if err != nil {
+		return fmt.Errorf("volume: %w", err)
+	}
+	fmt.Fprintf(w, "volume created: %s id=%s size=%dGB\n", name, v.ID, gb)
+	vctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	if err := volumes.WaitForStatus(vctx, c.volume, v.ID, "available"); err != nil {
+		return fmt.Errorf("volume: %w", err)
+	}
+	if _, err := volumeattach.Create(ctx, c.compute, serverID, volumeattach.CreateOpts{VolumeID: v.ID}).Extract(); err != nil {
+		return fmt.Errorf("attach volume: %w", err)
+	}
+	fmt.Fprintf(w, "volume attached: %s to %s\n", v.ID, serverID)
+	return nil
+}
+
 func create(ctx context.Context, cloud string, o createOpts, w io.Writer) error {
 	c, err := connect(ctx, cloud)
 	if err != nil {
 		return err
 	}
 	fmt.Fprintln(w, "project:", projectName(c.provider))
+	if o.VolumeGB > 0 && c.volume == nil {
+		return errors.New("--volume-gb: the catalog has no block storage service")
+	}
 
 	ns, err := collect(ctx, networks.List(c.network, networks.ListOpts{Name: o.Network}), networks.ExtractNetworks)
 	if err != nil || len(ns) != 1 {
@@ -694,7 +833,7 @@ func create(ctx context.Context, cloud string, o createOpts, w io.Writer) error 
 		fmt.Fprintln(w, "keypair created:", key)
 	}
 
-	g, err := groups.Create(ctx, c.network, groups.CreateOpts{Name: o.Name + "-ssh", Description: "SSH only, from " + o.SSHFrom}).Extract()
+	g, err := groups.Create(ctx, c.network, groups.CreateOpts{Name: o.sgName(), Description: "SSH only, from " + o.SSHFrom}).Extract()
 	if err != nil {
 		return fmt.Errorf("secgroup: %w", err)
 	}
@@ -722,6 +861,11 @@ func create(ctx context.Context, cloud string, o createOpts, w io.Writer) error 
 	defer cancel()
 	if err := servers.WaitForStatus(dctx, c.compute, srv.ID, "ACTIVE"); err != nil {
 		return err
+	}
+	if o.VolumeGB > 0 {
+		if err := attachVolume(ctx, c, srv.ID, o.Name+"-data", o.VolumeGB, w); err != nil {
+			return err
+		}
 	}
 	got, err := servers.Get(ctx, c.compute, srv.ID).Extract()
 	if err != nil {
