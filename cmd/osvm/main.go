@@ -231,7 +231,7 @@ func RootCmd() *cobra.Command {
 	f.IntVar(&o.VolumeGB, "volume-gb", 0, "create and attach a data volume of this many GB (0: none)")
 	f.BoolVar(&o.DryRun, "dry-run", false, "resolve everything, create nothing")
 	root.AddCommand(create)
-	root.AddCommand(imageCmd(&cloud), quotaCmd(&cloud))
+	root.AddCommand(imageCmd(&cloud), quotaCmd(&cloud), hostKeysCmd(&cloud))
 	return root
 }
 
