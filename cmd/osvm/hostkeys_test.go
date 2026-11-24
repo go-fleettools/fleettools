@@ -79,8 +79,21 @@ func TestHostKeysCommandRefusals(t *testing.T) {
 			t.Errorf("%s: err = %v, want it to contain %q", name, err, c.want)
 		}
 	}
+	f.fail["GET /compute/v2.1/servers/detail"] = 0
+	if _, err := run(cloudArg, "hostkeys", "--server=vm", "--host=h"); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("server list failure: err = %v", err)
+	}
+	delete(f.fail, "GET /compute/v2.1/servers/detail")
 	f.fail["POST /compute/v2.1/servers/s1/action"] = 0
 	if _, err := run(cloudArg, "hostkeys", "--server=vm", "--host=h"); err == nil || !strings.Contains(err.Error(), "console log of vm") {
 		t.Errorf("api failure: err = %v", err)
+	}
+}
+
+func TestHostKeysRefusedAuth(t *testing.T) {
+	f := newFake(t)
+	f.denyAuth = true
+	if _, err := run(cloudArg, "hostkeys", "--server=vm", "--host=h"); err == nil {
+		t.Fatal("a denied login must fail the command")
 	}
 }

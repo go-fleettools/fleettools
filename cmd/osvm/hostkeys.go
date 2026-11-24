@@ -28,39 +28,34 @@ var hostKeyTypes = map[string]bool{
 // prints it again) and refuses a console with none, a block never closed, or a
 // line inside it that is not a key.
 func parseHostKeys(console string) ([]string, error) {
-	lines := strings.Split(strings.ReplaceAll(console, "\r", ""), "\n")
-	begin, end := -1, -1
-	for i, l := range lines {
-		switch strings.TrimSpace(l) {
-		case hostKeysBegin:
-			begin, end = i, -1
-		case hostKeysEnd:
-			if begin >= 0 && end < 0 {
-				end = i
+	var cur, last []string
+	seen, open := false, false
+	for _, l := range strings.Split(strings.ReplaceAll(console, "\r", ""), "\n") {
+		l = strings.TrimSpace(l)
+		switch {
+		case l == hostKeysBegin:
+			seen, open, cur = true, true, nil
+		case l == hostKeysEnd && open:
+			open, last = false, cur
+		case open && l != "":
+			typ, rest, _ := strings.Cut(l, " ")
+			key, _, _ := strings.Cut(strings.TrimSpace(rest), " ")
+			if !hostKeyTypes[typ] || key == "" {
+				return nil, fmt.Errorf("console log: %q is not a host key line", l)
 			}
+			cur = append(cur, typ+" "+key)
 		}
 	}
-	if begin < 0 {
+	if !seen {
 		return nil, errors.New("console log has no SSH HOST KEY KEYS block (not booted yet, or the log is truncated)")
 	}
-	if end < 0 {
+	if open {
 		return nil, errors.New("console log's SSH HOST KEY KEYS block is never closed")
 	}
-	var keys []string
-	for _, l := range lines[begin+1 : end] {
-		f := strings.Fields(l)
-		if len(f) == 0 {
-			continue
-		}
-		if len(f) < 2 || !hostKeyTypes[f[0]] {
-			return nil, fmt.Errorf("console log: %q is not a host key line", l)
-		}
-		keys = append(keys, f[0]+" "+f[1])
-	}
-	if len(keys) == 0 {
+	if len(last) == 0 {
 		return nil, errors.New("console log's SSH HOST KEY KEYS block is empty")
 	}
-	return keys, nil
+	return last, nil
 }
 
 func hostKeysCmd(cloud *string) *cobra.Command {
