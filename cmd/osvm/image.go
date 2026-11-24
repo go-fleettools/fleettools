@@ -209,7 +209,7 @@ func imageUpload(ctx context.Context, cloud string, o imageOpts, w io.Writer) er
 		return fmt.Errorf("image: %w", err)
 	}
 	fmt.Fprintf(w, "image created: %s id=%s\n", o.Name, im.ID)
-	f, err := os.Open(dst)
+	f, err := openImage(dst)
 	if err != nil {
 		return err
 	}
@@ -238,6 +238,9 @@ func imageUpload(ctx context.Context, cloud string, o imageOpts, w io.Writer) er
 		}
 	}
 }
+
+// openImage reopens the verified file for upload; tests replace it.
+var openImage = os.Open
 
 var (
 	privateVisibility = images.ImageVisibilityPrivate

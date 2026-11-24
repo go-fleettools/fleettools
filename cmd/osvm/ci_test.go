@@ -148,7 +148,7 @@ func TestAllowFromJSONURLRefusals(t *testing.T) {
 		{"absent key", `{"web":["1.2.3.4/32"]}`, 200, `no key "hooks"`},
 		{"empty list", `{"hooks":[]}`, 200, "is empty"},
 		{"not a list", `{"hooks":"1.2.3.4/32"}`, 200, "not a list of strings"},
-		{"not json", `<html>`, 200, "--from-json-url"},
+		{"not json", `<html>`, 200, "invalid character"},
 		{"http error", `{}`, 503, "answered 503"},
 		{"too many", `{"hooks":[` + strings.Join(many, ",") + `]}`, 200, "more than"},
 	}
@@ -169,16 +169,19 @@ func TestAllowFromJSONURLRefusals(t *testing.T) {
 
 func TestAllowFromJSONURLRejectsPlainHTTPAndBadFlags(t *testing.T) {
 	newFake(t)
-	cases := [][]string{
-		{cloudArg, "allow", "--group=default", "--from-json-url=http://api.github.com/meta", "--json-key=hooks", "--port=9997"},
-		{cloudArg, "allow", "--group=default", "--from-json-url=https://x.invalid/meta", "--port=9997"},
-		{cloudArg, "allow", "--group=default", "--from=192.168.1.94/32", "--from-json-url=https://x.invalid/meta", "--json-key=hooks", "--port=9997"},
-		{cloudArg, "allow", "--group=default", "--from-json-url=https://127.0.0.1:1/meta", "--json-key=hooks", "--port=9997"},
-		{cloudArg, "allow", "--group=default", "--from-json-url=https://x y/meta", "--json-key=hooks", "--port=9997"},
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{cloudArg, "allow", "--group=default", "--from-json-url=http://api.github.com/meta", "--json-key=hooks", "--port=9997"}, "https"},
+		{[]string{cloudArg, "allow", "--group=default", "--from-json-url=https://x.invalid/meta", "--port=9997"}, "needs --json-key"},
+		{[]string{cloudArg, "allow", "--group=default", "--from=192.168.1.94/32", "--from-json-url=https://x.invalid/meta", "--json-key=hooks", "--port=9997"}, "exclusive"},
+		{[]string{cloudArg, "allow", "--group=default", "--from-json-url=https://127.0.0.1:1/meta", "--json-key=hooks", "--port=9997"}, "--from-json-url"},
+		{[]string{cloudArg, "allow", "--group=default", "--from-json-url=https://x y/meta", "--json-key=hooks", "--port=9997"}, "--from-json-url"},
 	}
-	for _, args := range cases {
-		if _, err := run(args...); err == nil {
-			t.Errorf("accepted: %v", args)
+	for _, c := range cases {
+		if _, err := run(c.args...); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%v: err=%v, want %q", c.args, err, c.want)
 		}
 	}
 }

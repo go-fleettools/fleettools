@@ -32,9 +32,11 @@ func publisher(t *testing.T, sums string, imgCode int) string {
 	od, oh := downloadClient, httpClient
 	downloadClient, httpClient = s.Client(), s.Client()
 	t.Cleanup(func() { downloadClient, httpClient = od, oh })
-	pe := pollEvery
-	pollEvery = time.Millisecond
-	t.Cleanup(func() { pollEvery = pe })
+	// a mutant that never sees "active" must fail within seconds, not hang
+	// for the production 15 minutes.
+	pe, at := pollEvery, activeTimeout
+	pollEvery, activeTimeout = time.Millisecond, 5*time.Second
+	t.Cleanup(func() { pollEvery, activeTimeout = pe, at })
 	return s.URL
 }
 
@@ -214,38 +216,85 @@ func TestImageUploadLocalFailures(t *testing.T) {
 	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run(imgArgs(base, filepath.Join(blocker, "sub"))...); err == nil {
-		t.Error("a directory under a file accepted")
+	if _, err := run(imgArgs(base, filepath.Join(blocker, "sub"))...); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("a directory under a file: %v", err)
 	}
 	dir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(dir, "img.qcow2"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := run(imgArgs(base, dir)...); err == nil {
-		t.Error("an unwritable destination accepted")
+	if _, err := run(imgArgs(base, dir)...); err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Errorf("an unwritable destination: %v", err)
 	}
-	if _, err := run(cloudArg, "image-upload", "--url=https://x/%zz", "--sums-url=https://x/s", "--name=n", "--dir="+dir); err == nil {
-		t.Error("a malformed URL accepted")
+	// the directory is refused before the image is requested at all
+	bad := publisher(t, sha(imgBody)+"  img.qcow2\n", 404)
+	if _, err := run(imgArgs(bad, filepath.Join(blocker, "sub"))...); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("a directory under a file, image absent: %v", err)
 	}
-	if _, err := run(cloudArg, "image-upload", "--url=https://x y/i", "--sums-url=https://x/s", "--name=n", "--dir="+dir); err == nil {
-		t.Error("a URL with a space accepted")
+	if _, err := run(cloudArg, "image-upload", "--url=https://x/%zz", "--sums-url=https://x/s", "--name=n", "--dir="+dir); err == nil || !strings.Contains(err.Error(), "escape") {
+		t.Errorf("a malformed URL: %v", err)
+	}
+	if _, err := run(cloudArg, "image-upload", "--url=https://x y/i", "--sums-url=https://x/s", "--name=n", "--dir="+dir); err == nil || !strings.Contains(err.Error(), "invalid character") {
+		t.Errorf("a URL with a space: %v", err)
+	}
+	// a sums URL the HTTP library refuses to turn into a request
+	if _, err := run(cloudArg, "image-upload", "--url=https://x/i", "--sums-url=https://x/s\x7f", "--name=n", "--dir="+dir); err == nil || !strings.Contains(err.Error(), "control character") {
+		t.Errorf("a control character in the sums URL: %v", err)
+	}
+}
+
+func TestSumForRefusesAnOverlongLine(t *testing.T) {
+	if _, err := sumFor(strings.NewReader(strings.Repeat("a", 1<<20)+"\n"), "img.qcow2"); err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestImageUploadAndQuotaRefusedAuth(t *testing.T) {
+	f := newFake(t)
+	f.denyAuth = true
+	base := publisher(t, sha(imgBody)+"  img.qcow2\n", 200)
+	for _, args := range [][]string{imgArgs(base, t.TempDir()), {cloudArg, "quota"}} {
+		if out, err := run(args...); err == nil || strings.Contains(out, "image created") {
+			t.Errorf("%v: err=%v\n%s", args, err, out)
+		}
+	}
+	if len(f.created) != 0 {
+		t.Errorf("created after a refused login: %v", f.created)
+	}
+}
+
+func TestImageUploadLosesTheVerifiedFile(t *testing.T) {
+	newFake(t)
+	base := publisher(t, sha(imgBody)+"  img.qcow2\n", 200)
+	old := openImage
+	openImage = func(string) (*os.File, error) { return nil, os.ErrNotExist }
+	t.Cleanup(func() { openImage = old })
+	if _, err := run(imgArgs(base, t.TempDir())...); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
 func TestImageUploadValidation(t *testing.T) {
 	newFake(t)
 	ok := []string{cloudArg, "image-upload", "--url=https://h/i.qcow2", "--sums-url=https://h/SHA512SUMS", "--name=n", "--dir=" + t.TempDir()}
-	cases := [][]string{
-		{cloudArg, "image-upload"},
-		{"image-upload", "--url=https://h/i", "--sums-url=https://h/s", "--name=n", "--dir=d"},
-		append(append([]string{}, ok...), "--disk-format=vmdk"),
-		append(append([]string{}, ok...), "--min-disk=-1"),
-		{cloudArg, "image-upload", "--url=http://h/i.qcow2", "--sums-url=https://h/s", "--name=n", "--dir=d"},
-		{cloudArg, "image-upload", "--url=https://h/i.qcow2", "--sums-url=http://h/s", "--name=n", "--dir=d"},
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{cloudArg, "image-upload"}, "are required"},
+		{[]string{cloudArg, "image-upload", "--sums-url=https://h/s", "--name=n", "--dir=d"}, "are required"},
+		{[]string{cloudArg, "image-upload", "--url=https://h/i", "--name=n", "--dir=d"}, "are required"},
+		{[]string{cloudArg, "image-upload", "--url=https://h/i", "--sums-url=https://h/s", "--dir=d"}, "are required"},
+		{[]string{cloudArg, "image-upload", "--url=https://h/i", "--sums-url=https://h/s", "--name=n"}, "are required"},
+		{[]string{"image-upload", "--url=https://h/i", "--sums-url=https://h/s", "--name=n", "--dir=d"}, "--cloud is required"},
+		{append(append([]string{}, ok...), "--disk-format=vmdk"), "qcow2 or raw"},
+		{append(append([]string{}, ok...), "--min-disk=-1"), "must not be negative"},
+		{[]string{cloudArg, "image-upload", "--url=http://h/i.qcow2", "--sums-url=https://h/s", "--name=n", "--dir=d"}, "https only"},
+		{[]string{cloudArg, "image-upload", "--url=https://h/i.qcow2", "--sums-url=http://h/s", "--name=n", "--dir=d"}, "https only"},
 	}
-	for _, args := range cases {
-		if _, err := run(args...); err == nil {
-			t.Errorf("accepted: %v", args)
+	for _, c := range cases {
+		if _, err := run(c.args...); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%v: err=%v, want %q", c.args, err, c.want)
 		}
 	}
 }
@@ -277,7 +326,7 @@ func TestQuotaWithoutBlockStorageAndFailures(t *testing.T) {
 			t.Errorf("%s: %v", k, err)
 		}
 	}
-	if _, err := run("quota"); err == nil {
-		t.Error("--cloud not required")
+	if _, err := run("quota"); err == nil || !strings.Contains(err.Error(), "--cloud is required") {
+		t.Errorf("--cloud not required: %v", err)
 	}
 }
