@@ -31,18 +31,29 @@ var downloadClient = &http.Client{}
 var maxImageBytes int64 = 16 << 30
 
 type imageOpts struct {
-	URL, SumsURL, Name, Dir, DiskFormat string
-	MinDisk                             int
-	DryRun                              bool
+	URL, SumsURL, Name, Dir, DiskFormat, File string
+	MinDisk                                   int
+	DryRun                                    bool
 }
 
 func (o imageOpts) validate() error {
-	if o.URL == "" || o.SumsURL == "" || o.Name == "" || o.Dir == "" {
-		return errors.New("--url, --sums-url, --name and --dir are required")
-	}
-	for _, u := range []string{o.URL, o.SumsURL} {
-		if !strings.HasPrefix(u, "https://") {
-			return fmt.Errorf("%s: https only", u)
+	if o.File != "" {
+		// A file built locally (an installer run, a converted disk) has no
+		// publisher checksum: its SHA-512 is printed instead.
+		if o.URL != "" || o.SumsURL != "" || o.Dir != "" {
+			return errors.New("--file excludes --url, --sums-url and --dir")
+		}
+		if o.Name == "" {
+			return errors.New("--file needs --name")
+		}
+	} else {
+		if o.URL == "" || o.SumsURL == "" || o.Name == "" || o.Dir == "" {
+			return errors.New("--url, --sums-url, --name and --dir are required (or --file and --name)")
+		}
+		for _, u := range []string{o.URL, o.SumsURL} {
+			if !strings.HasPrefix(u, "https://") {
+				return fmt.Errorf("%s: https only", u)
+			}
 		}
 	}
 	if o.DiskFormat != "qcow2" && o.DiskFormat != "raw" {
@@ -75,6 +86,7 @@ func imageCmd(cloud *string) *cobra.Command {
 	f.StringVar(&o.SumsURL, "sums-url", "", "https URL of the SHA512SUMS file that lists the image (fetch it from the publisher, not a mirror)")
 	f.StringVar(&o.Name, "name", "", "name of the private image to create")
 	f.StringVar(&o.Dir, "dir", "", "durable directory the download is kept in")
+	f.StringVar(&o.File, "file", "", "upload this local image file instead of downloading one (prints its SHA-512)")
 	f.StringVar(&o.DiskFormat, "disk-format", "qcow2", "qcow2 or raw")
 	f.IntVar(&o.MinDisk, "min-disk", 0, "smallest root disk the image boots on, GB")
 	f.BoolVar(&o.DryRun, "dry-run", false, "download and verify, upload nothing")
@@ -181,8 +193,33 @@ func fetchVerified(ctx context.Context, o imageOpts, w io.Writer) (string, error
 	return dst, nil
 }
 
+// localSum prints the SHA-512 and size of a local image file and returns its path.
+func localSum(file string, w io.Writer) (string, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha512.New()
+	n, err := io.Copy(h, io.LimitReader(f, maxImageBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if n > maxImageBytes {
+		return "", fmt.Errorf("image larger than %d bytes", maxImageBytes)
+	}
+	fmt.Fprintf(w, "local file: %s %d bytes sha512 %s\n", file, n, hex.EncodeToString(h.Sum(nil)))
+	return file, nil
+}
+
 func imageUpload(ctx context.Context, cloud string, o imageOpts, w io.Writer) error {
-	dst, err := fetchVerified(ctx, o, w)
+	var dst string
+	var err error
+	if o.File != "" {
+		dst, err = localSum(o.File, w)
+	} else {
+		dst, err = fetchVerified(ctx, o, w)
+	}
 	if err != nil {
 		return err
 	}
