@@ -227,7 +227,7 @@ func TestImageBuildSnapshotsAVerifiedBuilderAndDeletesIt(t *testing.T) {
 func TestImageBuildWithoutTheMarkerTakesNoImage(t *testing.T) {
 	f := builtFake(t)
 	f.console = "boot...\npowering off\n"
-	_, err := run(buildArgs...)
+	_, err := run(append(buildArgs, "--timeout=3s")...)
 	if err == nil || !strings.Contains(err.Error(), buildMarker) {
 		t.Fatalf("err = %v", err)
 	}
@@ -244,12 +244,14 @@ func TestImageBuildFailuresDeleteTheBuilder(t *testing.T) {
 		prep func(*fakeCloud)
 		want string
 	}{
-		"console unreadable":    {func(f *fakeCloud) { f.fail["POST /compute/v2.1/servers/s1/action"] = 0 }, "console log of the builder"},
-		"snapshot refused":      {func(f *fakeCloud) { f.fail["POST /compute/v2.1/servers/s1/action"] = 1 }, "snapshot:"},
-		"snapshot killed":       {func(f *fakeCloud) { f.imgStates = []string{"queued", "killed"} }, "ended killed"},
-		"snapshot status fails": {func(f *fakeCloud) { f.fail["GET /image/v2/images/img1"] = 0 }, "image status"},
-		"status unreadable":     {func(f *fakeCloud) { f.fail["GET /compute/v2.1/servers/s1"] = 0 }, "builder status"},
-		"builder in error":      {func(f *fakeCloud) { f.srvStatus = "ERROR" }, "never powered off"},
+		"console unreadable":      {func(f *fakeCloud) { f.fail["POST /compute/v2.1/servers/s1/action"] = 0 }, "console read: "},
+		"snapshot refused":        {func(f *fakeCloud) { f.fail["POST /compute/v2.1/servers/s1/action"] = 1 }, "snapshot:"},
+		"snapshot killed":         {func(f *fakeCloud) { f.imgStates = []string{"queued", "killed"} }, "ended killed"},
+		"snapshot status fails":   {func(f *fakeCloud) { f.fail["GET /image/v2/images/img1"] = 0 }, "image status"},
+		"status unreadable":       {func(f *fakeCloud) { f.fail["GET /compute/v2.1/servers/s1"] = 0; f.console = "booting\n" }, "builder status"},
+		"status lost at poweroff": {func(f *fakeCloud) { f.fail["GET /compute/v2.1/servers/s1"] = 1 }, "builder status"},
+		"builder in error":        {func(f *fakeCloud) { f.srvStatus = "ERROR"; f.console = "booting\n" }, "ended in status ERROR"},
+		"off without marker":      {func(f *fakeCloud) { f.console = "booting\n" }, "powered off without " + buildMarker},
 	} {
 		f := builtFake(t)
 		tc.prep(f)
@@ -266,12 +268,27 @@ func TestImageBuildFailuresDeleteTheBuilder(t *testing.T) {
 func TestImageBuildTimesOutAndStillDeletes(t *testing.T) {
 	f := builtFake(t)
 	f.srvStatus = "ACTIVE" // never powers off
+	f.console = "booting...\n"
 	out, err := run(append(buildArgs, "--timeout=1500ms")...)
-	if err == nil || !strings.Contains(err.Error(), "never powered off") {
+	if err == nil || !strings.Contains(err.Error(), "yet (status ACTIVE") {
 		t.Fatalf("err = %v", err)
 	}
 	if has(f, "DELETE /compute/v2.1/servers/s1") == "" || !strings.Contains(out, "builder deleted: s1") {
 		t.Errorf("the timed-out builder was left running:\n%s", out)
+	}
+}
+
+// Nova serves no console once the guest is off: the marker must be read while
+// the builder still runs, before the wait for the power-off.
+func TestImageBuildReadsTheMarkerWhileTheBuilderStillRuns(t *testing.T) {
+	f := builtFake(t)
+	f.srvStatus = "ACTIVE" // marker on the console, never powers off
+	out, err := run(append(buildArgs, "--timeout=1500ms")...)
+	if err == nil || !strings.Contains(err.Error(), "never powered off") || !strings.Contains(out, "builder verified") {
+		t.Fatalf("err = %v\n%s", err, out)
+	}
+	if has(f, "POST /compute/v2.1/servers/s1/action ") != "" {
+		t.Error("an image was taken from a builder that never powered off")
 	}
 }
 
@@ -285,7 +302,7 @@ func TestImageBuildReportsADeletionThatFails(t *testing.T) {
 	f = builtFake(t)
 	f.console = ""
 	f.fail["DELETE /compute/v2.1/servers/s1"] = 0
-	out, err := run(buildArgs...)
+	out, err := run(append(buildArgs, "--timeout=3s")...)
 	if err == nil || !strings.Contains(out, "WARNING: builder s1 was NOT deleted") {
 		t.Errorf("a failed cleanup must be loud: %v\n%s", err, out)
 	}
