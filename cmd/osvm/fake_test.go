@@ -132,7 +132,7 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 	case "PUT /network/v2.0/ports/p1":
 		f.record(r)
 		reply(200, `{"port":{"id":"p1"}}`)
-	case "DELETE /network/v2.0/security-group-rules/r88", "DELETE /network/v2.0/security-group-rules/r445", "DELETE /network/v2.0/security-group-rules/u1":
+	case "DELETE /network/v2.0/security-group-rules/r88", "DELETE /network/v2.0/security-group-rules/r445", "DELETE /network/v2.0/security-group-rules/u1", "DELETE /network/v2.0/security-group-rules/w4", "DELETE /network/v2.0/security-group-rules/w6":
 		f.record(r)
 		reply(204, ``)
 	case "GET /network/v2.0/networks":
