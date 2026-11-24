@@ -231,6 +231,7 @@ func RootCmd() *cobra.Command {
 	f.IntVar(&o.VolumeGB, "volume-gb", 0, "create and attach a data volume of this many GB (0: none)")
 	f.BoolVar(&o.DryRun, "dry-run", false, "resolve everything, create nothing")
 	root.AddCommand(create)
+	root.AddCommand(imageCmd(&cloud), quotaCmd(&cloud))
 	return root
 }
 
@@ -664,6 +665,15 @@ func connect(ctx context.Context, cloud string) (*clients, error) {
 		c.volume = v
 	}
 	return c, nil
+}
+
+func projectID(pc *gophercloud.ProviderClient) string {
+	if r, ok := pc.GetAuthResult().(tokens.CreateResult); ok {
+		if p, err := r.ExtractProject(); err == nil && p != nil {
+			return p.ID
+		}
+	}
+	return ""
 }
 
 func projectName(pc *gophercloud.ProviderClient) string {
