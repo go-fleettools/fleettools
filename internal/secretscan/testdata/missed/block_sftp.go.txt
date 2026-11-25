@@ -1,0 +1,22 @@
+package backuptarget
+
+// Excerpt of openweft/weft-block v0.2.0 (pkg/backuptarget/sftp.go:53-55,
+// pkg/types/types.go:23-29): the env name is a const, read elsewhere through
+// os.Getenv(envSFTPPassword).
+
+import "os"
+
+const (
+	envSFTPPassword      = "WEFT_SFTP_PASSWORD"
+	envSFTPKeyFile       = "WEFT_SFTP_KEY_FILE"
+	envSFTPKeyPassphrase = "WEFT_SFTP_KEY_PASSPHRASE"
+	envSFTPKnownHosts    = "WEFT_SFTP_KNOWN_HOSTS"
+	AWSAccessKeyID       = "AWS_ACCESS_KEY_ID"
+	AWSSecretKey         = "AWS_SECRET_ACCESS_KEY"
+	AWSSessionToken      = "AWS_SESSION_TOKEN"
+	CIFSPassword         = "CIFS_PASSWORD"
+	StatusTokenExpired   = "TOKEN_EXPIRED"
+	MaxTokens            = "MAX_TOKENS"
+)
+
+func auth() string { return os.Getenv(envSFTPPassword) }

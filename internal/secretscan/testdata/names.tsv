@@ -1,6 +1,20 @@
 # name<TAB>class  (none = not a secret input). Each line is a name the heuristic
 # was written against; a false positive found in the wild is added HERE first.
 # --- true positives: the value itself
+smtp_pass	plaintext
+WEFT_LOOM_SMTP_PASS	plaintext
+WEFT_CUBEFS_ACCESS_KEY	plaintext
+AWS_SECRET_ACCESS_KEY	plaintext
+AWS_ACCESS_KEY_ID	plaintext
+AWS_SESSION_TOKEN	plaintext
+WEBUI_SESSION_KEY	plaintext
+sessionKey	plaintext
+WEFT_BACKUP_PASSPHRASE	plaintext
+WEFT_SFTP_KEY_PASSPHRASE	plaintext
+AWSSecretKey	plaintext
+secret_access_key	plaintext
+access_key_file	path
+WEFT_BACKUP_PASSPHRASE_ENV	env
 password	plaintext
 Password	plaintext
 db_password	plaintext
@@ -86,6 +100,17 @@ api_key_header	none
 sort_key	none
 cache_key	none
 keyboard	none
+passthrough	none
+PASSTHROUGH	none
+bypass	none
+compass	none
+max_pass	none
+session	none
+session_id	none
+access	none
+access_log	none
+aws_access_key_id_file	none
+auth_header	none
 tokenizer_path	none
 passwordless	none
 client_id	none

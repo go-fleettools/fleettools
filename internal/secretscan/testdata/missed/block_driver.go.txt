@@ -1,0 +1,17 @@
+package main
+
+// Excerpt of openweft/weft-block v0.2.0 (cmd/weft-block/driver.go:860-862):
+// the env name is read from another variable, and the literal is only the
+// fallback. os.Getenv never sees a literal.
+
+import "os"
+
+func passphrase() string {
+	envName := os.Getenv("WEFT_BACKUP_PASSPHRASE_ENV")
+	if envName == "" {
+		envName = "WEFT_BACKUP_PASSPHRASE"
+	}
+	return os.Getenv(envName)
+}
+
+func main() { _ = passphrase() }

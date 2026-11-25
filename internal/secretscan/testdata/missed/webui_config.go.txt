@@ -1,0 +1,13 @@
+package config
+
+// Excerpt of openweft/weft-webui v0.5.0 (internal/config/config.go:384): the
+// cookie HMAC key. `session` was not a word that makes `key` a secret.
+
+import "os"
+
+func load() []byte {
+	if v := os.Getenv("WEBUI_SESSION_KEY"); v != "" {
+		return []byte(v)
+	}
+	return nil
+}

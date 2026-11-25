@@ -46,6 +46,8 @@ var secretWords = map[string]bool{
 	"password": true, "passwd": true, "passphrase": true, "secret": true,
 	"credential": true, "credentials": true, "apikey": true,
 	"token": true, "tokens": true,
+	// SMTP_PASS (weft-loom-server) and the one-word AWS spellings.
+	"pass": true, "accesskey": true, "secretkey": true,
 }
 
 // keyPrefix: a bare `key` is a map key, a cache key, a sort key. It denotes a
@@ -57,6 +59,9 @@ var keyPrefix = map[string]bool{
 	// key material typed on the command line.
 	"negotiation": true, "plane": true, "zone": true,
 	"hmac": true, "jwt": true, "shared": true,
+	// WEFT_CUBEFS_ACCESS_KEY, AWS_SECRET_ACCESS_KEY, WEBUI_SESSION_KEY (a
+	// cookie HMAC key), AUTH_KEY.
+	"access": true, "session": true, "auth": true,
 }
 
 // quantifier words turn `token` into a COUNT (LLM tokens, a rate limit), which
@@ -98,6 +103,9 @@ func Tokens(name string) []string {
 // Classify says whether name denotes a secret input and how it is received.
 func Classify(name string) Class {
 	toks := Tokens(name)
+	if awsKeyID(toks) {
+		return Plaintext
+	}
 	class := Plaintext
 	if n := len(toks); n > 0 {
 		if c, ok := suffixClass[toks[n-1]]; ok {
@@ -117,6 +125,13 @@ func Classify(name string) Class {
 		}
 	}
 	return class
+}
+
+// awsKeyID: AWS_ACCESS_KEY_ID ends in `id`, so no secret word is last, yet the
+// SDK reads it together with the secret key and it names the account.
+func awsKeyID(t []string) bool {
+	n := len(t)
+	return n >= 4 && t[0] == "aws" && t[n-3] == "access" && t[n-2] == "key" && t[n-1] == "id"
 }
 
 func denotes(t []string) bool {

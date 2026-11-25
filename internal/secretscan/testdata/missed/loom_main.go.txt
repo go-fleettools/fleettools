@@ -1,0 +1,22 @@
+package main
+
+// Excerpt of openweft/weft-loom-server v0.4.0 (cmd/weft-loom/main.go:138 and
+// internal/server/prespawn.go:159): an env value written straight into a
+// struct field. The names say PASS and ACCESS_KEY, which the first vocabulary
+// did not know.
+
+import (
+	"net/http"
+	"os"
+)
+
+type smtpCfg struct{ Password string }
+type cubefs struct{ AccessKey string }
+
+func main() {
+	_ = smtpCfg{
+		Password: os.Getenv("WEFT_LOOM_SMTP_PASS"),
+	}
+	_ = cubefs{AccessKey: os.Getenv("WEFT_CUBEFS_ACCESS_KEY")}
+	_ = http.ListenAndServe(":8080", nil)
+}
