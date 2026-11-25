@@ -102,9 +102,38 @@ func TestAnUnreadableOrganisationIsUnread(t *testing.T) {
 }
 
 func TestRefusesAQuestionThatCannotBePut(t *testing.T) {
+	// Nothing may be asked of GitHub when the question is refused.
+	never := func(args ...string) ([]byte, error) {
+		t.Errorf("gh called with %v", args)
+		return nil, errors.New("never")
+	}
 	for _, args := range [][]string{{"o"}, {"--since", "yesterday", "o"}, {"--since", "2026-11-15"}} {
-		if code, out := drive(t, fakeGH(nil), ok, args...); code != 2 {
+		if code, out := drive(t, never, ok, args...); code != 2 {
 			t.Errorf("%v: status %d:\n%s", args, code, out)
 		}
+	}
+}
+
+func TestHelpAsksNothingOfGitHub(t *testing.T) {
+	never := func(args ...string) ([]byte, error) {
+		t.Errorf("gh called with %v", args)
+		return nil, errors.New("never")
+	}
+	code, out := drive(t, never, ok, "--help")
+	if code != 0 || !strings.Contains(out, "UNREAD") {
+		t.Errorf("status %d:\n%s", code, out)
+	}
+	// cobra answers --help before RunE; the guard is for a caller that reaches
+	// RunE with the flag set, and with no --since the work would be refused (2).
+	oldGH := runGH
+	runGH = never
+	defer func() { runGH = oldGH }()
+	c := RootCmd()
+	c.InitDefaultHelpFlag()
+	if err := c.Flags().Set("help", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RunE(c, nil); err != nil {
+		t.Errorf("RunE with --help set: %v", err)
 	}
 }
