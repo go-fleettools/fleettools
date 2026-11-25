@@ -12,7 +12,7 @@ var refSchemes = []string{
 
 var placeholderWords = []string{
 	"change", "your", "example", "xxx", "redacted", "todo", "dummy",
-	"placeholder", "secret", "password", "token", "hunter2", "foo", "test",
+	"placeholder", "secret", "password", "pass", "token", "hunter2", "foo", "test",
 }
 
 // usable says whether value is something that could be a secret written out:
@@ -136,6 +136,10 @@ func ScanText(rel string, content []byte) []Finding {
 			f := newFinding("sample", source, Plaintext, name, rel, i+1)
 			f.Placeholder = placeholder(value)
 			out = append(out, f)
+		} else if scheme, pw, ok := URLSecret(l); ok {
+			f := newFinding("sample", source, Plaintext, URLName(scheme), rel, i+1)
+			f.Placeholder = placeholder(pw)
+			out = append(out, f)
 		}
 	}
 	return out
@@ -147,6 +151,9 @@ func scanUnit(rel string, lines []string) []Finding {
 		out = append(out, newFinding("input", source, Plaintext, name, rel, i+1))
 	}
 	for i, l := range lines {
+		if scheme, pw, ok := URLSecret(l); ok && !placeholder(pw) {
+			add("unit-env", URLName(scheme), i)
+		}
 		key, val, ok := strings.Cut(strings.TrimSpace(l), "=")
 		if !ok {
 			continue

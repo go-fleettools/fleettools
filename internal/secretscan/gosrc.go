@@ -25,8 +25,8 @@ type Finding struct {
 
 var exposure = map[string]int{
 	"unit-env": 4, "unit-flag": 4,
-	"flag": 3,
-	"env":  2, "config-field": 2,
+	"flag": 3, "url-userinfo": 3,
+	"env": 2, "config-field": 2, "env-const": 2, "env-implicit": 2,
 	"sample": 1, "doc": 1,
 }
 
@@ -55,6 +55,11 @@ var serveMarkers = []string{
 	"ListenAndServe", "net.Listen(", ".Serve(", "http.Server{",
 	"signal.Notify", "NewTicker", "ListenConfig",
 }
+
+// awsExplicit: a file that names its credentials provider does not fall back
+// on the SDK's default chain (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+// AWS_SESSION_TOKEN read from the environment).
+var awsExplicit = []string{"WithCredentialsProvider", "credentials.New", "WithCredentials("}
 
 var permMarkers = []string{".Perm()", "Mode()&", "0o077", "0077", "0o177", "0177"}
 
@@ -98,13 +103,58 @@ func ScanGo(rel string, src []byte) (GoScan, error) {
 		// daemon is configured with.
 		return gs, nil
 	}
+	// the env name of a secret held in a variable: a const, or the default of
+	// an indirection (`name := os.Getenv("X_ENV"); if name == "" { name =
+	// "X" }`), is where the name is spelled, whatever os.Getenv later gets.
+	envConst := func(e ast.Expr) {
+		if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if s, _ := strconv.Unquote(lit.Value); envLike(s) {
+				add("env-const", s, lit.Pos())
+			}
+		}
+	}
+	awsSDK := false
+	for _, p := range gs.Imports {
+		awsSDK = awsSDK || strings.HasPrefix(p, "github.com/aws/aws-sdk-go")
+	}
+	explicitAWS := false
+	for _, m := range awsExplicit {
+		explicitAWS = explicitAWS || bytes.Contains(src, []byte(m))
+	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
+		case *ast.ValueSpec:
+			for _, v := range x.Values {
+				envConst(v)
+			}
+		case *ast.AssignStmt:
+			for _, v := range x.Rhs {
+				envConst(v)
+			}
+		case *ast.BasicLit:
+			// a number or a rune literal does not unquote to a URL.
+			s, _ := strconv.Unquote(x.Value)
+			if scheme, pw, ok := URLSecret(s); ok {
+				line := fset.Position(x.Pos()).Line
+				if placeholder(pw) {
+					fd := newFinding("sample", "sample", Plaintext, URLName(scheme), rel, line)
+					fd.Placeholder = true
+					gs.Findings = append(gs.Findings, fd)
+				} else {
+					gs.Findings = append(gs.Findings,
+						newFinding("input", "url-userinfo", Plaintext, URLName(scheme), rel, line))
+				}
+			}
 		case *ast.Field:
 			if name := fieldName(x); name != "" {
 				add("config-field", name, x.Pos())
 			}
 		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && awsSDK && !explicitAWS &&
+				(sel.Sel.Name == "LoadDefaultConfig" || sel.Sel.Name == "NewSession") {
+				gs.Findings = append(gs.Findings, newFinding("input", "env-implicit", Plaintext,
+					"AWS_SECRET_ACCESS_KEY", rel, fset.Position(x.Pos()).Line))
+			}
 			if source, name, pathy := callName(x); name != "" {
 				if pathy && Classify(name) == Plaintext {
 					// the flag takes a path (or a prompt), not the value.

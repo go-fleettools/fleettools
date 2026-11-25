@@ -1,0 +1,16 @@
+package backuptarget
+
+// Excerpt of openweft/weft-block v0.2.0 (pkg/backuptarget/s3.go:96): no
+// credentials provider is named, so the SDK's default chain reads
+// AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN.
+
+import (
+	"context"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+)
+
+func load(ctx context.Context) error {
+	_, err := awsconfig.LoadDefaultConfig(ctx)
+	return err
+}
