@@ -27,7 +27,7 @@ func fakeGo(t *testing.T) {
 // With nothing exempt the vet is one `go vet ./...`: no package list is asked for.
 func TestVetModuleWithoutExemptionsDoesNotListPackages(t *testing.T) {
 	fakeGo(t)
-	if _, err := vetModule(config{goos: "linux", goarch: "amd64"}, t.TempDir(), nil); err != nil {
+	if _, err := vetModule(config{goos: "linux", goarch: "amd64"}, t.TempDir(), nil, nil); err != nil {
 		t.Fatalf("a plain vet asked for a package list: %v", err)
 	}
 }
@@ -36,7 +36,7 @@ func TestVetModuleWithoutExemptionsDoesNotListPackages(t *testing.T) {
 // packages vetted and call it a pass.
 func TestVetModuleFailsWhenThePackageListFails(t *testing.T) {
 	fakeGo(t)
-	_, err := vetModule(config{goos: "linux", goarch: "amd64"}, t.TempDir(), map[string][]string{"seeker": {"-stdmethods=false"}})
+	_, err := vetModule(config{goos: "linux", goarch: "amd64"}, t.TempDir(), map[string][]string{"seeker": {"-stdmethods=false"}}, nil)
 	if err == nil {
 		t.Fatal("go list failed and the vet passed")
 	}
