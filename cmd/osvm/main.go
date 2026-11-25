@@ -20,6 +20,12 @@
 // sources from one --from /32, or from --from-json-url/--json-key (for GitHub
 // webhooks: https://api.github.com/meta and hooks), refusing a world-open prefix.
 //
+//	osvm --cloud NAME delete --id ID --name N [--with-volumes] [--with-group] [--confirm]
+//
+// delete removes one server designated by its id AND its exact name (a mismatch,
+// a wildcard or an absent flag is refused); without --confirm it prints the plan
+// and deletes nothing.
+//
 // allow refuses a group that more than one server carries unless --allow-shared
 // is given: a rule there opens every one of them.
 //
@@ -234,7 +240,7 @@ func RootCmd() *cobra.Command {
 	f.IntVar(&o.VolumeGB, "volume-gb", 0, "create and attach a data volume of this many GB (0: none)")
 	f.BoolVar(&o.DryRun, "dry-run", false, "resolve everything, create nothing")
 	root.AddCommand(create)
-	root.AddCommand(imageCmd(&cloud), quotaCmd(&cloud), hostKeysCmd(&cloud), groupCmd(&cloud), imageBuildCmd(&cloud), resizeCmd(&cloud))
+	root.AddCommand(imageCmd(&cloud), quotaCmd(&cloud), hostKeysCmd(&cloud), groupCmd(&cloud), imageBuildCmd(&cloud), resizeCmd(&cloud), deleteCmd(&cloud))
 	return root
 }
 

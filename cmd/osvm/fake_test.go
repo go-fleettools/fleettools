@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeCloud is a minimal OpenStack: keystone v3 plus the compute, network and
@@ -39,6 +40,13 @@ type fakeCloud struct {
 	srvStatus string
 	// groupsByName answers a security-group listing filtered by ?name=.
 	groupsByName map[string]string
+	// track makes a deleted server, volume, floating IP or group disappear
+	// (404 afterwards); stuck keeps the server after its DELETE.
+	slowGet           time.Duration // delay of every GET of server s1
+	track, stuck      bool
+	srvGone, volGone  bool
+	attachments, fips string
+	volNames          map[string]string // volume id -> name
 }
 
 const (
@@ -144,6 +152,14 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 	case "GET /network/v2.0/subnets":
 		reply(200, `{"subnets":[{"id":"sb","name":"private-subnet","cidr":"192.168.1.0/24","network_id":"n1","enable_dhcp":true}]}`)
 	case "GET /network/v2.0/floatingips":
+		if r.URL.Query().Get("port_id") != "" {
+			if f.fips != "" {
+				reply(200, f.fips)
+				return
+			}
+			reply(200, `{"floatingips":[]}`)
+			return
+		}
 		reply(200, `{"floatingips":[{"floating_ip_address":"157.136.254.110","fixed_ip_address":"192.168.1.67","status":"ACTIVE"}]}`)
 	case "GET /compute/v2.1/os-keypairs":
 		reply(200, `{"keypairs":[{"keypair":{"name":"k","fingerprint":"aa:bb"}}]}`)
@@ -182,7 +198,34 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 	case "POST /compute/v2.1/servers":
 		f.record(r)
 		reply(202, `{"server":{"id":"s1"}}`)
+	case "GET /compute/v2.1/servers/s1/os-volume_attachments":
+		if f.attachments != "" {
+			reply(200, f.attachments)
+			return
+		}
+		reply(200, `{"volumeAttachments":[]}`)
+	case "DELETE /network/v2.0/floatingips/fip1", "DELETE /network/v2.0/security-groups/g1", "DELETE /network/v2.0/security-groups/g2":
+		f.record(r)
+		reply(204, ``)
+	case "DELETE /volume/v3/p1/volumes/v1", "DELETE /volume/v3/p1/volumes/v2":
+		f.record(r)
+		f.mu.Lock()
+		f.volGone = f.track
+		f.mu.Unlock()
+		reply(202, ``)
+	case "GET /volume/v3/p1/volumes/v2":
+		reply(200, `{"volume":{"id":"v2","name":"`+f.volNames["v2"]+`","status":"available","size":8}}`)
 	case "GET /compute/v2.1/servers/s1":
+		f.mu.Lock()
+		gone := f.srvGone
+		f.mu.Unlock()
+		if f.slowGet > 0 {
+			time.Sleep(f.slowGet)
+		}
+		if gone {
+			reply(404, `{}`)
+			return
+		}
 		if f.srvStatus != "" {
 			reply(200, strings.Replace(serverBody, `"ACTIVE"`, strconv.Quote(f.srvStatus), 1))
 			return
@@ -190,6 +233,9 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 		reply(200, serverBody)
 	case "DELETE /compute/v2.1/servers/s1":
 		f.record(r)
+		f.mu.Lock()
+		f.srvGone = f.track && !f.stuck
+		f.mu.Unlock()
 		reply(204, ``)
 	case "POST /compute/v2.1/servers/s1/action":
 		var b bytes.Buffer
@@ -232,7 +278,14 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 		f.record(r)
 		reply(202, `{"volume":{"id":"v1","name":"vm-data","size":200}}`)
 	case "GET /volume/v3/p1/volumes/v1":
-		reply(200, `{"volume":{"id":"v1","status":"available"}}`)
+		f.mu.Lock()
+		gone := f.volGone
+		f.mu.Unlock()
+		if gone {
+			reply(404, `{}`)
+			return
+		}
+		reply(200, `{"volume":{"id":"v1","name":"vm-data","status":"available","size":200}}`)
 	case "POST /compute/v2.1/servers/s1/os-volume_attachments":
 		f.record(r)
 		reply(200, `{"volumeAttachment":{"id":"v1","volumeId":"v1"}}`)
