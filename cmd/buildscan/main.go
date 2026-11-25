@@ -106,6 +106,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -551,10 +552,12 @@ func vetAll(f finding, dir string) []vetFailure {
 		}
 		done[c.key()] = true
 		var exempt map[string][]string
+		var exclude []*regexp.Regexp
 		if m == "." {
 			exempt = vetExemptions(dir)
+			exclude = vetExclusions(dir)
 		}
-		b, err := vetModule(c, filepath.Join(dir, m), exempt)
+		b, err := vetModule(c, filepath.Join(dir, m), exempt, exclude)
 		if err == nil {
 			continue
 		}
@@ -565,9 +568,10 @@ func vetAll(f finding, dir string) []vetFailure {
 
 // vetModule vets one module for one configuration. Packages the repository's CI
 // vets with checks turned off (vetExemptions) get exactly those flags here too;
-// every other package is vetted plainly. Only the root module has exemptions: the
-// CI lines read are the ones run at the root.
-func vetModule(c config, modDir string, exempt map[string][]string) ([]byte, error) {
+// every other package is vetted plainly. Packages the CI leaves out of its vet
+// altogether (exclude, see vetExclusions) are not vetted. Only the root module has
+// either: the CI lines read are the ones run at the root.
+func vetModule(c config, modDir string, exempt map[string][]string, exclude []*regexp.Regexp) ([]byte, error) {
 	env := append(os.Environ(),
 		"GOOS="+c.goos, "GOARCH="+c.goarch,
 		// GOWORK=off so a workspace on this machine cannot change which
@@ -584,10 +588,11 @@ func vetModule(c config, modDir string, exempt map[string][]string) ([]byte, err
 		cmd.Env = env
 		return cmd.CombinedOutput()
 	}
-	if len(exempt) == 0 {
+	if len(exempt) == 0 && len(exclude) == 0 {
 		return run(append(base, "./...")...)
 	}
-	list, err := run("list", "-f", "{{.ImportPath}}\t{{.Dir}}", "./...")
+	// -e like the CI's own list: a package that cannot load is listed, not fatal.
+	list, err := run("list", "-e", "-f", "{{.ImportPath}}\t{{.Dir}}", "./...")
 	if err != nil {
 		return list, err
 	}
@@ -595,6 +600,9 @@ func vetModule(c config, modDir string, exempt map[string][]string) ([]byte, err
 	for _, ln := range strings.Split(strings.TrimSpace(string(list)), "\n") {
 		ip, d, ok := strings.Cut(ln, "\t")
 		if !ok {
+			continue
+		}
+		if excluded(exclude, ip) {
 			continue
 		}
 		rel, err := filepath.Rel(modDir, d)
