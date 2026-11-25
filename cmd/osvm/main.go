@@ -240,7 +240,7 @@ func RootCmd() *cobra.Command {
 	f.IntVar(&o.VolumeGB, "volume-gb", 0, "create and attach a data volume of this many GB (0: none)")
 	f.BoolVar(&o.DryRun, "dry-run", false, "resolve everything, create nothing")
 	root.AddCommand(create)
-	root.AddCommand(imageCmd(&cloud), quotaCmd(&cloud), hostKeysCmd(&cloud), groupCmd(&cloud), imageBuildCmd(&cloud), resizeCmd(&cloud), deleteCmd(&cloud))
+	root.AddCommand(imageCmd(&cloud), quotaCmd(&cloud), hostKeysCmd(&cloud), groupCmd(&cloud), imageBuildCmd(&cloud), resizeCmd(&cloud), deleteCmd(&cloud), imageBuildWindowsCmd(&cloud))
 	return root
 }
 
@@ -715,7 +715,14 @@ type clients struct {
 }
 
 func connect(ctx context.Context, cloud string) (*clients, error) {
-	pc, err := clientconfig.AuthenticatedClient(ctx, &clientconfig.ClientOpts{Cloud: cloud})
+	// A Windows build outlives the keystone token (about an hour), so the
+	// client must re-authenticate on a 401 instead of failing the whole build.
+	ao, err := clientconfig.AuthOptions(&clientconfig.ClientOpts{Cloud: cloud})
+	if err != nil {
+		return nil, fmt.Errorf("authenticate %q: %w", cloud, err)
+	}
+	ao.AllowReauth = true
+	pc, err := openstack.AuthenticatedClient(ctx, *ao)
 	if err != nil {
 		return nil, fmt.Errorf("authenticate %q: %w", cloud, err)
 	}
