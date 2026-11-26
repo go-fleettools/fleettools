@@ -323,13 +323,35 @@ func assistantParts(raw json.RawMessage) (string, int) {
 // lastTurnOfFile reads the newest turn from the END of the file, in doubling
 // windows from 1 MiB to 64 MiB: a Stop hook must not scan a 900 MB transcript.
 func lastTurnOfFile(path string) (turn, error) {
+	var last turn
+	found, err := tailScan(path, func(r io.Reader) (bool, error) {
+		ts, sawUser, err := turnsOf(r)
+		if err != nil || !sawUser || len(ts) == 0 {
+			return false, err
+		}
+		last = ts[len(ts)-1]
+		return true, nil
+	})
+	if err != nil {
+		return turn{}, err
+	}
+	if !found {
+		return turn{}, fmt.Errorf("no reply text after a user turn in the transcript")
+	}
+	return last, nil
+}
+
+// tailScan feeds scan the END of a file in doubling windows (1 MiB up to 64
+// MiB, each cut to begin on a whole line) until scan reports it found what it
+// looks for or the whole file has been offered.
+func tailScan(path string, scan func(io.Reader) (bool, error)) (bool, error) {
 	st, err := os.Stat(path)
 	if err != nil {
-		return turn{}, fmt.Errorf("transcript: %w", err)
+		return false, fmt.Errorf("transcript: %w", err)
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return turn{}, err
+		return false, err
 	}
 	defer f.Close()
 	size := st.Size()
@@ -341,7 +363,7 @@ func lastTurnOfFile(path string) (turn, error) {
 		buf := make([]byte, win)
 		n, err := f.ReadAt(buf, size-win)
 		if err != nil && err != io.EOF {
-			return turn{}, err
+			return false, err
 		}
 		buf = buf[:n]
 		whole := win == size
@@ -352,18 +374,15 @@ func lastTurnOfFile(path string) (turn, error) {
 				buf = nil
 			}
 		}
-		ts, sawUser, err := turnsOf(bytes.NewReader(buf))
-		if err != nil {
-			return turn{}, err
-		}
-		if sawUser && len(ts) > 0 {
-			return ts[len(ts)-1], nil
+		found, err := scan(bytes.NewReader(buf))
+		if err != nil || found {
+			return found, err
 		}
 		if whole {
 			break
 		}
 	}
-	return turn{}, fmt.Errorf("no reply text after a user turn in the transcript")
+	return false, nil
 }
 
 // ------------------------------------------------------------ the detector

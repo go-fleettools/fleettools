@@ -189,21 +189,23 @@ func TestAgentHook(t *testing.T) {
 		t.Fatalf("Task is an Agent call: %s", out)
 	}
 
-	for name, p := range map[string]string{
-		"another tool":      agentBody(t, unread, "Bash", "", brief),
-		"a subagent":        agentBody(t, unread, "Agent", "sub1", brief),
-		"no transcript":     agentBody(t, "", "Agent", "", brief),
-		"unreadable":        agentBody(t, unread+".missing", "Agent", "", brief),
-		"nothing to judge":  agentBody(t, unread, "Agent", "", "Write a test."),
-		"not JSON":          "{",
-		"nothing to judge2": agentBody(t, unread+".missing", "Agent", "", "Write a test."),
+	for name, c := range map[string]struct{ body, why string }{
+		"another tool":     {agentBody(t, unread, "Bash", "", brief), "not Agent"},
+		"a subagent":       {agentBody(t, unread, "Agent", "sub1", brief), "subagent"},
+		"no transcript":    {agentBody(t, "", "Agent", "", brief), "names no transcript"},
+		"unreadable":       {agentBody(t, unread+".missing", "Agent", "", brief), "transcript:"},
+		"no user turn":     {agentBody(t, write(t, "nu.jsonl", "{}\n"), "Agent", "", brief), "no user turn"},
+		"nothing to judge": {agentBody(t, unread+".missing", "Agent", "", "Write a test."), ""},
+		"not JSON":         {"{", "not JSON"},
 	} {
-		out, errs := agentHookOn(t, p)
+		out, errs := agentHookOn(t, c.body)
 		if strings.TrimSpace(out) != "{}" {
 			t.Errorf("%s: must allow, got %s", name, out)
 		}
-		if name != "nothing to judge" && name != "nothing to judge2" && !strings.Contains(errs, "allowing") {
-			t.Errorf("%s: an allow that is not a verdict must say so: %q", name, errs)
+		// an allow that is not a verdict says why; a brief with nothing to judge
+		// is allowed in silence, without even reading the transcript
+		if c.why == "" && errs != "" || c.why != "" && !strings.Contains(errs, c.why) {
+			t.Errorf("%s: stderr %q, want %q", name, errs, c.why)
 		}
 	}
 }
@@ -215,8 +217,8 @@ func TestAgentHookStdinError(t *testing.T) {
 	c.SetOut(&out)
 	c.SetErr(&errb)
 	c.SetArgs([]string{"--agent-hook"})
-	if err := c.Execute(); err != nil || strings.TrimSpace(out.String()) != "{}" {
-		t.Fatalf("an unreadable payload is allowed: %v %q", err, out.String())
+	if err := c.Execute(); err != nil || strings.TrimSpace(out.String()) != "{}" || !strings.Contains(errb.String(), "cannot read the hook payload") {
+		t.Fatalf("an unreadable payload is allowed, and says so: %v %q %q", err, out.String(), errb.String())
 	}
 }
 

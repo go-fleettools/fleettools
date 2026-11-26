@@ -29,11 +29,9 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 
@@ -223,47 +221,19 @@ func callsOf(m message) []toolBlock {
 // lastTurnCalls reads the tool-call texts of the newest user turn, from the end
 // of the file in doubling windows (as lastTurnOfFile).
 func lastTurnCalls(path string) ([]string, error) {
-	st, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("transcript: %w", err)
-	}
-	f, err := os.Open(path)
+	var calls []string
+	found, err := tailScan(path, func(r io.Reader) (bool, error) {
+		cmds, sawUser, err := callsOfLastTurn(r)
+		calls = cmds
+		return sawUser, err
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	size := st.Size()
-	for i := 0; i < 7; i++ {
-		win := int64(1<<20) << uint(i)
-		if win > size {
-			win = size
-		}
-		buf := make([]byte, win)
-		n, err := f.ReadAt(buf, size-win)
-		if err != nil && err != io.EOF {
-			return nil, err
-		}
-		buf = buf[:n]
-		whole := win == size
-		if !whole {
-			if j := bytes.IndexByte(buf, '\n'); j >= 0 {
-				buf = buf[j+1:]
-			} else {
-				buf = nil
-			}
-		}
-		cmds, sawUser, err := callsOfLastTurn(bytes.NewReader(buf))
-		if err != nil {
-			return nil, err
-		}
-		if sawUser {
-			return cmds, nil
-		}
-		if whole {
-			break
-		}
+	if !found {
+		return nil, fmt.Errorf("no user turn in the transcript")
 	}
-	return nil, fmt.Errorf("no user turn in the transcript")
+	return calls, nil
 }
 
 func callsOfLastTurn(r io.Reader) (cmds []string, sawUser bool, err error) {
