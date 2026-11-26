@@ -33,12 +33,39 @@ type config struct {
 	cgo          cgoSetting // what the workflow says about CGO_ENABLED, if anything
 	dir          string     // the step's working directory, relative; "." at the root
 	where        string     // workflow file and job, for the report
+	files        []string   // `go run x.go`: the files the step compiles, when it names them
+}
+
+// runFilesOf returns the .go files a `go run` command names, in order, or nil
+// when it is not a `go run` of files (a package, a directory, or another verb).
+// ⛔ `go run -tags=examples examples/example.go` compiles ONE file; vetting
+// ./... under its tags compiled the whole tree, where several files each
+// declare main, and called the tree broken.
+func runFilesOf(run string) []string {
+	f := strings.Fields(run)
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] != "go" || f[i+1] != "run" {
+			continue
+		}
+		var out []string
+		for _, a := range f[i+2:] {
+			if strings.HasPrefix(a, "-") && len(out) == 0 {
+				continue
+			}
+			if !strings.HasSuffix(a, ".go") {
+				break
+			}
+			out = append(out, a)
+		}
+		return out
+	}
+	return nil
 }
 
 // key identifies a configuration for deduplication, without its provenance:
 // twenty jobs compiling linux/amd64 are one configuration, named once.
 func (c config) key() string {
-	return c.goos + "/" + c.goarch + " " + strings.Join(c.tags, ",") + " @" + c.dir
+	return c.goos + "/" + c.goarch + " " + strings.Join(c.tags, ",") + " @" + c.dir + " " + strings.Join(c.files, " ")
 }
 
 func (c config) String() string {
@@ -144,6 +171,7 @@ var (
 
 // workflow is as much of a workflow file as this tool reads.
 type workflow struct {
+	Name string            `yaml:"name"`
 	Env  map[string]string `yaml:"env"`
 	Jobs map[string]job    `yaml:"jobs"`
 }
@@ -213,7 +241,7 @@ func configsOfWorkflow(name string, src []byte) (cfgs []config, open []unresolve
 			where = name + ": " + j.Name
 		}
 		for _, m := range expand(j.Strategy.Matrix) {
-			got, un := configsOfJob(where, wf.Env, j, m)
+			got, un := configsOfJob(where, wf.Name, wf.Env, j, m)
 			cfgs = append(cfgs, got...)
 			open = append(open, un...)
 		}
@@ -222,13 +250,20 @@ func configsOfWorkflow(name string, src []byte) (cfgs []config, open []unresolve
 }
 
 // configsOfJob reads one job under one matrix combination.
-func configsOfJob(where string, wfEnv map[string]string, j job, m map[string]string) (cfgs []config, open []unresolved) {
+//
+// ⛔ ${GITHUB_WORKFLOW} is the workflow's `name:` and is read as such: jcmturner/gokrb5's
+// v8 workflow is `name: v8` and runs `cd ${GITHUB_WORKFLOW} && go test ./...`, which
+// named a directory that does not exist and left its module with no lane.
+func configsOfJob(where, wfName string, wfEnv map[string]string, j job, m map[string]string) (cfgs []config, open []unresolved) {
 	host := substAll(runsOnLabels(j.RunsOn), m)
 	// The job's defaults: the workflow's env, then the job's, each substituted.
 	base := merge(subst(wfEnv, m), subst(j.Env, m))
 
 	for _, st := range j.Steps {
 		block := substText(st.Run, m)
+		if wfName != "" && !strings.ContainsAny(wfName, " \t$/\\\"'") {
+			block = strings.NewReplacer("${GITHUB_WORKFLOW}", wfName, "$GITHUB_WORKFLOW", wfName).Replace(block)
+		}
 		if !goCmdRE.MatchString(block) {
 			continue
 		}
@@ -239,6 +274,7 @@ func configsOfJob(where string, wfEnv map[string]string, j job, m map[string]str
 			tags := tagsOf(run, env)
 			cgo := cgoOf(run, env["CGO_ENABLED"])
 			wd := workingDir(substText(st.WorkingDirectory, m), substText(j.Defaults.Run.WorkingDirectory, m), run)
+			files := runFilesOf(run)
 
 			what := st.Name
 			if what == "" {
@@ -259,7 +295,7 @@ func configsOfJob(where string, wfEnv map[string]string, j job, m map[string]str
 			}
 			switch {
 			case goos != "" && goarch != "":
-				cfgs = append(cfgs, config{goos: goos, goarch: goarch, tags: tags, cgo: cgo, dir: wd, where: where})
+				cfgs = append(cfgs, config{goos: goos, goarch: goarch, tags: tags, cgo: cgo, dir: wd, where: where, files: files})
 			case goos != "" || goarch != "":
 				// One half given, the other the runner's: one configuration per
 				// host this job runs on.
@@ -275,7 +311,7 @@ func configsOfJob(where string, wfEnv map[string]string, j job, m map[string]str
 					if goarch != "" {
 						arch = goarch
 					}
-					cfgs = append(cfgs, config{goos: os_, goarch: arch, tags: tags, cgo: cgo, dir: wd, where: where})
+					cfgs = append(cfgs, config{goos: os_, goarch: arch, tags: tags, cgo: cgo, dir: wd, where: where, files: files})
 				}
 			default:
 				for _, h := range host {
@@ -284,7 +320,7 @@ func configsOfJob(where string, wfEnv map[string]string, j job, m map[string]str
 						open = append(open, unresolved{where: where, what: "cannot tell what a " + h + " runner compiles"})
 						continue
 					}
-					cfgs = append(cfgs, config{goos: os_, goarch: arch, tags: tags, cgo: cgo, dir: wd, where: where})
+					cfgs = append(cfgs, config{goos: os_, goarch: arch, tags: tags, cgo: cgo, dir: wd, where: where, files: files})
 				}
 			}
 		}
