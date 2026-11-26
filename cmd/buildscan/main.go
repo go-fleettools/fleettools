@@ -604,6 +604,10 @@ func vetModule(c config, modDir string, exempt map[string][]string, exclude []*r
 		cmd.Env = env
 		return cmd.CombinedOutput()
 	}
+	if len(c.files) > 0 {
+		// `go run x.go` compiled these files and nothing else.
+		return run(append(base, c.files...)...)
+	}
 	if len(exempt) == 0 && len(exclude) == 0 {
 		return run(append(base, "./...")...)
 	}

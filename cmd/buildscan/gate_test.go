@@ -674,3 +674,38 @@ func TestVetRecordsAPassForANestedModule(t *testing.T) {
 		t.Fatalf("a nested module could not be vetted from the root: %q", msg)
 	}
 }
+
+// ⛔ gokrb5's v8 workflow: `name: v8`, steps `cd ${GITHUB_WORKFLOW}`, and an
+// examples lane that runs ONE file of a directory whose files each declare main.
+// ${GITHUB_WORKFLOW} named no directory, and vetting ./... under -tags=examples
+// compiled every example at once.
+func TestVetRecordsAPassForANestedModuleWithAGoRunLane(t *testing.T) {
+	dir := newClone(t, false)
+	git(t, dir, "rm", "-q", "go.mod", "a.go")
+	write(t, dir, ".github/workflows/v8.yml", "name: v8\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n"+
+		"      - run: |\n          cd ${GITHUB_WORKFLOW}\n          go test ./...\n"+
+		"      - run: |\n          cd ${GITHUB_WORKFLOW}\n          go run -tags=\"examples\" examples/example.go\n")
+	write(t, dir, "v8/go.mod", "module example.test/v8\n\ngo 1.27\n")
+	write(t, dir, "v8/a.go", "package a\n")
+	write(t, dir, "v8/examples/example.go", "//go:build examples\n\npackage main\n\nfunc main() {}\n")
+	write(t, dir, "v8/examples/other.go", "//go:build examples\n\npackage main\n\nfunc main() {}\n")
+	git(t, dir, "add", "-A")
+	git(t, dir, "commit", "-q", "-m", "nested module with a go run lane")
+	if msg := vetRun(t, dir); !strings.Contains(msg, "recorded a vet pass") {
+		t.Fatalf("%q", msg)
+	}
+}
+
+func TestRunFilesOf(t *testing.T) {
+	for in, want := range map[string]string{
+		`go run -tags="examples" examples/example.go`: "examples/example.go",
+		"go run a.go b.go":          "a.go b.go",
+		"go run ./cmd/x":            "",
+		"go test ./...":             "",
+		"go run -race x.go arg.txt": "x.go",
+	} {
+		if got := strings.Join(runFilesOf(in), " "); got != want {
+			t.Errorf("runFilesOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
