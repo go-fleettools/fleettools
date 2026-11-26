@@ -19,6 +19,7 @@
 //	                                               GET .../pulls/{n}: "number", "state", "draft", "title", "html_url", "node_id", "merged", head/base "ref" and "sha"
 //	https://docs.github.com/en/rest/pulls/reviews  POST .../pulls/{n}/reviews: "event" (APPROVE|REQUEST_CHANGES|COMMENT), "body" (required for the last two), "commit_id"; 200
 //	https://docs.github.com/en/graphql/reference/pulls  markPullRequestReadyForReview(input: {pullRequestId}) -> pullRequest; REST has no endpoint for it
+//	https://docs.github.com/en/graphql/reference/mutations#convertpullrequesttodraft  convertPullRequestToDraft(input: {pullRequestId}) -> pullRequest; the counterpart of ready (read 2026-11-26)
 package main
 
 import (
@@ -53,7 +54,7 @@ const longHelp = `Pull-request writes, after showing the pull request.
 
   ghpr <owner/repo> create --head BRANCH --title T --body-file F [--base-branch B] [--draft]
   ghpr <owner/repo> <n> edit [--title T] [--body-file F]
-  ghpr <owner/repo> <n> close | reopen | ready | update-branch
+  ghpr <owner/repo> <n> close | reopen | ready | draft | update-branch
   ghpr <owner/repo> <n> review --approve|--comment|--request-changes [--body-file F]
 
 The pull request is read and printed first (number, state, draft, title,
@@ -71,8 +72,8 @@ It prints the number and URL the API reports. --base-branch is the target branch
 because --base is the API URL; --dry-run sends only reads.
 
 update-branch pins expected_head_sha to the head just read, so it cannot update
-a head that moved. ready is a GraphQL mutation (REST has none), sent with the
-same token. A review is pinned to the head just read; --comment and
+a head that moved. ready and draft (open, non-draft pull request back to draft)
+are GraphQL mutations (REST has none), sent with the same token. A review is pinned to the head just read; --comment and
 --request-changes need a body.
 
 Exit status: 0 done, 2 refused or failed.`
@@ -108,8 +109,8 @@ type opts struct {
 func RootCmd() *cobra.Command {
 	var o opts
 	cmd := &cobra.Command{
-		Use:          "ghpr <owner/repo> create | ghpr <owner/repo> <number> edit|close|reopen|ready|update-branch|review",
-		Short:        "Create, edit, close, reopen, ready, update or review a GitHub pull request",
+		Use:          "ghpr <owner/repo> create | ghpr <owner/repo> <number> edit|close|reopen|ready|draft|update-branch|review",
+		Short:        "Create, edit, close, reopen, ready, draft, update or review a GitHub pull request",
 		Long:         longHelp,
 		Args:         argsOK,
 		SilenceUsage: true,
@@ -183,9 +184,9 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 	}
 	verb := args[2]
 	switch verb {
-	case "edit", "close", "reopen", "ready", "update-branch", "review":
+	case "edit", "close", "reopen", "ready", "draft", "update-branch", "review":
 	default:
-		return fmt.Errorf("verb %q: want edit, close, reopen, ready, update-branch or review", verb)
+		return fmt.Errorf("verb %q: want edit, close, reopen, ready, draft, update-branch or review", verb)
 	}
 	if verb != "edit" && o.titleSet {
 		return errors.New("--title applies to edit")
@@ -268,6 +269,13 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		}
 		if !p.Draft {
 			return errors.New("ready: it is not a draft")
+		}
+	case "draft":
+		if p.State != "open" {
+			return fmt.Errorf("draft: it is %s", p.State)
+		}
+		if p.Draft {
+			return errors.New("draft: it is already a draft")
 		}
 	case "update-branch":
 		if p.State != "open" {
@@ -353,7 +361,7 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		if p.NodeID == "" {
 			return errors.New("ready: the read carried no node_id for the GraphQL mutation")
 		}
-		if err := markReady(c, o.base, tok, p.NodeID); err != nil {
+		if err := draftMutation(c, o.base, tok, p.NodeID, "ready", "markPullRequestReadyForReview"); err != nil {
 			return err
 		}
 		got, err := getPull(c, o.base, tok, owner, repo, num)
@@ -363,6 +371,21 @@ func run(cmd *cobra.Command, args []string, o opts) error {
 		fmt.Fprintf(out, "now: [%s] %s\n", stateWord(got), got.Title)
 		if got.Draft {
 			return errors.New("ready: accepted but the pull request is still a draft")
+		}
+	case "draft":
+		if p.NodeID == "" {
+			return errors.New("draft: the read carried no node_id for the GraphQL mutation")
+		}
+		if err := draftMutation(c, o.base, tok, p.NodeID, "draft", "convertPullRequestToDraft"); err != nil {
+			return err
+		}
+		got, err := getPull(c, o.base, tok, owner, repo, num)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "now: [%s] %s\n", stateWord(got), got.Title)
+		if !got.Draft {
+			return errors.New("draft: accepted but the pull request is not a draft")
 		}
 	case "review":
 		m := map[string]string{"event": event, "commit_id": p.Head.SHA}
@@ -393,11 +416,12 @@ func stateWord(p pull) string {
 	return p.State
 }
 
-// markReady sends the GraphQL mutation. GraphQL answers 200 with an "errors"
-// array on failure, so the status alone proves nothing.
-func markReady(c *http.Client, base, tok, nodeID string) error {
+// draftMutation sends the GraphQL mutation `name` (markPullRequestReadyForReview
+// or convertPullRequestToDraft; verb prefixes the errors). GraphQL answers 200
+// with an "errors" array on failure, so the status alone proves nothing.
+func draftMutation(c *http.Client, base, tok, nodeID, verb, name string) error {
 	payload, err := json.Marshal(map[string]any{
-		"query":     "mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } } }",
+		"query":     "mutation($id: ID!) { " + name + "(input: {pullRequestId: $id}) { pullRequest { isDraft } } }",
 		"variables": map[string]string{"id": nodeID},
 	})
 	if err != nil {
@@ -411,22 +435,20 @@ func markReady(c *http.Client, base, tok, nodeID string) error {
 		Errors []struct {
 			Message string `json:"message"`
 		} `json:"errors"`
-		Data struct {
-			M *struct {
-				PR *struct {
-					IsDraft bool `json:"isDraft"`
-				} `json:"pullRequest"`
-			} `json:"markPullRequestReadyForReview"`
+		Data map[string]*struct {
+			PR *struct {
+				IsDraft bool `json:"isDraft"`
+			} `json:"pullRequest"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(b, &got); err != nil {
-		return fmt.Errorf("ready: %w", err)
+		return fmt.Errorf("%s: %w", verb, err)
 	}
 	if len(got.Errors) > 0 {
-		return fmt.Errorf("ready: GraphQL: %s", firstLine(got.Errors[0].Message))
+		return fmt.Errorf("%s: GraphQL: %s", verb, firstLine(got.Errors[0].Message))
 	}
-	if got.Data.M == nil || got.Data.M.PR == nil {
-		return errors.New("ready: the reply carried no pull request")
+	if m := got.Data[name]; m == nil || m.PR == nil {
+		return fmt.Errorf("%s: the reply carried no pull request", verb)
 	}
 	return nil
 }
