@@ -325,12 +325,13 @@ func assistantParts(raw json.RawMessage) (string, int) {
 func lastTurnOfFile(path string) (turn, error) {
 	var last turn
 	found, err := tailScan(path, func(r io.Reader) (bool, error) {
-		ts, sawUser, err := turnsOf(r)
-		if err != nil || !sawUser || len(ts) == 0 {
-			return false, err
+		// turnsOf lists a turn only after a user turn opened it, so a window
+		// that began mid-turn lists none.
+		ts, _, err := turnsOf(r)
+		for _, t := range ts {
+			last = t
 		}
-		last = ts[len(ts)-1]
-		return true, nil
+		return len(ts) > 0, err
 	})
 	if err != nil {
 		return turn{}, err
