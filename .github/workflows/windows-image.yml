@@ -87,4 +87,4 @@ jobs:
             --out "$RUNNER_TEMP/windows.qcow2" $upload
       - name: remove the credentials and the disks
         if: always()
-        run: rm -rf "$RUNNER_TEMP/os" "$RUNNER_TEMP/media" "$RUNNER_TEMP/work" "$RUNNER_TEMP/windows.qcow2"
+        run: rm -rf "${RUNNER_TEMP:?}/os" "${RUNNER_TEMP:?}/media" "${RUNNER_TEMP:?}/work" "${RUNNER_TEMP:?}/windows.qcow2"
