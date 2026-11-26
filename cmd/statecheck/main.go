@@ -67,14 +67,25 @@ an external system without a tool call of the turn having read it.
 
   statecheck --transcript <file>    report on the last reply of a transcript
   statecheck --hook                 answer a Stop payload read on stdin
-  statecheck sweep [--last N] [--show] [dir]
+  statecheck --agent-hook           answer a PreToolUse payload for the Agent tool:
+                                    deny a brief that directs work onto a named
+                                    machine (ssh user@host, an IP) or asserts a
+                                    host's capacity (vCPU, GB of RAM, "has KVM")
+                                    when no earlier call of the turn read that
+                                    host (nproc, free, lscpu, uptime ...)
+  statecheck sweep [--last N] [--show] [--agents] [dir]
                                     replay the detector over the N newest
                                     transcripts under dir (default
-                                    ~/.claude/projects) and count refusals
+                                    ~/.claude/projects) and count refusals;
+                                    --agents replays the Agent-brief gate
 
 Wire it beside replystamp, in the Stop hooks of ~/.claude/settings.json:
 
   command: ~/.local/bin/statecheck --hook
+
+and, in the PreToolUse hooks with matcher "Agent":
+
+  command: ~/.local/bin/statecheck --agent-hook
 
 A refusal names the sentence and the read that would answer it. The answer is
 « run that read now and restate with its output », or say « non vérifié ».
@@ -110,7 +121,7 @@ func serve(args []string, stdout, stderr io.Writer, plain func()) {
 func hookMode(args []string) bool {
 	for _, a := range args {
 		name, value, _ := strings.Cut(a, "=")
-		if name != "--hook" && name != "-hook" {
+		if name != "--hook" && name != "-hook" && name != "--agent-hook" && name != "-agent-hook" {
 			continue
 		}
 		if on, err := strconv.ParseBool(value); err != nil || on {
@@ -134,14 +145,18 @@ var stateDir = func() (string, error) {
 // RootCmd builds the command.
 func RootCmd() *cobra.Command {
 	var transcript string
-	var hook bool
-	c := cli.New("statecheck [--transcript <file> | --hook | sweep]",
+	var hook, agentHook bool
+	c := cli.New("statecheck [--transcript <file> | --hook | --agent-hook | sweep]",
 		"refuse a reply that states an external system's state without reading it", longHelp)
 	c.Flags().StringVar(&transcript, "transcript", "", "transcript .jsonl to read the last reply from")
 	c.Flags().BoolVar(&hook, "hook", false, "read a Stop hook payload on stdin and answer the hook protocol")
+	c.Flags().BoolVar(&agentHook, "agent-hook", false, "read a PreToolUse payload for the Agent tool on stdin and deny a brief that states a machine's state unread")
 	c.RunE = func(cmd *cobra.Command, args []string) error {
 		if cli.HelpRequested(cmd) {
 			return nil
+		}
+		if agentHook {
+			return runAgentHook(cmd)
 		}
 		if hook {
 			return runHook(cmd)
@@ -606,7 +621,7 @@ func statePath(session string) (string, bool) {
 
 func sweepCmd() *cobra.Command {
 	var last int
-	var show bool
+	var show, agents bool
 	c := &cobra.Command{
 		Use:           "sweep [dir]",
 		Short:         "count the refusals the detector would have made over old transcripts",
@@ -616,6 +631,7 @@ func sweepCmd() *cobra.Command {
 	}
 	c.Flags().IntVar(&last, "last", 50, "how many of the newest transcripts to replay")
 	c.Flags().BoolVar(&show, "show", false, "print every refused sentence")
+	c.Flags().BoolVar(&agents, "agents", false, "replay the Agent-brief gate instead of the reply detector")
 	c.RunE = func(cmd *cobra.Command, args []string) error {
 		dir := ""
 		if len(args) == 1 {
@@ -642,6 +658,20 @@ func sweepCmd() *cobra.Command {
 				unreadable++
 				continue
 			}
+			if agents {
+				b, r, err := sweepAgents(fh, func(x agentFinding) {
+					if show {
+						fmt.Fprintf(out, "%s\t%s\t%s\n", filepath.Base(f), x.host, clip(x.sentence, 240))
+					}
+				})
+				fh.Close()
+				if err != nil {
+					unreadable++
+					continue
+				}
+				turnsN, refused = turnsN+b, refused+r
+				continue
+			}
 			ts, _, err := turnsOf(fh)
 			fh.Close()
 			if err != nil {
@@ -660,7 +690,11 @@ func sweepCmd() *cobra.Command {
 				}
 			}
 		}
-		fmt.Fprintf(out, "transcripts %d, unreadable %d, replies judged %d, refused %d\n", len(files), unreadable, turnsN, refused)
+		what := "replies"
+		if agents {
+			what = "briefs"
+		}
+		fmt.Fprintf(out, "transcripts %d, unreadable %d, %s judged %d, refused %d\n", len(files), unreadable, what, turnsN, refused)
 		return nil
 	}
 	return c
