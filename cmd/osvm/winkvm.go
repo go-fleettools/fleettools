@@ -110,24 +110,73 @@ func imageBuildWindowsKVMCmd(cloud *string) *cobra.Command {
 }
 
 // kvmPaths are the files one build uses.
-type kvmPaths struct{ root, boot, answer, vars, code, console, iso, virtio, monitor, screens string }
+type kvmPaths struct{ root, answer, vars, code, console, iso, virtio, monitor, screens string }
 
-// screenshot asks the QEMU monitor on sock for a PNG of the guest display.
-func screenshot(sock, file string) error {
+// monitorCommand sends one command to the QEMU monitor on sock and gives QEMU
+// settle to run it before the connection closes.
+func monitorCommand(sock, line string, settle time.Duration) error {
 	c, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
-	if _, err := fmt.Fprintf(c, "screendump %s -f png\n", file); err != nil {
+	if _, err := fmt.Fprintf(c, "%s\n", line); err != nil {
 		return err
 	}
 	buf := make([]byte, 4096)
 	_, _ = c.Read(buf) // banner; the command runs before the connection closes
-	time.Sleep(2 * time.Second)
+	time.Sleep(settle)
 	return nil
 }
+
+// screenshot asks the QEMU monitor on sock for a PNG of the guest display.
+func screenshot(sock, file string) error {
+	return monitorCommand(sock, "screendump "+file+" -f png", 2*time.Second)
+}
+
+// pressAnyKey answers "Press any key to boot from CD or DVD...": the Windows
+// ISO's UEFI boot image (efisys.bin) waits for a key for five seconds and then
+// gives up, and nothing is at the keyboard. Enter is sent every few seconds
+// for keyFor, longer than firmware start-up plus that prompt; once Windows is
+// installed the disk boots first and the CD is never asked. (The alternative,
+// remastering the 5 GB ISO with efisys_noprompt.bin, costs a full copy of it.)
+func pressAnyKey(ctx context.Context, sock string, keyFor time.Duration) {
+	end := time.Now().Add(keyFor)
+	for time.Now().Before(end) {
+		_ = monitorCommand(sock, "sendkey ret", 300*time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// kvmMinRAMMB is Windows 11's 4 GB minimum, recorded as Glance min_ram.
+const kvmMinRAMMB = 4096
+
+// writeAnswerISO writes the answer ISO (autounattend.xml and the provisioning
+// script) with a fresh random Administrator password that lives only there.
+func writeAnswerISO(path, edition string, w io.Writer) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists", path)
+	}
+	pw, err := randomPassword(24)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "building answer ISO %s\n", path)
+	files := map[string][]byte{"autounattend.xml": []byte(unattendXML(edition, pw)), provisionName: []byte(provisionScript)}
+	if err := buildAnswerISO(path, files); err != nil {
+		os.Remove(path)
+		return err
+	}
+	return nil
+}
+
+// keyFor is how long pressAnyKey keeps sending Enter.
+const keyFor = 3 * time.Minute
 
 // snapshot writes one numbered screenshot and says how big the Windows disk
 // has grown, the cheapest sign that Setup is copying files.
@@ -146,14 +195,18 @@ func snapshot(p kvmPaths, n int, w io.Writer) {
 	fmt.Fprintln(w, "screenshot:", f)
 }
 
-// qemuArgs is the whole QEMU command line. The Windows disk is the first SATA
-// disk and the first boot device; it is blank, so the firmware falls through to
-// the boot disk (Windows Setup), and after the install it boots the root. The
-// installer ISO, the answer ISO and the driver ISO are CDs on the same AHCI
-// controller; the guest console (COM1) goes to a file the host reads.
+// qemuArgs is the whole QEMU command line. The Windows disk is the ONLY fixed
+// disk (so Setup's DiskID 0 is it) and the first boot device; it is blank, so
+// the firmware falls through to the Windows installer ISO attached as a CD (the
+// second boot device, the standard way to install Windows under QEMU), and
+// after the install it boots the disk. The answer ISO and the driver ISO are
+// further CDs on the same AHCI controller; Setup finds Autounattend.xml on the
+// root of a CD and install.wim on its own boot media. The guest console (COM1)
+// goes to a file the host reads. -vmx hides VMX from the guest so Windows does
+// not try to turn on VBS/Hyper-V on top of the runner's nested KVM.
 func qemuArgs(o kvmOpts, p kvmPaths) []string {
 	accel := "kvm"
-	cpu := "host"
+	cpu := "host,-vmx"
 	if o.NoKVM {
 		accel, cpu = "tcg", "qemu64"
 	}
@@ -166,12 +219,10 @@ func qemuArgs(o kvmOpts, p kvmPaths) []string {
 		"-device", "ich9-ahci,id=ahci",
 		"-drive", "if=none,id=root,format=qcow2,file=" + p.root,
 		"-device", "ide-hd,drive=root,bus=ahci.0,bootindex=1",
-		"-drive", "if=none,id=boot,format=raw,file=" + p.boot,
-		"-device", "ide-hd,drive=boot,bus=ahci.1,bootindex=2",
 		"-drive", "if=none,id=iso,format=raw,media=cdrom,readonly=on,file=" + p.iso,
-		"-device", "ide-cd,drive=iso,bus=ahci.2",
+		"-device", "ide-cd,drive=iso,bus=ahci.1,bootindex=2",
 		"-drive", "if=none,id=answer,format=raw,media=cdrom,readonly=on,file=" + p.answer,
-		"-device", "ide-cd,drive=answer,bus=ahci.3",
+		"-device", "ide-cd,drive=answer,bus=ahci.2",
 	}
 	if p.monitor != "" {
 		a = append(a, "-monitor", "unix:"+p.monitor+",server,nowait")
@@ -179,7 +230,7 @@ func qemuArgs(o kvmOpts, p kvmPaths) []string {
 		a = append(a, "-monitor", "none")
 	}
 	if p.virtio != "" {
-		a = append(a, "-drive", "if=none,id=virtio,format=raw,media=cdrom,readonly=on,file="+p.virtio, "-device", "ide-cd,drive=virtio,bus=ahci.4")
+		a = append(a, "-drive", "if=none,id=virtio,format=raw,media=cdrom,readonly=on,file="+p.virtio, "-device", "ide-cd,drive=virtio,bus=ahci.3")
 	}
 	return append(a,
 		"-netdev", "user,id=n0", "-device", "e1000e,netdev=n0",
@@ -213,7 +264,7 @@ func consoleProgress(out string, seen map[string]bool, w io.Writer) (marker bool
 func imageBuildWindowsKVM(ctx context.Context, cloud string, o kvmOpts, w io.Writer) error {
 	if o.DryRun {
 		fmt.Fprint(w, strings.ReplaceAll(unattendXML(o.Edition, "PASSWORD"), "\r", ""))
-		fmt.Fprintln(w, o.Qemu, strings.Join(qemuArgs(o, kvmPaths{root: "ROOT.qcow2", boot: "BOOT.img", answer: "ANSWER.iso", vars: "VARS.fd", code: "CODE.fd", console: "CONSOLE.log", iso: o.ISO, virtio: o.VirtioISO}), " "))
+		fmt.Fprintln(w, o.Qemu, strings.Join(qemuArgs(o, kvmPaths{root: "ROOT.qcow2", answer: "ANSWER.iso", vars: "VARS.fd", code: "CODE.fd", console: "CONSOLE.log", iso: o.ISO, virtio: o.VirtioISO}), " "))
 		return nil
 	}
 	if _, err := os.Stat(o.Out); err == nil {
@@ -255,23 +306,28 @@ func imageBuildWindowsKVM(ctx context.Context, cloud string, o kvmOpts, w io.Wri
 	}
 	defer os.RemoveAll(dir)
 	p := kvmPaths{
-		root: filepath.Join(dir, "root.qcow2"), boot: filepath.Join(dir, "boot.img"), vars: filepath.Join(dir, "vars.fd"),
+		root: filepath.Join(dir, "root.qcow2"), vars: filepath.Join(dir, "vars.fd"), answer: filepath.Join(dir, "answer.iso"),
 		code: code, console: filepath.Join(dir, "console.log"), iso: o.ISO, virtio: o.VirtioISO,
 	}
-	p.answer = answerISOPath(p.boot)
+	// the monitor socket is always there: it presses the "any key" of the
+	// installer CD, and takes the screenshots when asked for
+	// (a unix socket path is limited to about 100 bytes: keep it short)
+	mdir, err := os.MkdirTemp("", "osvm-m")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(mdir)
+	p.monitor = filepath.Join(mdir, "m.sock")
 	if o.ScreenDir != "" {
 		if err := os.MkdirAll(o.ScreenDir, 0o755); err != nil {
 			return err
 		}
-		// a unix socket path is limited to about 100 bytes: keep it short
-		mdir, err := os.MkdirTemp("", "osvm-m")
-		if err != nil {
-			return err
-		}
-		defer os.RemoveAll(mdir)
-		p.monitor, p.screens = filepath.Join(mdir, "m.sock"), o.ScreenDir
+		p.screens = o.ScreenDir
 	}
-	if _, err := prepareBootDisk(bctx, winOpts{ISO: o.ISO, SevenZip: o.SevenZip, WorkDir: work, Edition: o.Edition}, p.boot, w); err != nil {
+	if err := checkEdition(bctx, o.SevenZip, o.ISO, work, o.Edition, w); err != nil {
+		return err
+	}
+	if err := writeAnswerISO(p.answer, o.Edition, w); err != nil {
 		return err
 	}
 	vars, err := os.ReadFile(varsTpl)
@@ -304,7 +360,7 @@ func imageBuildWindowsKVM(ctx context.Context, cloud string, o kvmOpts, w io.Wri
 		return err
 	}
 	fmt.Fprintln(w, "project:", projectName(c.provider))
-	id, err := ensureSourceImage(bctx, c, sourceImage{Name: o.Name, Path: o.Out, Format: "qcow2", Props: windowsImageProps}, "", w)
+	id, err := ensureSourceImage(bctx, c, sourceImage{Name: o.Name, Path: o.Out, Format: "qcow2", Props: windowsImageProps, MinDisk: o.DiskGB, MinRAM: kvmMinRAMMB}, "", w)
 	if err != nil {
 		return err
 	}
@@ -323,6 +379,11 @@ func runQemu(ctx context.Context, o kvmOpts, p kvmPaths, w io.Writer) error {
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	if p.monitor != "" {
+		kctx, kcancel := context.WithCancel(ctx)
+		defer kcancel()
+		go pressAnyKey(kctx, p.monitor, keyFor)
+	}
 	seen := map[string]bool{}
 	marker := false
 	read := func() string {

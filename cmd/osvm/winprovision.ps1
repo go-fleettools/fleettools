@@ -60,8 +60,11 @@ try {
     Install-Msi "$work\$($file.filename)" @()
 
     Say 'cloudbase-init'
-    Fetch 'https://cloudbase.it/downloads/CloudbaseInitSetup_Stable_x64.msi' "$work\cloudbase-init.msi"
-    Say ("cloudbase-init sha256 " + (Get-FileHash -Algorithm SHA256 "$work\cloudbase-init.msi").Hash.ToLower())
+    # pinned: a new stable release is adopted by changing this version and hash
+    $cbSha = '0e7fa42e0cbc0ce7657f85730b0c6cc7afc4087a3639df0ff51a721a0be19bd5'
+    Fetch 'https://cloudbase.it/downloads/CloudbaseInitSetup_1_1_8_x64.msi' "$work\cloudbase-init.msi"
+    $got = (Get-FileHash -Algorithm SHA256 "$work\cloudbase-init.msi").Hash.ToLower()
+    if ($got -ne $cbSha) { throw "cloudbase-init sha256 $got is not the pinned $cbSha" }
     Install-Msi "$work\cloudbase-init.msi" @('USERNAME=Administrator', 'LOGGINGSERIALPORTNAME=COM1')
 
     $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -70,6 +73,14 @@ try {
     $cb = 'C:\Program Files\Cloudbase Solutions\Cloudbase-Init'
     if (-not (Test-Path "$cb\conf\Unattend.xml")) { throw 'cloudbase-init Unattend.xml is missing' }
     if (-not (Get-Service cloudbase-init -ErrorAction SilentlyContinue)) { throw 'cloudbase-init service is missing' }
+
+    # cloudbase's Logon.ps1 runs this before sysprep: it sets the service to
+    # start on demand and writes SetupComplete.cmd, so the service starts only
+    # once Windows Setup has completed on the deployed instance.
+    & cmd.exe /c "`"$cb\bin\SetSetupComplete.cmd`""
+    if ($LASTEXITCODE -ne 0) { throw "SetSetupComplete.cmd exited $LASTEXITCODE" }
+    if (-not (Test-Path "$env:windir\Setup\Scripts\SetupComplete.cmd")) { throw 'SetupComplete.cmd was not written' }
+    Say 'SetSetupComplete.cmd ran'
 
     # virtio drivers (when the virtio-win CD is attached): staged in the driver
     # store so a virtio NIC or disk can be switched on later; best effort.
@@ -95,6 +106,7 @@ try {
     Remove-Item -Recurse -Force $work
     Say 'OSVM-IMAGE-BUILD-OK'
     Start-Sleep 20
+    net user osvmbuild /active:no | Out-Null
     & "$env:windir\System32\Sysprep\sysprep.exe" /generalize /oobe /shutdown /unattend:"$cb\conf\Unattend.xml"
     Start-Sleep 600
     throw 'sysprep returned without shutting down'

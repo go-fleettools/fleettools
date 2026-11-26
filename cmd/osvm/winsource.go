@@ -26,6 +26,9 @@ type sourceImage struct {
 	Path   string
 	Format string            // Glance disk_format: iso or raw
 	Props  map[string]string // extra Glance properties (hw_*, os_*)
+	// MinDisk (GB) and MinRAM (MiB) make Nova refuse a flavor too small for the
+	// image with an explicit error instead of a boot that never completes.
+	MinDisk, MinRAM int
 }
 
 // hashFile returns the lowercase SHA-256 of a file and its size.
@@ -81,6 +84,7 @@ func ensureSourceImage(ctx context.Context, c *clients, s sourceImage, wantSHA s
 	}
 	im, err := images.Create(ctx, c.image, images.CreateOpts{
 		Name: s.Name, Visibility: &privateVisibility, DiskFormat: s.Format, ContainerFormat: "bare",
+		MinDisk: s.MinDisk, MinRAM: s.MinRAM,
 		Tags: []string{"osvm-image-build-windows"}, Properties: props,
 	}).Extract()
 	if err != nil {
