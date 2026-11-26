@@ -709,3 +709,16 @@ func TestRunFilesOf(t *testing.T) {
 		}
 	}
 }
+
+func TestGithubWorkflowReadsAsTheWorkflowName(t *testing.T) {
+	src := "name: v8\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          cd ${GITHUB_WORKFLOW}\n          go test ./...\n"
+	cfgs, _ := configsOfWorkflow("v8.yml", []byte(src))
+	if len(cfgs) != 1 || cfgs[0].dir != "v8" {
+		t.Fatalf("%+v, want one configuration in v8", cfgs)
+	}
+	// a name that is not a plain directory name is not followed
+	cfgs, _ = configsOfWorkflow("x.yml", []byte(strings.Replace(src, "name: v8", "name: a b", 1)))
+	if len(cfgs) != 1 || cfgs[0].dir != "." {
+		t.Fatalf("%+v, want the root", cfgs)
+	}
+}
