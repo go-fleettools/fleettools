@@ -35,6 +35,8 @@ type server struct {
 	draft, merged                bool
 	ignore                       bool // accept PATCH and ignore it
 	gqlErr                       bool
+	noNode, gqlEmpty, getFails   bool // no node_id; a mutation reply without pullRequest; GET fails after the mutation
+	mutated                      bool
 	auth, methods, paths, bodies []string
 }
 
@@ -62,8 +64,16 @@ func newServer(t *testing.T) *server {
 		if s.merged {
 			m = "true"
 		}
+		if s.getFails && s.mutated {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		node := "PR_node"
+		if s.noNode {
+			node = ""
+		}
 		_, _ = io.WriteString(w, `{"number":7,"state":"`+s.state+`","draft":`+d+`,"merged":`+m+`,"title":"`+s.title+
-			`","html_url":"https://github.com/o/r/pull/7","node_id":"PR_node","head":{"ref":"feat","sha":"abc123"},"base":{"ref":"main"}}`)
+			`","html_url":"https://github.com/o/r/pull/7","node_id":"`+node+`","head":{"ref":"feat","sha":"abc123"},"base":{"ref":"main"}}`)
 	})
 	mux.HandleFunc("/repos/o/r/pulls/7/update-branch", func(w http.ResponseWriter, r *http.Request) {
 		s.record(r)
@@ -78,6 +88,11 @@ func newServer(t *testing.T) *server {
 		s.record(r)
 		if s.gqlErr {
 			_, _ = io.WriteString(w, `{"errors":[{"message":"Pull request is not a draft"}]}`)
+			return
+		}
+		s.mutated = true
+		if s.gqlEmpty {
+			_, _ = io.WriteString(w, `{"data":{"convertPullRequestToDraft":null}}`)
 			return
 		}
 		if strings.Contains(s.bodies[len(s.bodies)-1], "convertPullRequestToDraft") {
@@ -279,6 +294,28 @@ func TestDraftGraphQLErrorIsAnError(t *testing.T) {
 	_, err := exec(t, s, "o/r", "7", "draft")
 	if err == nil || !strings.Contains(err.Error(), "draft: GraphQL") {
 		t.Fatalf("err %v, want the GraphQL message", err)
+	}
+}
+
+func TestDraftRefusesWhatItCannotSendOrVerify(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*server)
+		want  string
+	}{
+		{"no node id", func(s *server) { s.noNode = true }, "no node_id"},
+		{"empty reply", func(s *server) { s.gqlEmpty = true }, "no pull request"},
+		{"re-read fails", func(s *server) { s.getFails = true }, "500"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newServer(t)
+			c.setup(s)
+			_, err := exec(t, s, "o/r", "7", "draft")
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err %v, want %q", err, c.want)
+			}
+		})
 	}
 }
 
