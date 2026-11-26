@@ -37,6 +37,7 @@ type fakeCloud struct {
 	serversBody, portsBody string
 	imgStates              []string
 	attachedVolume         bool   // GET of v1 reports it in use
+	unnamedVolume          bool   // GET of v1 reports an empty name
 	imgVisibility          string // GET of img1 reports it (default "private")
 	// srvStatus replaces the status GET of server s1 answers (default ACTIVE).
 	srvStatus string
@@ -295,6 +296,10 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if f.attachedVolume {
 			reply(200, `{"volume":{"id":"v1","name":"vm-data","status":"in-use","size":200,"attachments":[{"server_id":"s1"}]}}`)
+			return
+		}
+		if f.unnamedVolume {
+			reply(200, `{"volume":{"id":"v1","name":"","status":"available","size":200}}`)
 			return
 		}
 		reply(200, `{"volume":{"id":"v1","name":"vm-data","status":"available","size":200}}`)

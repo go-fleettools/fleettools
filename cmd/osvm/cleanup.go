@@ -18,9 +18,18 @@ import (
 type idName struct {
 	ID, Name string
 	Confirm  bool
+	// Unnamed addresses a resource that has NO name (a volume Nova leaked): the
+	// id alone, and the resource must really be unnamed.
+	Unnamed bool
 }
 
 func (o idName) validate() error {
+	if o.Unnamed {
+		if o.ID == "" || o.Name != "" || strings.ContainsAny(o.ID, "*?[]") {
+			return errors.New("--unnamed takes one exact --id and no --name")
+		}
+		return nil
+	}
 	if o.ID == "" || o.Name == "" {
 		return errors.New("--id and --name are required: a resource is deleted by its id AND its name")
 	}
@@ -49,6 +58,7 @@ func volumeDeleteCmd(cloud *string) *cobra.Command {
 	f := c.Flags()
 	f.StringVar(&o.ID, "id", "", "volume id (exact, required)")
 	f.StringVar(&o.Name, "name", "", "volume name (exact, required, must match the id's volume)")
+	f.BoolVar(&o.Unnamed, "unnamed", false, "the volume has no name (Nova leaks such volumes): give --id only; a volume that has a name is refused")
 	f.BoolVar(&o.Confirm, "confirm", false, "act; without it the plan is printed and nothing is deleted")
 	return c
 }

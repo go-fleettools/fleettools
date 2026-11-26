@@ -50,6 +50,33 @@ func TestVolumeDeleteRefusals(t *testing.T) {
 	}
 }
 
+func TestVolumeDeleteUnnamed(t *testing.T) {
+	fastDelete(t)
+	f := newFake(t)
+	f.track = true
+	f.unnamedVolume = true
+	out, err := run(cloudArg, "volume-delete", "--id=v1", "--unnamed", "--confirm")
+	if err != nil || !strings.Contains(out, "volume deleted:  id=v1") {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if d := f.deletes(); len(d) != 1 {
+		t.Fatalf("deletes %v", d)
+	}
+	for _, args := range [][]string{{"--id=v1", "--name=x", "--unnamed"}, {"--unnamed"}, {"--id=v*", "--unnamed"}} {
+		if _, err := run(append([]string{cloudArg, "volume-delete"}, args...)...); err == nil || !strings.Contains(err.Error(), "--unnamed takes one exact --id and no --name") {
+			t.Errorf("%v: err = %v", args, err)
+		}
+	}
+	// a named volume is refused: --unnamed is not a way around the name
+	g := newFake(t)
+	if _, err := run(cloudArg, "volume-delete", "--id=v1", "--unnamed", "--confirm"); err == nil || !strings.Contains(err.Error(), `is named "vm-data", not ""`) {
+		t.Fatalf("err = %v", err)
+	}
+	if d := g.deletes(); len(d) != 0 {
+		t.Fatalf("deleted %v", d)
+	}
+}
+
 func TestVolumeDeleteRefusesAnAttachedVolume(t *testing.T) {
 	f := newFake(t)
 	f.attachedVolume = true
