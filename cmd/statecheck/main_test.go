@@ -23,6 +23,8 @@ func TestDetect(t *testing.T) {
 		{"install the app fr", "Installez l'App sur go-authn.", "asks"},
 		{"app to install fr", "L'App GitHub à installer sur go-authn.", "asks"},
 		// English
+		{"lesson quota RAM bloquant", "Le quota RAM bloquant.", "asserts"},
+		{"lesson app installed no read", "L'App est installée sur go-authn.", "asserts"},
 		{"quota exhausted en", "The GitHub API quota is exhausted until 15:49.", "asserts"},
 		{"please install en", "Please install the GitHub App on the org.", "asks"},
 		{"need to enable en", "You need to enable the runner in the pool.", "asks"},
@@ -47,6 +49,12 @@ func TestDetect(t *testing.T) {
 		{"crypto key", "La clé enregistrée est bloquée par un PIN.", ""},
 		{"no noun", "Le test est bloqué.", ""},
 		{"no predicate", "Le quota GitHub est une ressource partagée.", ""},
+		// false positives found by `statecheck sweep` on 2026-11-26 (31 refusals, 50 transcripts)
+		{"fp cloud-init verb", "Or GARM installe le runner au démarrage via cloud-init, que ces images n'ont en général pas.", ""},
+		{"fp spec quota never", "- un quota dépassé donne une erreur claire, jamais de données corrompues ;", ""},
+		{"fp present verb quota", "Lancer plus d'agents ne produit donc pas plus de travail : le quota s'épuise juste plus tôt, puis tout s'arrête.", ""},
+		{"fp present verb bloque", "ne réinitialise pas le quota → bloque la suite sur module ET kernel ;", ""},
+		{"fp general limits", "Les limites de session se règlent ailleurs et un runner dépasse rarement le quota.", ""},
 		{"empty", "", ""},
 	}
 	for _, c := range cases {
