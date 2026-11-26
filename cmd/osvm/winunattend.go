@@ -20,6 +20,12 @@ const provisionName = "osvm-provision.ps1"
 // not need to pass: Setup itself is told so in WinPE, before it looks.
 var labConfigBypass = []string{"BypassTPMCheck", "BypassSecureBootCheck", "BypassRAMCheck", "BypassCPUCheck", "BypassStorageCheck"}
 
+// buildUser is the local administrator the build logs on as. On a client SKU
+// the built-in Administrator is disabled, so (as in cloudbase's
+// UnattendTemplate.xml, "needed on a client OS") the answer file creates a
+// LocalAccount for the AutoLogon; provisioning deactivates it before sysprep.
+const buildUser = "osvmbuild"
+
 // genericProKey is Microsoft's published generic installation key for Windows
 // 11 Pro. It only selects the edition and skips Setup's product-key page: it
 // does not activate, and the system stays unactivated.
@@ -128,11 +134,20 @@ func unattendXML(edition, password string) string {
         <AdministratorPassword><Value>`)
 	b.WriteString(xmlEscape(password))
 	b.WriteString(`</Value><PlainText>true</PlainText></AdministratorPassword>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Password><Value>`)
+	b.WriteString(xmlEscape(password))
+	b.WriteString(`</Value><PlainText>true</PlainText></Password>
+            <Name>` + buildUser + `</Name>
+            <Group>Administrators</Group>
+          </LocalAccount>
+        </LocalAccounts>
       </UserAccounts>
       <AutoLogon>
         <Enabled>true</Enabled>
         <LogonCount>3</LogonCount>
-        <Username>Administrator</Username>
+        <Username>` + buildUser + `</Username>
         <Password><Value>`)
 	b.WriteString(xmlEscape(password))
 	b.WriteString(`</Value><PlainText>true</PlainText></Password>
