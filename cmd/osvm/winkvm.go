@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 // disk goes to Glance.
 type kvmOpts struct {
 	Name, ISO, ISOSHA, VirtioISO, SevenZip, WorkDir, Out string
+	ScreenDir                                            string
 	Qemu, QemuImg, OVMFCode, OVMFVars, Edition           string
 	CPUs, MemoryMB, DiskGB                               int
 	Timeout                                              time.Duration
@@ -90,6 +92,7 @@ func imageBuildWindowsKVMCmd(cloud *string) *cobra.Command {
 	f.StringVar(&o.VirtioISO, "virtio-iso", "", "virtio-win driver ISO attached as a CD; its Windows 11 amd64 drivers are staged in the driver store (optional)")
 	f.StringVar(&o.SevenZip, "seven-zip", "7zz", "7-Zip binary that reads the ISO's UDF file system")
 	f.StringVar(&o.WorkDir, "work-dir", "", "directory for the boot disk, the root disk and the console log (default <user config dir>/osvm/windows-build)")
+	f.StringVar(&o.ScreenDir, "screenshot-dir", "", "directory that receives a PNG of the guest display every 5 minutes and when the build ends (to see where an install hangs)")
 	f.StringVar(&o.Out, "out", "", "path of the finished qcow2 (required; must not exist)")
 	f.StringVar(&o.Qemu, "qemu", "qemu-system-x86_64", "QEMU system emulator")
 	f.StringVar(&o.QemuImg, "qemu-img", "qemu-img", "qemu-img binary")
@@ -107,7 +110,41 @@ func imageBuildWindowsKVMCmd(cloud *string) *cobra.Command {
 }
 
 // kvmPaths are the files one build uses.
-type kvmPaths struct{ root, boot, answer, vars, code, console, iso, virtio string }
+type kvmPaths struct{ root, boot, answer, vars, code, console, iso, virtio, monitor, screens string }
+
+// screenshot asks the QEMU monitor on sock for a PNG of the guest display.
+func screenshot(sock, file string) error {
+	c, err := net.DialTimeout("unix", sock, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
+	if _, err := fmt.Fprintf(c, "screendump %s -f png\n", file); err != nil {
+		return err
+	}
+	buf := make([]byte, 4096)
+	_, _ = c.Read(buf) // banner; the command runs before the connection closes
+	time.Sleep(2 * time.Second)
+	return nil
+}
+
+// snapshot writes one numbered screenshot and says how big the Windows disk
+// has grown, the cheapest sign that Setup is copying files.
+func snapshot(p kvmPaths, n int, w io.Writer) {
+	if fi, err := os.Stat(p.root); err == nil {
+		fmt.Fprintf(w, "disk: %d MiB allocated\n", fi.Size()>>20)
+	}
+	if p.monitor == "" || p.screens == "" {
+		return
+	}
+	f := filepath.Join(p.screens, fmt.Sprintf("screen-%03d.png", n))
+	if err := screenshot(p.monitor, f); err != nil {
+		fmt.Fprintln(w, "screenshot:", err)
+		return
+	}
+	fmt.Fprintln(w, "screenshot:", f)
+}
 
 // qemuArgs is the whole QEMU command line. The Windows disk is the first SATA
 // disk and the first boot device; it is blank, so the firmware falls through to
@@ -123,7 +160,7 @@ func qemuArgs(o kvmOpts, p kvmPaths) []string {
 	a := []string{
 		"-machine", "q35,accel=" + accel, "-cpu", cpu,
 		"-smp", fmt.Sprint(o.CPUs), "-m", fmt.Sprint(o.MemoryMB),
-		"-display", "none", "-monitor", "none", "-serial", "file:" + p.console,
+		"-display", "none", "-serial", "file:" + p.console,
 		"-drive", "if=pflash,format=raw,readonly=on,file=" + p.code,
 		"-drive", "if=pflash,format=raw,file=" + p.vars,
 		"-device", "ich9-ahci,id=ahci",
@@ -135,6 +172,11 @@ func qemuArgs(o kvmOpts, p kvmPaths) []string {
 		"-device", "ide-cd,drive=iso,bus=ahci.2",
 		"-drive", "if=none,id=answer,format=raw,media=cdrom,readonly=on,file=" + p.answer,
 		"-device", "ide-cd,drive=answer,bus=ahci.3",
+	}
+	if p.monitor != "" {
+		a = append(a, "-monitor", "unix:"+p.monitor+",server,nowait")
+	} else {
+		a = append(a, "-monitor", "none")
 	}
 	if p.virtio != "" {
 		a = append(a, "-drive", "if=none,id=virtio,format=raw,media=cdrom,readonly=on,file="+p.virtio, "-device", "ide-cd,drive=virtio,bus=ahci.4")
@@ -217,6 +259,18 @@ func imageBuildWindowsKVM(ctx context.Context, cloud string, o kvmOpts, w io.Wri
 		code: code, console: filepath.Join(dir, "console.log"), iso: o.ISO, virtio: o.VirtioISO,
 	}
 	p.answer = answerISOPath(p.boot)
+	if o.ScreenDir != "" {
+		if err := os.MkdirAll(o.ScreenDir, 0o755); err != nil {
+			return err
+		}
+		// a unix socket path is limited to about 100 bytes: keep it short
+		mdir, err := os.MkdirTemp("", "osvm-m")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(mdir)
+		p.monitor, p.screens = filepath.Join(mdir, "m.sock"), o.ScreenDir
+	}
 	if _, err := prepareBootDisk(bctx, winOpts{ISO: o.ISO, SevenZip: o.SevenZip, WorkDir: work, Edition: o.Edition}, p.boot, w); err != nil {
 		return err
 	}
@@ -277,6 +331,7 @@ func runQemu(ctx context.Context, o kvmOpts, p kvmPaths, w io.Writer) error {
 		marker = marker || m
 		return fail
 	}
+	ticks, shots := 0, 0
 	for {
 		select {
 		case err := <-done:
@@ -291,12 +346,18 @@ func runQemu(ctx context.Context, o kvmOpts, p kvmPaths, w io.Writer) error {
 			}
 			return nil
 		case <-ctx.Done():
+			snapshot(p, 999, w)
 			_ = cmd.Process.Kill()
 			<-done
 			read()
 			return fmt.Errorf("the guest did not finish (marker seen: %t): %w", marker, ctx.Err())
 		case <-time.After(10 * time.Second):
+			if ticks++; ticks%30 == 0 {
+				shots++
+				snapshot(p, shots, w)
+			}
 			if fail := read(); fail != "" {
+				snapshot(p, 998, w)
 				_ = cmd.Process.Kill()
 				<-done
 				return fmt.Errorf("the guest reported a failure: %s", fail)

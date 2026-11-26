@@ -67,6 +67,23 @@ func TestQemuArgsLayout(t *testing.T) {
 	}
 }
 
+func TestQemuArgsMonitor(t *testing.T) {
+	monitor := func(a []string) string {
+		for i, x := range a {
+			if x == "-monitor" && i+1 < len(a) {
+				return a[i+1]
+			}
+		}
+		return "<absent>"
+	}
+	if got := monitor(qemuArgs(kvmOpts{CPUs: 1, MemoryMB: 4096}, kvmPaths{})); got != "none" {
+		t.Fatalf("no monitor wanted, got %q", got)
+	}
+	if got := monitor(qemuArgs(kvmOpts{CPUs: 1, MemoryMB: 4096}, kvmPaths{monitor: "/m/m.sock"})); got != "unix:/m/m.sock,server,nowait" {
+		t.Fatalf("monitor socket missing, got %q", got)
+	}
+}
+
 func TestConsoleProgress(t *testing.T) {
 	seen := map[string]bool{}
 	var w bytes.Buffer

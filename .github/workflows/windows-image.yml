@@ -87,7 +87,16 @@ jobs:
           "$RUNNER_TEMP/osvm" --cloud "$OS_CLOUD" image-build-windows-kvm \
             --iso "$RUNNER_TEMP/media/windows.iso" --iso-sha256 bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650 \
             --virtio-iso "$RUNNER_TEMP/media/virtio.iso" --work-dir "$RUNNER_TEMP/work" --seven-zip 7z \
+            --screenshot-dir "$RUNNER_TEMP/screens" --timeout 100m \
             --out "$RUNNER_TEMP/windows.qcow2" $upload
+      - name: guest screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: guest-screens
+          path: ${{ runner.temp }}/screens
+          if-no-files-found: ignore
+          retention-days: 14
       - name: remove the credentials and the disks
         if: always()
-        run: rm -rf "${RUNNER_TEMP:?}/os" "${RUNNER_TEMP:?}/media" "${RUNNER_TEMP:?}/work" "${RUNNER_TEMP:?}/windows.qcow2"
+        run: rm -rf "${RUNNER_TEMP:?}/os" "${RUNNER_TEMP:?}/media" "${RUNNER_TEMP:?}/work" "${RUNNER_TEMP:?}/screens" "${RUNNER_TEMP:?}/windows.qcow2"
