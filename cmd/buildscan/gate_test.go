@@ -657,3 +657,20 @@ func TestVetStillFailsWithoutTheCIExemption(t *testing.T) {
 		t.Fatalf("a package the CI does not exempt was vetted with a check off: %q", msg)
 	}
 }
+
+// ⛔ A repository whose only go.mod is NESTED (jcmturner/gokrb5: v8/go.mod, the
+// workflows at the root) could not be vetted from any directory: `--dir <root>`
+// ran `go vet ./...` where there is no module, `--dir v8` found no workflows.
+func TestVetRecordsAPassForANestedModule(t *testing.T) {
+	dir := newClone(t, true)
+	git(t, dir, "rm", "-q", "go.mod", "a.go")
+	write(t, dir, "v8/go.mod", "module example.test/v8\n\ngo 1.27\n")
+	write(t, dir, "v8/a.go", "package a\n\nimport \"unsafe\"\n\nvar _ = unsafe.Sizeof(0)\n")
+	write(t, dir, "v8/fuzz_test.go", "//go:build go1.18\n\npackage a\n")
+	git(t, dir, "add", "-A")
+	git(t, dir, "commit", "-q", "-m", "nested module")
+	msg := vetRun(t, dir)
+	if !strings.Contains(msg, "recorded a vet pass") {
+		t.Fatalf("a nested module could not be vetted from the root: %q", msg)
+	}
+}
