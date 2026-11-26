@@ -117,3 +117,48 @@ func TestCheckEdition(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// wimWithDescriptor is a header whose XML descriptor holds size and offset.
+func wimWithDescriptor(size uint64, off uint64, tail int) []byte {
+	hdr := make([]byte, 208+tail)
+	copy(hdr, "MSWIM\x00\x00\x00")
+	d := hdr[0x48:]
+	for i := 0; i < 7; i++ {
+		d[i] = byte(size >> (8 * i))
+	}
+	binary.LittleEndian.PutUint64(d[8:], off)
+	return hdr
+}
+
+func TestWimEditionsSizeBounds(t *testing.T) {
+	for name, c := range map[string][]byte{
+		"zero":      wimWithDescriptor(0, 208, 64),
+		"odd":       wimWithDescriptor(7, 208, 64),
+		"too large": wimWithDescriptor(16<<20+2, 208, 64),
+	} {
+		if _, err := wimEditions(bytes.NewReader(c)); err == nil || !strings.Contains(err.Error(), "implausible") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	// the largest accepted size passes the bound and fails on the missing bytes
+	if _, err := wimEditions(bytes.NewReader(wimWithDescriptor(16<<20, 208, 64))); err == nil || !strings.Contains(err.Error(), "wim xml") {
+		t.Errorf("at the bound: err = %v", err)
+	}
+	// a descriptor that points past the end of the file
+	if _, err := wimEditions(bytes.NewReader(wimWithDescriptor(8, 1<<20, 64))); err == nil || !strings.Contains(err.Error(), "wim xml") {
+		t.Errorf("past the end: err = %v", err)
+	}
+}
+
+func TestCheckEditionRefusals(t *testing.T) {
+	sz := fakeSevenZip(t, []byte("junk"), false)
+	err := checkEdition(t.Context(), sz, "w.iso", t.TempDir(), "x", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "sources/install.wim: ") {
+		t.Fatalf("a junk WIM: err = %v", err)
+	}
+	// a work directory that does not exist
+	err = checkEdition(t.Context(), sz, "w.iso", filepath.Join(t.TempDir(), "none"), "x", &bytes.Buffer{})
+	if err == nil || err == errNoSevenZip || strings.Contains(err.Error(), "install.wim") {
+		t.Fatalf("a missing work dir: err = %v", err)
+	}
+}
