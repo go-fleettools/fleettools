@@ -162,3 +162,16 @@ func TestCheckEditionRefusals(t *testing.T) {
 		t.Fatalf("a missing work dir: err = %v", err)
 	}
 }
+
+// A XML resource that runs past the end of the file is refused, even when the
+// bytes that are there parse (the zeros the short read leaves are ignored by
+// the XML decoder after the root element).
+func TestWimEditionsShortRead(t *testing.T) {
+	full := fakeWIM(`<WIM><IMAGE INDEX="1"><NAME>Windows 11 Pro</NAME></IMAGE></WIM>  `, 0)
+	if _, err := wimEditions(bytes.NewReader(full)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wimEditions(bytes.NewReader(full[:len(full)-4])); err == nil || !strings.Contains(err.Error(), "wim xml") {
+		t.Fatalf("err = %v", err)
+	}
+}
