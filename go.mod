@@ -17,6 +17,7 @@ go 1.27.4
 retract v0.1.0 // tracked 8.4 MB of compiled executables; use v0.1.1 or later
 
 require (
+	github.com/diskfs/go-diskfs v1.9.4
 	github.com/go-compressions/xz v0.3.1
 	github.com/go-gitsafe/gitsafe v0.59.0
 	github.com/go-kramdown/kramdown v0.3.1
@@ -47,7 +48,6 @@ require (
 	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/breml/rootcerts v0.3.7 // indirect
 	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
-	github.com/diskfs/go-diskfs v1.9.4 // indirect
 	github.com/djherbis/times v1.6.0 // indirect
 	github.com/dlclark/regexp2/v2 v2.5.2 // indirect
 	github.com/dop251/goja v0.0.0-20260926152631-39ec2650adc9 // indirect
