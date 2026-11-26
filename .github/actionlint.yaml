@@ -1,0 +1,7 @@
+# Labels of the GARM self-hosted runner pools (OpenStack, nested KVM).
+self-hosted-runner:
+  labels:
+    - kvm
+    - amd64
+    - openstack
+    - bigdisk

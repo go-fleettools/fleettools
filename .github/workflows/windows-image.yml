@@ -1,0 +1,93 @@
+name: windows-image
+
+# Builds the Windows 11 Pro runner image for the GARM CI under QEMU/KVM INSIDE a
+# Linux self-hosted runner (nested KVM) and uploads the finished disk to Glance.
+# Windows stays UNACTIVATED. The in-cloud variant (osvm image-build-windows) failed
+# because OVMF in a Nova builder never saw the extra volumes; here QEMU gives the
+# firmware every disk itself.
+#
+# SECRET: OSVM_CLOUDS_YAML must hold a clouds.yaml with the entry
+# `ccdps-ci@ijclab.production` (an application credential limited to the project's
+# images, not a password). It is written to a 0600 file for the steps that need it
+# and removed at the end; it is never echoed. Without it the job fails at the first
+# step, before anything is downloaded.
+#
+# A scheduled workflow is a request, not an appointment, and GitHub disables it
+# after 60 days without repository activity; a missing run is not a green one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "upload the finished image to Glance"
+        type: boolean
+        default: true
+  schedule:
+    - cron: "23 3 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-image
+  cancel-in-progress: false
+
+env:
+  OS_CLOUD: ccdps-ci@ijclab.production
+
+jobs:
+  build:
+    runs-on: [self-hosted, kvm, linux, bigdisk]
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: clouds.yaml
+        env:
+          CLOUDS: ${{ secrets.OSVM_CLOUDS_YAML }}
+        run: |
+          test -n "$CLOUDS" || { echo "secret OSVM_CLOUDS_YAML is not set"; exit 1; }
+          umask 077
+          mkdir -p "$RUNNER_TEMP/os"
+          printf '%s' "$CLOUDS" > "$RUNNER_TEMP/os/clouds.yaml"
+          echo "OS_CLIENT_CONFIG_FILE=$RUNNER_TEMP/os/clouds.yaml" >> "$GITHUB_ENV"
+      - name: tools
+        run: |
+          missing=""
+          for t in 7z qemu-img qemu-system-x86_64; do command -v "$t" >/dev/null || missing=1; done
+          test -f /usr/share/OVMF/OVMF_CODE_4M.fd || test -f /usr/share/OVMF/OVMF_CODE.fd || missing=1
+          if [ -n "$missing" ]; then
+            sudo -n apt-get update -qq
+            sudo -n apt-get install -y --no-install-recommends ovmf 7zip qemu-utils qemu-system-x86
+          fi
+          7z | head -2; qemu-system-x86_64 --version | head -1
+      - name: kvm device and disk
+        run: |
+          ls -l /dev/kvm
+          test -w /dev/kvm
+          df -h "$RUNNER_TEMP" /
+          nproc; free -m
+          # ISO 9 GB + driver ISO + boot disk + the installed qcow2 and its converted copy
+          avail=$(df --output=avail -BG "$RUNNER_TEMP" | tail -1 | tr -dc 0-9)
+          test "$avail" -ge 60 || { echo "only ${avail} GB free in RUNNER_TEMP; the build needs 60 GB (use a flavor or volume with a bigger disk)"; exit 1; }
+      - name: osvm
+        run: go build -o "$RUNNER_TEMP/osvm" ./cmd/osvm
+      - name: fetch the installer and driver ISOs from Glance
+        run: |
+          mkdir -p "$RUNNER_TEMP/media"
+          "$RUNNER_TEMP/osvm" --cloud "$OS_CLOUD" image-download --name osvm-windows-installer-iso \
+            --sha256 bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650 --out "$RUNNER_TEMP/media/windows.iso"
+          "$RUNNER_TEMP/osvm" --cloud "$OS_CLOUD" image-download --name osvm-virtio-win-iso --out "$RUNNER_TEMP/media/virtio.iso"
+      - name: install Windows under KVM
+        run: |
+          upload=""
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.upload }}" = "true" ]; then upload="--upload"; fi
+          "$RUNNER_TEMP/osvm" --cloud "$OS_CLOUD" image-build-windows-kvm \
+            --iso "$RUNNER_TEMP/media/windows.iso" --iso-sha256 bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650 \
+            --virtio-iso "$RUNNER_TEMP/media/virtio.iso" --work-dir "$RUNNER_TEMP/work" --seven-zip 7z \
+            --out "$RUNNER_TEMP/windows.qcow2" $upload
+      - name: remove the credentials and the disks
+        if: always()
+        run: rm -rf "${RUNNER_TEMP:?}/os" "${RUNNER_TEMP:?}/media" "${RUNNER_TEMP:?}/work" "${RUNNER_TEMP:?}/windows.qcow2"

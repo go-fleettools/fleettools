@@ -17,6 +17,7 @@ go 1.27.4
 retract v0.1.0 // tracked 8.4 MB of compiled executables; use v0.1.1 or later
 
 require (
+	github.com/diskfs/go-diskfs v1.9.4
 	github.com/go-compressions/xz v0.3.1
 	github.com/go-gitsafe/gitsafe v0.59.0
 	github.com/go-kramdown/kramdown v0.3.1
@@ -43,12 +44,15 @@ require (
 )
 
 require (
+	github.com/anchore/go-lzo v0.1.0 // indirect
 	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/breml/rootcerts v0.3.7 // indirect
 	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
+	github.com/djherbis/times v1.6.0 // indirect
 	github.com/dlclark/regexp2/v2 v2.5.2 // indirect
 	github.com/dop251/goja v0.0.0-20260926152631-39ec2650adc9 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
+	github.com/elliotwutingfeng/asciiset v0.0.0-20260129054604-cfde2086bc57 // indirect
 	github.com/evanw/esbuild v0.28.2 // indirect
 	github.com/go-browserhttp/browserhttp v0.2.0 // indirect
 	github.com/go-gfx/gfx v0.37.0 // indirect
@@ -73,10 +77,14 @@ require (
 	github.com/go-widgets/painter v0.16.0 // indirect
 	github.com/gofrs/uuid/v5 v5.5.1 // indirect
 	github.com/google/pprof v0.0.0-20240727154555-813a5fbdbec8 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/kr/text v0.2.0 // indirect
+	github.com/pierrec/lz4/v4 v4.1.34 // indirect
+	github.com/pkg/xattr v0.4.12 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
+	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/tannevaled/gobig2 v0.2.0 // indirect
 	github.com/yuin/goldmark v1.8.7 // indirect
