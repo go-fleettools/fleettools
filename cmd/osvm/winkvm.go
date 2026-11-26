@@ -156,13 +156,19 @@ func pressAnyKey(ctx context.Context, sock string, keyFor time.Duration) {
 // kvmMinRAMMB is Windows 11's 4 GB minimum, recorded as Glance min_ram.
 const kvmMinRAMMB = 4096
 
+// newPassword and answerISO are replaced by tests that make them fail.
+var (
+	newPassword = randomPassword
+	answerISO   = writeAnswerISO
+)
+
 // writeAnswerISO writes the answer ISO (autounattend.xml and the provisioning
 // script) with a fresh random Administrator password that lives only there.
 func writeAnswerISO(path, edition string, w io.Writer) error {
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Errorf("%s already exists", path)
 	}
-	pw, err := randomPassword(24)
+	pw, err := newPassword(24)
 	if err != nil {
 		return err
 	}
@@ -327,7 +333,7 @@ func imageBuildWindowsKVM(ctx context.Context, cloud string, o kvmOpts, w io.Wri
 	if err := checkEdition(bctx, o.SevenZip, o.ISO, work, o.Edition, w); err != nil {
 		return err
 	}
-	if err := writeAnswerISO(p.answer, o.Edition, w); err != nil {
+	if err := answerISO(p.answer, o.Edition, w); err != nil {
 		return err
 	}
 	vars, err := os.ReadFile(varsTpl)

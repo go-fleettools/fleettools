@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -162,5 +164,38 @@ func TestBuildRefusesBeforeQemu(t *testing.T) {
 	t.Setenv("TMPDIR", filepath.Join(o.WorkDir, "no-such-dir"))
 	if err := imageBuildWindowsKVM(t.Context(), "", o, &bytes.Buffer{}); err == nil || err == errNoSevenZip {
 		t.Fatalf("monitor dir: err = %v", err)
+	}
+}
+
+func TestAnswerISOFailuresAreReturned(t *testing.T) {
+	oldPw, oldAns := newPassword, answerISO
+	defer func() { newPassword, answerISO = oldPw, oldAns }()
+
+	newPassword = func(int) (string, error) { return "", errors.New("no entropy") }
+	path := filepath.Join(t.TempDir(), "answer.iso")
+	if err := writeAnswerISO(path, "Windows 11 Pro", &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "no entropy") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("an ISO was written without a password")
+	}
+
+	// the build returns the answer ISO's failure, after the edition check passed
+	newPassword = oldPw
+	answerISO = func(string, string, io.Writer) error { return errors.New("answer refused") }
+	d := t.TempDir()
+	x := `<WIM><IMAGE INDEX="1"><NAME>Windows 11 Pro</NAME></IMAGE></WIM>`
+	for _, n := range []string{"code.fd", "vars.fd"} {
+		if err := os.WriteFile(filepath.Join(d, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o := kvmOpts{
+		ISO: "w.iso", Out: filepath.Join(d, "o.qcow2"), Edition: "Windows 11 Pro", NoKVM: true, Timeout: time.Minute,
+		OVMFCode: filepath.Join(d, "code.fd"), OVMFVars: filepath.Join(d, "vars.fd"), WorkDir: d,
+		SevenZip: fakeSevenZip(t, fakeWIM(x, 0), false), CPUs: 1, MemoryMB: 4096, DiskGB: 40,
+	}
+	if err := imageBuildWindowsKVM(t.Context(), "", o, &bytes.Buffer{}); err == nil || err.Error() != "answer refused" {
+		t.Fatalf("err = %v", err)
 	}
 }
