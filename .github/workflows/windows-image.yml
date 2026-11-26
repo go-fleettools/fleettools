@@ -37,7 +37,7 @@ env:
 
 jobs:
   build:
-    runs-on: [self-hosted, kvm, linux]
+    runs-on: [self-hosted, kvm, linux, bigdisk]
     timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7
@@ -56,19 +56,22 @@ jobs:
       - name: tools
         run: |
           missing=""
-          for t in 7zz qemu-img qemu-system-x86_64; do command -v "$t" >/dev/null || missing=1; done
+          for t in 7z qemu-img qemu-system-x86_64; do command -v "$t" >/dev/null || missing=1; done
           test -f /usr/share/OVMF/OVMF_CODE_4M.fd || test -f /usr/share/OVMF/OVMF_CODE.fd || missing=1
           if [ -n "$missing" ]; then
             sudo -n apt-get update -qq
             sudo -n apt-get install -y --no-install-recommends ovmf 7zip qemu-utils qemu-system-x86
           fi
-          7zz | head -2; qemu-system-x86_64 --version | head -1
+          7z | head -2; qemu-system-x86_64 --version | head -1
       - name: kvm device and disk
         run: |
           ls -l /dev/kvm
           test -w /dev/kvm
           df -h "$RUNNER_TEMP" /
           nproc; free -m
+          # ISO 9 GB + driver ISO + boot disk + the installed qcow2 and its converted copy
+          avail=$(df --output=avail -BG "$RUNNER_TEMP" | tail -1 | tr -dc 0-9)
+          test "$avail" -ge 60 || { echo "only ${avail} GB free in RUNNER_TEMP; the build needs 60 GB (use a flavor or volume with a bigger disk)"; exit 1; }
       - name: osvm
         run: go build -o "$RUNNER_TEMP/osvm" ./cmd/osvm
       - name: fetch the installer and driver ISOs from Glance
@@ -83,7 +86,7 @@ jobs:
           if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.upload }}" = "true" ]; then upload="--upload"; fi
           "$RUNNER_TEMP/osvm" --cloud "$OS_CLOUD" image-build-windows-kvm \
             --iso "$RUNNER_TEMP/media/windows.iso" --iso-sha256 bd4307df32bc8af33b39ccecb1174aeb345386630f89a2b86c7a4e36b55ea650 \
-            --virtio-iso "$RUNNER_TEMP/media/virtio.iso" --work-dir "$RUNNER_TEMP/work" \
+            --virtio-iso "$RUNNER_TEMP/media/virtio.iso" --work-dir "$RUNNER_TEMP/work" --seven-zip 7z \
             --out "$RUNNER_TEMP/windows.qcow2" $upload
       - name: remove the credentials and the disks
         if: always()

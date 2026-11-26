@@ -4,3 +4,4 @@ self-hosted-runner:
     - kvm
     - amd64
     - openstack
+    - bigdisk
