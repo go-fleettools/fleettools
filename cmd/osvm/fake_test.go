@@ -36,6 +36,8 @@ type fakeCloud struct {
 	// serversBody and portsBody replace the default listings when set.
 	serversBody, portsBody string
 	imgStates              []string
+	attachedVolume         bool   // GET of v1 reports it in use
+	imgVisibility          string // GET of img1 reports it (default "private")
 	// srvStatus replaces the status GET of server s1 answers (default ACTIVE).
 	srvStatus string
 	// groupsByName answers a security-group listing filtered by ?name=.
@@ -62,7 +64,7 @@ func newFake(t *testing.T) *fakeCloud {
 	f := &fakeCloud{
 		fail: map[string]int{}, calls: map[string]int{}, garbled: map[string]string{}, failNth: map[string]int{},
 		services: []string{"compute", "network", "image", "identity", "volumev3"},
-		nets:     netsOne, flavors: flavorsOK, images: imagesOK,
+		nets:     netsOne, flavors: flavorsOK, images: imagesOK, imgVisibility: "private",
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.srv.Close)
@@ -268,6 +270,12 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 	case "PUT /image/v2/images/img1/file":
 		f.record(r)
 		reply(204, ``)
+	case "GET /image/v2/images/i1/file":
+		w.Header().Set("Content-Type", "application/octet-stream")
+		fmt.Fprint(w, "hello")
+	case "DELETE /image/v2/images/img1":
+		f.record(r)
+		reply(204, ``)
 	case "GET /image/v2/images/img1":
 		reply(200, f.imageStatus())
 	case "GET /compute/v2.1/os-quota-sets/p1/detail":
@@ -283,6 +291,10 @@ func (f *fakeCloud) handle(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		if gone {
 			reply(404, `{}`)
+			return
+		}
+		if f.attachedVolume {
+			reply(200, `{"volume":{"id":"v1","name":"vm-data","status":"in-use","size":200,"attachments":[{"server_id":"s1"}]}}`)
 			return
 		}
 		reply(200, `{"volume":{"id":"v1","name":"vm-data","status":"available","size":200}}`)
@@ -306,7 +318,7 @@ func (f *fakeCloud) imageStatus() string {
 			f.imgStates = f.imgStates[1:]
 		}
 	}
-	return `{"id":"img1","name":"new","status":"` + st + `"}`
+	return `{"id":"img1","name":"new","status":"` + st + `","visibility":"` + f.imgVisibility + `","owner":"p1"}`
 }
 
 func (f *fakeCloud) record(r *http.Request) {

@@ -71,6 +71,27 @@ try {
     if (-not (Test-Path "$cb\conf\Unattend.xml")) { throw 'cloudbase-init Unattend.xml is missing' }
     if (-not (Get-Service cloudbase-init -ErrorAction SilentlyContinue)) { throw 'cloudbase-init service is missing' }
 
+    # virtio drivers (when the virtio-win CD is attached): staged in the driver
+    # store so a virtio NIC or disk can be switched on later; best effort.
+    try {
+        $vol = Get-Volume | Where-Object { $_.FileSystemLabel -like 'virtio-win*' } | Select-Object -First 1
+        if ($vol) {
+            $n = 0
+            Get-ChildItem -Path "$($vol.DriveLetter):\" -Recurse -Filter '*.inf' | Where-Object { $_.FullName -match '\\w11\\amd64\\' } | ForEach-Object { pnputil /add-driver $_.FullName /install | Out-Null; $n++ }
+            Say "virtio drivers staged: $n inf files"
+        } else { Say 'no virtio-win CD attached' }
+    } catch { Say "virtio staging failed (not fatal): $_" }
+
+    # A fresh firmware (a new instance has an empty NVRAM) boots only the
+    # removable-media path of the ESP: give it Windows Boot Manager there.
+    $esp = 'S:'
+    mountvol $esp /S
+    if (-not (Test-Path "$esp\EFI\Microsoft\Boot\bootmgfw.efi")) { throw 'bootmgfw.efi is not on the ESP' }
+    New-Item -ItemType Directory -Force -Path "$esp\EFI\Boot" | Out-Null
+    Copy-Item "$esp\EFI\Microsoft\Boot\bootmgfw.efi" "$esp\EFI\Boot\bootx64.efi" -Force
+    mountvol $esp /D
+    Say 'ESP fallback boot path written'
+
     Remove-Item -Recurse -Force $work
     Say 'OSVM-IMAGE-BUILD-OK'
     Start-Sleep 20
