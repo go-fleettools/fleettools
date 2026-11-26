@@ -441,7 +441,7 @@ var (
 	system = word(nQuota + "|" + nApp + "|" + nToken + "|" + nRun + "|" + nHost)
 
 	// a state asserted
-	predicate = word(`bloqu[ée]e?s?|bloquante?s?|blocked|blocking|install[ée]e?s?|installed|not registered|pas enregistr[ée]\w*|désactiv[ée]e?s?|disabled|atteinte?s?|reached|exceeded|dépass[ée]e?s?|exhausted|épuis[ée]e?s?|expired|expir[ée]e?s?|down|unreachable|inaccessible|revoked|révoqu[ée]e?s?|rate[- ]limited`)
+	predicate = word(`bloqu(?:é|ée|és|ées)|bloquante?s?|blocked|blocking|install(?:é|ée|és|ées)|installed|not registered|pas enregistr[ée]\w*|désactiv[ée]e?s?|disabled|atteinte?s?|reached|exceeded|dépass(?:é|ée|és|ées)|exhausted|épuis(?:é|ée|és|ées)|expired|expir[ée]e?s?|down|unreachable|inaccessible|revoked|révoqu[ée]e?s?|rate[- ]limited`)
 
 	// the user is asked to change a state
 	askFr    = word(`installez|activez|augmentez|relevez|autorisez|accordez|approuvez|ajoutez|configurez|créez|validez|acceptez|à (?:installer|activer|augmenter|relever|autoriser|accorder|approuver|configurer)|doit être (?:installé|activé|relevé|autorisé)\w*|doivent être (?:installé|activé|relevé|autorisé)\w*`)
@@ -449,7 +449,7 @@ var (
 	askEnImp = regexp.MustCompile(`(?i)^(?:install|enable|raise|allow|grant|approve|add|configure|create|accept|increase|bump)\b`)
 
 	// a sentence that is not a claim about now
-	excuse = word(`si|if|whether|unless|would|could|might|may|should|maybe|perhaps|peut-être|probablement|probably|devrait|pourrait|serait|seraient|faudrait|supposons|suppose|hypoth\w+|non vérifié\w*|pas vérifié\w*|unverified|not verified|not checked|non contrôlé\w*|à vérifier|to check|to verify|à confirmer|je ne sais pas|i don't know|vérifié\w*|verified|checked|according to|selon|d'après|read at|lu à|output|sortie|returned|retourne`)
+	excuse = word(`si|if|whether|en général|generally|typically|usually|jamais|never|unless|would|could|might|may|should|maybe|perhaps|peut-être|probablement|probably|devrait|pourrait|serait|seraient|faudrait|supposons|suppose|hypoth\w+|non vérifié\w*|pas vérifié\w*|unverified|not verified|not checked|non contrôlé\w*|à vérifier|to check|to verify|à confirmer|je ne sais pas|i don't know|vérifié\w*|verified|checked|according to|selon|d'après|read at|lu à|output|sortie|returned|retourne`)
 )
 
 // reads names the read that would answer a sentence, from the system it names.
