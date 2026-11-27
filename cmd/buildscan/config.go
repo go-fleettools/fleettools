@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -34,6 +35,137 @@ type config struct {
 	dir          string     // the step's working directory, relative; "." at the root
 	where        string     // workflow file and job, for the report
 	files        []string   // `go run x.go`: the files the step compiles, when it names them
+	// tests: the command compiles test files (`go test`, `go vet`). A plain
+	// `go build`/`install`/`run` does not, so vetting its tree WITH tests
+	// reported a package that only a tagged test build needs (garm's
+	// internal/testing) as broken under the untagged build.
+	tests bool
+	// pkgs: the packages the command names, "./..." when it names none.
+	pkgs []string
+	// native: the target is the runner's own platform, so a cgo-using build is
+	// compiled with cgo ON there unless the step pins CGO_ENABLED. A
+	// cross-compile has cgo off by default, as the Go toolchain does.
+	native bool
+}
+
+// goVerbRE finds a go command that compiles, capturing its verb.
+var goVerbRE = regexp.MustCompile(`^go\s+(test|build|vet|install|run)\b`)
+
+// valueFlags are the go command flags whose next word is their value, so that
+// `-o /dev/null` or `-tags testing` do not read as package arguments.
+var valueFlags = map[string]bool{
+	"-o": true, "-tags": true, "-mod": true, "-ldflags": true, "-gcflags": true,
+	"-asmflags": true, "-timeout": true, "-run": true, "-parallel": true,
+	"-count": true, "-p": true, "-coverprofile": true, "-covermode": true,
+	"-coverpkg": true, "-bench": true, "-benchtime": true, "-cpu": true,
+	"-vettool": true, "-modfile": true, "-overlay": true, "-pkgdir": true,
+	"-buildvcs": false, "-exec": true, "-skip": true, "-shuffle": true,
+	"-fuzz": true, "-fuzztime": true, "-gccgoflags": true, "-toolexec": true,
+	"-trimpath": false,
+}
+
+// shellFields splits a command into words, keeping quoted text together and
+// dropping the quotes. It is not a shell: it reads what a go command line says.
+func shellFields(s string) []string {
+	var out []string
+	var cur strings.Builder
+	var quote rune
+	has := false
+	for _, r := range s {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote, has = r, true
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			if has || cur.Len() > 0 {
+				out = append(out, cur.String())
+				cur.Reset()
+				has = false
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if has || cur.Len() > 0 {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
+var segmentRE = regexp.MustCompile(`&&|\|\||[;|\n]`)
+
+// goCommandsOf reads what a command line compiles: whether any go command in
+// it compiles test files, and the packages the commands name (sorted; "./..."
+// for a command that names none). ⛔ Both matter. A `go build ./cmd/garm-cli`
+// does not compile the rest of the module, and vetting ./... for it reported a
+// cgo package the lane never builds; a `go build` has no test files, and vetting
+// them reported a package only a tagged test build needs.
+func goCommandsOf(run string) (tests bool, pkgs []string) {
+	seen := map[string]bool{}
+	for _, seg := range segmentRE.Split(run, -1) {
+		seg = strings.TrimSpace(seg)
+		// An assignment prefix (`GOOS=js go build`) is not part of the command.
+		f := shellFields(seg)
+		for len(f) > 0 && strings.Contains(f[0], "=") && !strings.HasPrefix(f[0], "-") {
+			f = f[1:]
+		}
+		m := goVerbRE.FindStringSubmatch(strings.Join(f, " "))
+		if m == nil {
+			continue
+		}
+		if m[1] == "test" || m[1] == "vet" {
+			tests = true
+		}
+		named, unreadable := false, false
+		for i := 2; i < len(f); i++ {
+			a := f[i]
+			switch {
+			case strings.HasPrefix(a, "-"):
+				if valueFlags[a] {
+					i++
+				}
+			case strings.ContainsAny(a, "$`"):
+				// `./cmd/${bin}` names packages this tool cannot read: the whole
+				// tree is the answer that drops nothing.
+				if strings.HasPrefix(a, "./") || a == "." {
+					unreadable = true
+				}
+			case a == "." || strings.HasPrefix(a, "./"):
+				seen[a] = true
+				named = true
+			}
+		}
+		if !named || unreadable {
+			seen["./..."] = true
+		}
+	}
+	if seen["./..."] {
+		// the whole tree contains every package another command names
+		seen = map[string]bool{"./...": true}
+	}
+	for p := range seen {
+		pkgs = append(pkgs, p)
+	}
+	sort.Strings(pkgs)
+	if len(pkgs) == 0 {
+		pkgs = []string{"./..."}
+	}
+	return tests, pkgs
+}
+
+// nativeOn reports whether goos/goarch is what one of the job's runners is.
+func nativeOn(goos, goarch string, host []string) bool {
+	for _, h := range host {
+		if os_, arch, ok := hostPair(h); ok && os_ == goos && arch == goarch {
+			return true
+		}
+	}
+	return false
 }
 
 // runFilesOf returns the .go files a `go run` command names, in order, or nil
@@ -65,7 +197,44 @@ func runFilesOf(run string) []string {
 // key identifies a configuration for deduplication, without its provenance:
 // twenty jobs compiling linux/amd64 are one configuration, named once.
 func (c config) key() string {
-	return c.goos + "/" + c.goarch + " " + strings.Join(c.tags, ",") + " @" + c.dir + " " + strings.Join(c.files, " ")
+	return c.vetKey() + " p=" + strings.Join(c.pkgs, " ")
+}
+
+// vetKey is the key without the packages: configurations that differ only in
+// which packages a command names are compiled together, over the union.
+func (c config) vetKey() string {
+	return c.goos + "/" + c.goarch + " " + strings.Join(c.tags, ",") + " @" + c.dir + " " + strings.Join(c.files, " ") +
+		fmt.Sprintf(" t=%v n=%v c=%d", c.tests, c.native, c.cgo)
+}
+
+// mergeVet folds configurations that differ only in their packages into one,
+// whose packages are the union ("./..." contains every other).
+func mergeVet(cfgs []config) []config {
+	var out []config
+	at := map[string]int{}
+	for _, c := range cfgs {
+		i, ok := at[c.vetKey()]
+		if !ok {
+			at[c.vetKey()] = len(out)
+			out = append(out, c)
+			continue
+		}
+		seen := map[string]bool{}
+		for _, p := range append(slices.Clone(out[i].pkgs), c.pkgs...) {
+			seen[p] = true
+		}
+		var pkgs []string
+		if seen["./..."] {
+			pkgs = []string{"./..."}
+		} else {
+			for p := range seen {
+				pkgs = append(pkgs, p)
+			}
+			sort.Strings(pkgs)
+		}
+		out[i].pkgs = pkgs
+	}
+	return out
 }
 
 func (c config) String() string {
@@ -269,6 +438,7 @@ func configsOfJob(where, wfName string, wfEnv map[string]string, j job, m map[st
 		}
 		env := merge(base, subst(st.Env, m))
 		for _, run := range commandsOf(block) {
+			first := len(cfgs)
 			goos := firstOf(goosRE, run, env["GOOS"])
 			goarch := firstOf(goarchRE, run, env["GOARCH"])
 			tags := tagsOf(run, env)
@@ -322,6 +492,12 @@ func configsOfJob(where, wfName string, wfEnv map[string]string, j job, m map[st
 					}
 					cfgs = append(cfgs, config{goos: os_, goarch: arch, tags: tags, cgo: cgo, dir: wd, where: where, files: files})
 				}
+			}
+			tests, pkgs := goCommandsOf(run)
+			for i := first; i < len(cfgs); i++ {
+				cfgs[i].tests = tests
+				cfgs[i].pkgs = pkgs
+				cfgs[i].native = nativeOn(cfgs[i].goos, cfgs[i].goarch, host)
 			}
 		}
 	}

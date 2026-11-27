@@ -107,6 +107,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -560,7 +561,7 @@ func vetAll(f finding, dir string) []vetFailure {
 	}
 	var out []vetFailure
 	done := map[string]bool{}
-	for _, c := range f.configs {
+	for _, c := range mergeVet(f.configs) {
 		if done[c.key()] {
 			continue
 		}
@@ -588,13 +589,60 @@ func vetAll(f finding, dir string) []vetFailure {
 // altogether (exclude, see vetExclusions) are not vetted. Only the root module has
 // either: the CI lines read are the ones run at the root.
 func vetModule(c config, modDir string, exempt map[string][]string, exclude []*regexp.Regexp) ([]byte, error) {
+	b, err := vetOnce(c, modDir, exempt, exclude)
+	if err == nil || !cgoCrossBlocked(c, string(b)) {
+		return b, err
+	}
+	// ⛔ A cgo build of ANOTHER platform needs that platform's C toolchain, which
+	// this machine does not have: the C compiler's own errors are not a verdict
+	// on the tree. Compile the same packages, tags and cgo setting as the host
+	// platform instead -- weaker (platform-specific files are not seen), and only
+	// reached when the faithful compile failed on the C toolchain alone.
+	h := c
+	h.goos, h.goarch, h.native = runtime.GOOS, runtime.GOARCH, true
+	return vetOnce(h, modDir, exempt, exclude)
+}
+
+// cToolchainRE matches the lines a C compiler or the cgo tool print when they
+// cannot compile for the target.
+var cToolchainRE = regexp.MustCompile(`(?m)\.(?:c|S|s|h|cc|cpp|m):\d+(?::\d+)?: (?:fatal )?error|^(?:gcc|clang|cc): error|^cgo: |C compiler`)
+
+// cgoCrossBlocked reports whether a failed compile of c was the C toolchain of a
+// foreign target failing, rather than the Go code.
+func cgoCrossBlocked(c config, out string) bool {
+	foreign := c.goos != runtime.GOOS || c.goarch != runtime.GOARCH
+	cgoOn := c.cgo == cgoOn || c.cgo == cgoEither && c.native
+	return foreign && cgoOn && cToolchainRE.MatchString(out)
+}
+
+// vetOnce compiles one module for one configuration, exactly as c says.
+func vetOnce(c config, modDir string, exempt map[string][]string, exclude []*regexp.Regexp) ([]byte, error) {
 	env := append(os.Environ(),
 		"GOOS="+c.goos, "GOARCH="+c.goarch,
 		// GOWORK=off so a workspace on this machine cannot change which
 		// version of a dependency is read, which is not what the lane
 		// will do.
 		"GOWORK=off")
+	// cgo as the CI job has it: pinned by the step, else on for a native build
+	// and the toolchain's own default (off) for a cross-compile.
+	switch {
+	case c.cgo == cgoOn, c.cgo == cgoEither && c.native:
+		env = append(env, "CGO_ENABLED=1")
+	case c.cgo == cgoOff:
+		env = append(env, "CGO_ENABLED=0")
+	}
 	base := []string{"vet"}
+	if !c.tests && len(c.files) == 0 {
+		// A plain `go build` compiles no test files; vet cannot skip them, so
+		// compile the same package set with build. Vet flags are meaningless there.
+		// -o os.DevNull so a single main package leaves no binary in the tree.
+		base = []string{"build", "-o", os.DevNull}
+		exempt = nil
+	}
+	pkgs := c.pkgs
+	if len(pkgs) == 0 {
+		pkgs = []string{"./..."}
+	}
 	if len(c.tags) > 0 {
 		base = append(base, "-tags="+strings.Join(c.tags, ","))
 	}
@@ -608,8 +656,8 @@ func vetModule(c config, modDir string, exempt map[string][]string, exclude []*r
 		// `go run x.go` compiled these files and nothing else.
 		return run(append(base, c.files...)...)
 	}
-	if len(exempt) == 0 && len(exclude) == 0 {
-		return run(append(base, "./...")...)
+	if (len(exempt) == 0 && len(exclude) == 0) || len(pkgs) != 1 || pkgs[0] != "./..." {
+		return run(append(base, pkgs...)...)
 	}
 	// -e like the CI's own list: a package that cannot load is listed, not fatal.
 	list, err := run("list", "-e", "-f", "{{.ImportPath}}\t{{.Dir}}", "./...")

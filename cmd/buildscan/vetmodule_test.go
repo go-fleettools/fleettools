@@ -36,7 +36,7 @@ func TestVetModuleWithoutExemptionsDoesNotListPackages(t *testing.T) {
 // packages vetted and call it a pass.
 func TestVetModuleFailsWhenThePackageListFails(t *testing.T) {
 	fakeGo(t)
-	_, err := vetModule(config{goos: "linux", goarch: "amd64"}, t.TempDir(), map[string][]string{"seeker": {"-stdmethods=false"}}, nil)
+	_, err := vetModule(config{goos: "linux", goarch: "amd64", tests: true}, t.TempDir(), map[string][]string{"seeker": {"-stdmethods=false"}}, nil)
 	if err == nil {
 		t.Fatal("go list failed and the vet passed")
 	}
