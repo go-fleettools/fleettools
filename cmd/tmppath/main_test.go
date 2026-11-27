@@ -152,7 +152,7 @@ func TestAParseErrorIsUnreadNeverClean(t *testing.T) {
 
 func TestAMissingDirectoryIsUnread(t *testing.T) {
 	code, out := drive(t, filepath.Join(t.TempDir(), "absent"))
-	if code != 2 || !strings.Contains(out, "UNREAD ") {
+	if code != 2 || !strings.Contains(out, "named directory") || !strings.Contains(out, "unread=1") {
 		t.Errorf("status %d:\n%s", code, out)
 	}
 }

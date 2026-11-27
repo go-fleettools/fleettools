@@ -190,7 +190,8 @@ exit 2 something could not be read`)
 		files, hits, unread := 0, 0, 0
 		for _, root := range dirs {
 			if _, err := os.Lstat(root); err != nil {
-				fmt.Fprintf(out, "UNREAD %s: %v\n", root, err)
+				// said here, not left to WalkDir's callback, whose directory entry is nil
+				fmt.Fprintf(out, "UNREAD %s: named directory: %v\n", root, err)
 				unread++
 				continue
 			}
