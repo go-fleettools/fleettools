@@ -68,7 +68,7 @@ func drive(t *testing.T, fetch fetchFunc, args ...string) (int, string, string) 
 }
 
 func one(body []byte) fetchFunc {
-	return func(org, cursor string) ([]byte, error) { return body, nil }
+	return func(org, cursor string, _ int) ([]byte, error) { return body, nil }
 }
 
 func TestStubIsFlaggedAsStub(t *testing.T) {
@@ -191,7 +191,7 @@ func TestTruncatedBlobIsUnread(t *testing.T) {
 
 func TestFailedOrgQueryIsExit2AndCounted(t *testing.T) {
 	good := pageJSON(str(cfgOn), false, "", repo{name: "a", files: map[string]string{}})
-	fetch := func(org, cursor string) ([]byte, error) {
+	fetch := func(org, cursor string, _ int) ([]byte, error) {
 		if org == "bad" {
 			return nil, errors.New("HTTP 502")
 		}
@@ -254,7 +254,7 @@ func TestFirstConfigFileWins(t *testing.T) {
 
 func TestPaginationFollowsTheCursor(t *testing.T) {
 	var cursors []string
-	fetch := func(org, cursor string) ([]byte, error) {
+	fetch := func(org, cursor string, _ int) ([]byte, error) {
 		cursors = append(cursors, cursor)
 		if cursor == "" {
 			return pageJSON(str(cfgOn), true, "C1", repo{name: "a"}), nil
@@ -268,7 +268,7 @@ func TestPaginationFollowsTheCursor(t *testing.T) {
 }
 
 func TestHalfReadOrgContributesNothing(t *testing.T) {
-	fetch := func(org, cursor string) ([]byte, error) {
+	fetch := func(org, cursor string, _ int) ([]byte, error) {
 		if cursor == "" {
 			return pageJSON(str(cfgOn), true, "C1", repo{name: "a", files: map[string]string{"renovate.json": `{"extends":["github>acme/.github"]}`}}), nil
 		}
@@ -322,7 +322,7 @@ func TestTruncatedOrgConfigIsUnread(t *testing.T) {
 
 func TestMissingCursorStopsInsteadOfLooping(t *testing.T) {
 	calls := 0
-	fetch := func(org, cursor string) ([]byte, error) {
+	fetch := func(org, cursor string, _ int) ([]byte, error) {
 		if calls++; calls > 3 {
 			t.Fatal("kept paging without a cursor")
 		}
@@ -341,7 +341,7 @@ func TestQueryAsksForEveryCandidate(t *testing.T) {
 			t.Errorf("query lacks %s", p)
 		}
 	}
-	if !strings.Contains(q, `"HEAD:config.js"`) || !strings.Contains(q, "first: 100") {
+	if !strings.Contains(q, `"HEAD:config.js"`) || !strings.Contains(q, "first: $first") || !strings.Contains(q, "$first: Int!") {
 		t.Errorf("query: %s", q)
 	}
 }
