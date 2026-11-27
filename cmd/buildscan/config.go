@@ -46,6 +46,11 @@ type config struct {
 	// compiled with cgo ON there unless the step pins CGO_ENABLED. A
 	// cross-compile has cgo off by default, as the Go toolchain does.
 	native bool
+	// external: the step compiles in a directory outside the checkout (`cd
+	// /tmp/crossout && go build .`). It counts as a lane for coverage, falling
+	// back to the root as before, but there is nothing of this tree to vet:
+	// vetting "." at the root said "no Go files" on go-simd/highway.
+	external bool
 }
 
 // goVerbRE finds a go command that compiles, capturing its verb.
@@ -54,7 +59,7 @@ var goVerbRE = regexp.MustCompile(`^go\s+(test|build|vet|install|run)\b`)
 // valueFlags are the go command flags whose next word is their value, so that
 // `-o /dev/null` or `-tags testing` do not read as package arguments.
 var valueFlags = map[string]bool{
-	"-o": true, "-tags": true, "-mod": true, "-ldflags": true, "-gcflags": true,
+	"-C": true, "-o": true, "-tags": true, "-mod": true, "-ldflags": true, "-gcflags": true,
 	"-asmflags": true, "-timeout": true, "-run": true, "-parallel": true,
 	"-count": true, "-p": true, "-coverprofile": true, "-covermode": true,
 	"-coverpkg": true, "-bench": true, "-benchtime": true, "-cpu": true,
@@ -204,7 +209,7 @@ func (c config) key() string {
 // which packages a command names are compiled together, over the union.
 func (c config) vetKey() string {
 	return c.goos + "/" + c.goarch + " " + strings.Join(c.tags, ",") + " @" + c.dir + " " + strings.Join(c.files, " ") +
-		fmt.Sprintf(" t=%v n=%v c=%d", c.tests, c.native, c.cgo)
+		fmt.Sprintf(" t=%v n=%v c=%d x=%v", c.tests, c.native, c.cgo, c.external)
 }
 
 // mergeVet folds configurations that differ only in their packages into one,
@@ -498,6 +503,7 @@ func configsOfJob(where, wfName string, wfEnv map[string]string, j job, m map[st
 				cfgs[i].tests = tests
 				cfgs[i].pkgs = pkgs
 				cfgs[i].native = nativeOn(cfgs[i].goos, cfgs[i].goarch, host)
+				cfgs[i].external = cfgs[i].dir == "." && cdLeavesTree(run)
 			}
 		}
 	}
@@ -615,6 +621,33 @@ var cdRE = regexp.MustCompile(`(?m)^[\s({]*cd\s+["']?([^\s"'&;|)]+)`)
 // repository, and treating it as the root would attribute its configuration
 // to code it never compiles.
 func workingDir(step, jobDefault, run string) string {
+	base := baseDir(step, jobDefault, run)
+	// ⛔ `go build -C dir` runs the command in dir, exactly like a `cd dir &&`
+	// before it, relative to wherever the step already is.
+	if m := goCRE.FindStringSubmatch(run); m != nil {
+		if d := clean(m[1]); d != "" {
+			return clean(filepath.Join(base, d))
+		}
+	}
+	return base
+}
+
+// goCRE catches the go command's own -C flag (Go 1.20+), `go test -C ./dir -v`.
+var goCRE = regexp.MustCompile(`\bgo\s+(?:test|build|vet|install|run)\s+-C[\s=]+["']?([^\s"']+)`)
+
+// cdLeavesTree reports whether the command's directory comes from a `cd` that
+// leaves the checkout. (The caller only asks when the directory fell back to
+// the root, so a step or job directory inside the tree has already answered.)
+func cdLeavesTree(run string) bool {
+	m := cdRE.FindStringSubmatch(run)
+	if m == nil {
+		return false
+	}
+	d := strings.TrimSpace(m[1])
+	return d != "." && clean(d) == ""
+}
+
+func baseDir(step, jobDefault, run string) string {
 	for _, cand := range []string{step, jobDefault} {
 		if d := clean(cand); d != "" {
 			return d

@@ -578,6 +578,9 @@ func vetAll(f finding, dir string) []vetFailure {
 				continue
 			}
 		}
+		if c.external {
+			continue
+		}
 		for _, m := range modulesOf(c.dir, mods) {
 			var exempt map[string][]string
 			var exclude []*regexp.Regexp
@@ -665,8 +668,16 @@ func vetOnce(c config, modDir string, exempt map[string][]string, exclude []*reg
 	if len(pkgs) == 0 {
 		pkgs = []string{"./..."}
 	}
-	if len(c.tags) > 0 {
-		base = append(base, "-tags="+strings.Join(c.tags, ","))
+	// ⛔ goexperiment.X is not a build tag to pass: the toolchain derives it from
+	// GOEXPERIMENT, and `-tags=goexperiment.simd` compiles the runtime
+	// inconsistently ("relocation target simd/archsimd.Uint64x2.SetElem not
+	// defined"). The CI sets it in the environment, so the vet does too.
+	realTags, exps := splitExperiments(c.tags)
+	if len(exps) > 0 {
+		env = append(env, "GOEXPERIMENT="+strings.Join(exps, ","))
+	}
+	if len(realTags) > 0 {
+		base = append(base, "-tags="+strings.Join(realTags, ","))
 	}
 	run := func(args ...string) ([]byte, error) {
 		cmd := exec.Command("go", args...)
@@ -722,6 +733,19 @@ func vetOnce(c config, modDir string, exempt map[string][]string, exclude []*reg
 		}
 	}
 	return all, firstErr
+}
+
+// splitExperiments separates the goexperiment.X tags from the real build tags,
+// returning the experiment names (sorted order kept) for GOEXPERIMENT.
+func splitExperiments(tags []string) (plain, exps []string) {
+	for _, t := range tags {
+		if name, ok := strings.CutPrefix(t, "goexperiment."); ok && name != "" {
+			exps = append(exps, name)
+			continue
+		}
+		plain = append(plain, t)
+	}
+	return plain, exps
 }
 
 // modules are the directories of the checkout holding a go.mod, relative to
