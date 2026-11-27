@@ -153,6 +153,31 @@ func pressAnyKey(ctx context.Context, sock string, keyFor time.Duration) {
 	}
 }
 
+// stallTicks is how many 10 s ticks the Windows disk may stay the same size
+// before the build fails: run 45969309942 sat 100 minutes in the UEFI shell with
+// a 92 MiB disk. Setup copies GBs within minutes; the later phases (sysprep,
+// updates off) grow it too, so 25 minutes of nothing is a dead guest.
+const stallTicks = 150
+
+// shotDue says whether tick n (10 s each) takes a screenshot: every 20 s for
+// the first 500 s, where the CD prompt, Setup's start and its first
+// reboot happen, then every 5 minutes.
+func shotDue(n int) bool {
+	if n <= 50 {
+		return n%2 == 0
+	}
+	return n%30 == 0
+}
+
+// diskBytes is the size of the Windows disk file.
+func diskBytes(path string) (int64, bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, false
+	}
+	return fi.Size(), true
+}
+
 // kvmMinRAMMB is Windows 11's 4 GB minimum, recorded as Glance min_ram.
 const kvmMinRAMMB = 4096
 
@@ -403,6 +428,8 @@ func runQemu(ctx context.Context, o kvmOpts, p kvmPaths, w io.Writer) error {
 		return fail
 	}
 	ticks, shots := 0, 0
+	var lastSize int64
+	lastTick := 0
 	for {
 		select {
 		case err := <-done:
@@ -423,9 +450,21 @@ func runQemu(ctx context.Context, o kvmOpts, p kvmPaths, w io.Writer) error {
 			read()
 			return fmt.Errorf("the guest did not finish (marker seen: %t): %w", marker, ctx.Err())
 		case <-time.After(10 * time.Second):
-			if ticks++; ticks%30 == 0 {
+			ticks++
+			if shotDue(ticks) {
 				shots++
 				snapshot(p, shots, w)
+			}
+			if size, ok := diskBytes(p.root); ok {
+				if size != lastSize {
+					lastSize, lastTick = size, ticks
+				} else if ticks-lastTick >= stallTicks {
+					snapshot(p, 997, w)
+					_ = cmd.Process.Kill()
+					<-done
+					read()
+					return fmt.Errorf("the Windows disk did not grow for %d minutes (stuck at %d MiB): Setup is not installing", stallTicks/6, size>>20)
+				}
 			}
 			if fail := read(); fail != "" {
 				snapshot(p, 998, w)
