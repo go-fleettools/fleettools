@@ -143,3 +143,18 @@ func TestValidate(t *testing.T) {
 		t.Errorf("upload-only needs no network: %v", err)
 	}
 }
+
+// The first-logon command must show a console and write to COM1 itself, and the
+// specialize pass must announce itself on COM1, so a silent guest is told apart
+// from one whose command never ran.
+func TestUnattendXMLReportsOnCOM1(t *testing.T) {
+	doc := unattendXML("Windows 11 Pro", "pw")
+	for _, want := range []string{"-WindowStyle Normal", `\\.\COM1`, "firstlogon command started", "OSVM: specialize pass", "<Description>", "is on no drive"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("answer file lacks %q", want)
+		}
+	}
+	if !strings.Contains(provisionScript, `\\.\COM1`) {
+		t.Error("the provisioning script does not write COM1 directly")
+	}
+}
