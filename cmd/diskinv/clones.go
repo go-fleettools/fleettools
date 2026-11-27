@@ -67,6 +67,7 @@ func clonesCmd() *cobra.Command {
 		}
 		return runClones(cli.Out(cmd), args[0], n)
 	}
+	c.Flags().SetInterspersed(true) // as in top: the usage line has the flags after <dir>
 	c.Flags().IntVarP(&n, "top", "n", 50, "how many entries to print")
 	return c
 }

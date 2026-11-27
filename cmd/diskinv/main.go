@@ -72,6 +72,9 @@ func topCmd() *cobra.Command {
 		}
 		return runTop(cli.Out(cmd), args[0], depth, n)
 	}
+	// The usage line puts the flags AFTER the directory, and nothing here takes a
+	// command line as operands, so flags may follow it.
+	c.Flags().SetInterspersed(true)
 	c.Flags().IntVar(&depth, "depth", 1, "levels below <dir> at which entries are reported")
 	c.Flags().IntVarP(&n, "top", "n", 30, "how many entries to print")
 	return c

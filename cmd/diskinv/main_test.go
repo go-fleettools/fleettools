@@ -85,6 +85,15 @@ func TestTopLimitsDepthAndCount(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "/d/e") {
 		t.Fatalf("-depth: %d\n%s", code, out)
 	}
+	// and the usage line's order: the directory first, the flags after it
+	out, _, code = drive(t, "top", root, "--depth", "2", "-n", "1")
+	if code != 0 || !strings.Contains(out, "shown 1 of 2") {
+		t.Fatalf("flags after the directory: %d\n%s", code, out)
+	}
+	out, _, code = drive(t, "clones", root, "-n", "1")
+	if code != 0 || !strings.Contains(out, "shown 1 of 1") {
+		t.Fatalf("clones, flags after the directory: %d\n%s", code, out)
+	}
 }
 
 func TestTopNeverFollowsASymlink(t *testing.T) {
