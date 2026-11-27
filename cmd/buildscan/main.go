@@ -566,6 +566,18 @@ func vetAll(f finding, dir string) []vetFailure {
 			continue
 		}
 		done[c.key()] = true
+		// ⛔ A step that runs in a directory this tree does not contain -- a
+		// reusable workflow's `working-directory: judge`, where `judge` is ANOTHER
+		// repository checked out at run time -- compiles that other repository,
+		// not this one. moduleOf maps the missing directory to "." and the root
+		// was then vetted under a verdict about code it never builds ("no Go
+		// files in <root>"), which made every push of platform-specific files
+		// here need a waiver.
+		if c.dir != "" && c.dir != "." {
+			if fi, err := os.Stat(filepath.Join(dir, c.dir)); err != nil || !fi.IsDir() {
+				continue
+			}
+		}
 		for _, m := range modulesOf(c.dir, mods) {
 			var exempt map[string][]string
 			var exclude []*regexp.Regexp
