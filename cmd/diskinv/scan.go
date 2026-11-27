@@ -48,16 +48,16 @@ func (s *scan) fail(path string, err error) {
 // entries: those exactly maxDepth below root, plus every shallower entry that
 // has nothing to descend into (a file, an empty or unreadable directory), so
 // that every allocated byte under root belongs to exactly one row.
-// It returns the root's total.
-func (s *scan) run(root string, maxDepth int, rows *[]row) (int64, time.Time, error) {
+// It returns the root's total. A root that cannot be examined is RECORDED as
+// unreadable and totals zero, so the caller's "unreadable" statement carries it.
+func (s *scan) run(root string, maxDepth int, rows *[]row) (int64, time.Time) {
 	fi, err := os.Lstat(root)
 	if err != nil {
-		return 0, time.Time{}, err
+		s.fail(root, err)
+		return 0, time.Time{}
 	}
-	st := statOf(fi)
-	s.rootDev = st.dev
-	b, n := s.walk(root, fi, 0, maxDepth, rows)
-	return b, n, nil
+	s.rootDev = statOf(fi).dev
+	return s.walk(root, fi, 0, maxDepth, rows)
 }
 
 func (s *scan) walk(path string, fi fs.FileInfo, depth, maxDepth int, rows *[]row) (int64, time.Time) {

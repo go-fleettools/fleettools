@@ -87,10 +87,7 @@ func runTop(out io.Writer, dir string, depth, n int) error {
 	}
 	s := newScan()
 	var rows []row
-	total, newest, err := s.run(dir, depth, &rows)
-	if err != nil {
-		return cli.Unanswerable("diskinv top: %v", err)
-	}
+	total, newest := s.run(dir, depth, &rows)
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].bytes > rows[j].bytes })
 	t := now()
 	fmt.Fprintf(out, "diskinv top %s  depth %d  (allocated bytes; symlinks not followed; one filesystem)\n", dir, depth)

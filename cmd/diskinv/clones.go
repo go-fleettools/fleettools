@@ -80,11 +80,7 @@ func resolveRoot(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fi, err := os.Stat(p)
-	if err != nil {
-		return "", err
-	}
-	if !fi.IsDir() {
+	if fi, _ := os.Stat(p); fi == nil || !fi.IsDir() {
 		return "", fmt.Errorf("%s is not a directory", dir)
 	}
 	return p, nil
@@ -145,9 +141,7 @@ func runClones(out io.Writer, dir string, n int) error {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			human(c.bytes), c.kind, c.branch, c.dirty, c.unpush, c.stash, c.wt, c.last, c.name)
 	}
-	if err := tw.Flush(); err != nil {
-		return cli.Unanswerable("diskinv clones: %v", err)
-	}
+	_ = tw.Flush() // into the command's own writer, whose failure is the terminal's to report
 	fmt.Fprintf(out, "\nshown %d of %d entries = %s of %s total\n", len(shown), len(cs), human(shownBytes), human(total))
 	fmt.Fprintf(out, "git checkouts: %d, with uncommitted changes: %d, with commits on no remote: %d\n", repos, dirty, unpushedRepos)
 	fmt.Fprintln(out, "UNPUSHED = git rev-list --branches --not --remotes --count; \"(no remote)\" means every commit counts")
@@ -183,19 +177,20 @@ func inspect(path string, c *clone) {
 		c.kind = "file"
 		c.bytes = statOf(fi).alloc
 	default:
-		b, _, err := s.run(path, 0, nil)
-		if err != nil {
-			c.errs = append(c.errs, err.Error())
-		}
-		c.bytes, c.scanN = b, s.unreadable
+		c.bytes, _ = s.run(path, 0, nil)
+		c.scanN = s.unreadable
 		c.kind = "dir"
 	}
 	c.branch, c.dirty, c.unpush, c.stash, c.wt, c.last = "-", "-", "-", "-", "-", "-"
-	if c.kind != "dir" {
-		return
+	if c.kind == "dir" {
+		inspectGit(path, c)
 	}
-	gfi, err := os.Lstat(filepath.Join(path, ".git"))
-	if err != nil {
+}
+
+// inspectGit asks git about a directory that may be a checkout.
+func inspectGit(path string, c *clone) {
+	gfi, _ := os.Lstat(filepath.Join(path, ".git"))
+	if gfi == nil {
 		return // not a git checkout: a plain directory
 	}
 	c.kind = "repo"

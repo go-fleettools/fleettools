@@ -217,6 +217,116 @@ func TestClonesLimitAndAGitFailureIsNotAZero(t *testing.T) {
 	}
 }
 
+func TestRefusalsSayWhyAndCountOperands(t *testing.T) {
+	d := t.TempDir()
+	for _, sub := range []string{"top", "clones"} {
+		for _, args := range [][]string{{sub}, {sub, d, d}, {sub, "-n", "0", d}} {
+			out, errs, code := drive(t, args...)
+			if code != 2 || out != "" || !strings.Contains(errs, "diskinv "+sub) {
+				t.Errorf("%v: status %d, stdout %q, stderr %q", args, code, out, errs)
+			}
+		}
+		_, errs, code := drive(t, sub, "/nonexistent-diskinv")
+		if code != 2 || !strings.Contains(errs, "no such file") {
+			t.Errorf("%s nonexistent: status %d, stderr %q", sub, code, errs)
+		}
+		f := filepath.Join(d, "afile")
+		write(t, f, 1)
+		_, errs, code = drive(t, sub, f)
+		if code != 2 || !strings.Contains(errs, "is not a directory") {
+			t.Errorf("%s on a file: status %d, stderr %q", sub, code, errs)
+		}
+	}
+}
+
+func TestClonesOnAnUnreadableDirectoryIsRefused(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads everything")
+	}
+	d := t.TempDir()
+	locked := filepath.Join(d, "locked")
+	if err := os.Mkdir(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(locked, 0o755)
+	out, errs, code := drive(t, "clones", locked)
+	if code != 2 || out != "" || !strings.Contains(errs, "permission denied") {
+		t.Fatalf("status %d, stdout %q, stderr %q", code, out, errs)
+	}
+}
+
+func TestAScanOfAPathThatIsGoneIsRecordedNotZero(t *testing.T) {
+	s := newScan()
+	b, n := s.run(filepath.Join(t.TempDir(), "gone"), 1, nil)
+	if b != 0 || !n.IsZero() || s.unreadable != 1 || len(s.errs) != 1 || !strings.Contains(s.errs[0], "gone") {
+		t.Fatalf("bytes %d newest %v unreadable %d errs %v", b, n, s.unreadable, s.errs)
+	}
+	c := &clone{name: "gone"}
+	inspect(filepath.Join(t.TempDir(), "gone"), c)
+	if c.kind != "?" || len(c.errs) != 1 {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestRunGitReturnsOutputAndTheReasonForAFailure(t *testing.T) {
+	if o, err := runGit(t.TempDir(), "--version"); err != nil || !strings.HasPrefix(o, "git version") {
+		t.Fatalf("%q %v", o, err)
+	}
+	_, err := runGit(t.TempDir(), "rev-parse", "--verify", "HEAD")
+	if err == nil || !strings.Contains(err.Error(), "rev-parse --verify HEAD") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// Every git question that fails is named in the report, shown as ? in its own
+// column, and makes the status 1 -- one at a time, so that a question whose
+// failure is swallowed cannot hide behind the others.
+func TestEachGitQuestionThatFailsIsNamed(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "r")
+	git(t, root, "init", "-q", "-b", "main", repo)
+	write(t, filepath.Join(repo, "f"), 1)
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-q", "-m", "one")
+	real := runGit
+	defer func() { runGit = real }()
+	for _, q := range []struct{ sub, name string }{
+		{"branch", "branch"}, {"status", "status"}, {"rev-list", "unpushed"},
+		{"stash", "stash"}, {"log", "last commit"}, {"worktree", "worktrees"},
+	} {
+		runGit = func(dir string, args ...string) (string, error) {
+			if args[0] == q.sub {
+				return "", os.ErrPermission
+			}
+			return real(dir, args...)
+		}
+		out, _, code := drive(t, "clones", root)
+		if code != 1 || !strings.Contains(out, "INCOMPLETE") || !strings.Contains(out, "r: "+q.name+": ") || !strings.Contains(out, "?") {
+			t.Errorf("%s: status %d\n%s", q.sub, code, out)
+		}
+	}
+	runGit = real
+	if out, _, code := drive(t, "clones", root); code != 0 || strings.Contains(out, "INCOMPLETE") || strings.Contains(out, "?") {
+		t.Errorf("control: status %d\n%s", code, out)
+	}
+}
+
+func TestClonesShowsASymlinkAsTheLinkAndAFileAsAFile(t *testing.T) {
+	root, other := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(other, "huge"), 4<<20)
+	if err := os.Symlink(other, filepath.Join(root, "ln")); err != nil {
+		t.Skip("no symlinks:", err)
+	}
+	write(t, filepath.Join(root, "afile"), 2<<20)
+	out, _, code := drive(t, "clones", root)
+	if code != 0 || !strings.Contains(out, "symlink") || !strings.Contains(out, "file") || strings.Contains(out, "4.0 MiB") {
+		t.Fatalf("status %d\n%s", code, out)
+	}
+}
+
 func TestHumanAndAge(t *testing.T) {
 	for in, want := range map[int64]string{0: "0 B", 1023: "1023 B", 1024: "1.0 KiB", 3 << 30: "3.0 GiB", 1 << 40: "1.0 TiB"} {
 		if got := human(in); got != want {
