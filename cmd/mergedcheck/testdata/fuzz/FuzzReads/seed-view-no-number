@@ -1,0 +1,3 @@
+go test fuzz v1
+string("gh pr view -R go-x/y --json state && ghmerge")
+string("{\"state\":\"MERGED\",\"number\":-5}")

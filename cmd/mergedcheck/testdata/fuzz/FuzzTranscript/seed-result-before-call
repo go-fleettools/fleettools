@@ -1,0 +1,2 @@
+go test fuzz v1
+string("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t\",\"content\":\"merged\"}]}}\n{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"Bash\",\"input\":\"not an object\"},{\"type\":\"text\",\"text\":\"PR #1 merged\"}]}}\n")

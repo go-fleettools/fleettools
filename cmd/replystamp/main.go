@@ -66,7 +66,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -81,6 +80,7 @@ import (
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
+	tsx "github.com/go-fleettools/fleettools/internal/transcript"
 	"github.com/spf13/cobra"
 )
 
@@ -392,48 +392,13 @@ type aReply struct {
 	fallback bool
 }
 
-type entry struct {
-	Type    string          `json:"type"`
-	IsMeta  bool            `json:"isMeta"`
-	UUID    string          `json:"uuid"`
-	Message json.RawMessage `json:"message"`
-	// ⛔⛔ A USAGE-LIMIT MESSAGE IS NOT A REPLY, AND IT IS THE MOST COMMON LAST
-	// TEXT IN A TRANSCRIPT. Measured over the 50 transcripts on this machine:
-	// 14 of them end on `You've hit your 5-hour limit · resets 8:50pm`, text
-	// the model never wrote, recorded as an ordinary assistant text entry.
-	//
-	// Judging it refuses a reply nobody composed — and the refusal lands
-	// exactly when the session has no requests left, so the retry it asks for
-	// walks straight back into the limit. It is the worst moment this gate
-	// could choose to speak.
-	//
-	// The entry says so itself: isApiErrorMessage, beside apiError
-	// ("usage_limit_reached") and apiErrorStatus (429). A FIELD, not a text
-	// pattern — matching on the words would be a gate that breaks when the
-	// message is reworded, and would refuse a real reply that quoted it.
-	IsAPIErrorMessage bool `json:"isApiErrorMessage"`
-	// A subagent's entries are written into the same transcript with this set.
-	// Its replies are not this session's replies and carry no stamp.
-	IsSidechain bool `json:"isSidechain"`
-	// Timestamp is when the entry was recorded, RFC 3339.
-	Timestamp string `json:"timestamp"`
-	// What opened a turn, read only by the deny log: the resume after a
-	// compaction, or a background task finishing.
-	IsCompactSummary bool   `json:"isCompactSummary"`
-	TurnOrigin       string `json:"turnOrigin"`
-	PromptSource     string `json:"promptSource"`
-}
-
-type message struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
-}
-
-type block struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-	ID   string `json:"id"` // a tool_use block's id
-}
+// The transcript types and parser live in internal/transcript, shared with
+// cmd/mergedcheck; these aliases keep this command's own names.
+type (
+	entry   = tsx.Entry
+	message = tsx.Message
+	block   = tsx.Block
+)
 
 // toolUseIDs returns the ids of the tool_use blocks of an assistant message.
 func toolUseIDs(raw json.RawMessage) []string {
@@ -479,39 +444,13 @@ func findReply(path string) (aReply, error) {
 // It is the ONE transcript parser: the Stop hook, --transcript and --pretool
 // all read through it.
 func scanEntries(r io.Reader, fn func(e entry, m message)) error {
-	sc := bufio.NewScanner(r)
-	// A transcript line holds a whole message and the default 64 KiB limit is
-	// nowhere near enough; a line that overran it would be dropped silently and
-	// the anchor would move.
-	sc.Buffer(make([]byte, 0, 1<<20), 64<<20)
-	for sc.Scan() {
-		if e, m, ok := decodeEntry(sc.Bytes()); ok {
-			fn(e, m)
-		}
-	}
-	return sc.Err()
+	return tsx.Scan(r, fn)
 }
 
 // decodeEntry decodes one transcript line; ok is false for a line that is
 // empty, undecodable or a sidechain entry.
 func decodeEntry(line []byte) (entry, message, bool) {
-	// An empty line is not JSON, so the Unmarshal below refuses it.
-	var e entry
-	if err := json.Unmarshal(line, &e); err != nil {
-		// A transcript is append-only and a half-written last line is
-		// ordinary; it is not a reason to refuse to judge the rest.
-		return entry{}, message{}, false
-	}
-	var m message
-	if len(e.Message) > 0 {
-		_ = json.Unmarshal(e.Message, &m)
-	}
-	// A subagent writes into this same file. Nothing it says is this
-	// session's reply, and its turns must not move the anchor either.
-	if e.IsSidechain {
-		return entry{}, message{}, false
-	}
-	return e, m, true
+	return tsx.Decode(line)
 }
 
 func readReply(r io.Reader) (aReply, error) {
@@ -569,29 +508,7 @@ func readReply(r io.Reader) (aReply, error) {
 }
 
 func isUserTurn(e entry, m message) bool {
-	if e.IsMeta || m.Role != "user" {
-		return false
-	}
-	// No content is not JSON: both Unmarshals below refuse it.
-	var s string
-	if json.Unmarshal(m.Content, &s) == nil {
-		return strings.TrimSpace(s) != ""
-	}
-	var bs []block
-	if json.Unmarshal(m.Content, &bs) != nil {
-		return false
-	}
-	for _, b := range bs {
-		if b.Type == "tool_result" {
-			return false
-		}
-	}
-	for _, b := range bs {
-		if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
-			return true
-		}
-	}
-	return false
+	return tsx.IsUserTurn(e, m)
 }
 
 // judgedAgainst returns the clock a reply's stamp is compared with: the
