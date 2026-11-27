@@ -16,6 +16,8 @@ type fake struct {
 	bodies []string
 	groups string // JSON array
 	badPut bool
+
+	listCalls int
 }
 
 func newFake(t *testing.T) *fake {
@@ -31,6 +33,10 @@ func newFake(t *testing.T) *fake {
 		}
 		switch {
 		case r.Method == "GET" && r.URL.Path == "/orgs/o/actions/runner-groups":
+			if f.listCalls++; f.listCalls > 20 {
+				w.WriteHeader(500) // a pagination loop that never stops ends here
+				return
+			}
 			n := strings.Count(f.groups, `"id"`)
 			fmt.Fprintf(w, `{"total_count":%d,"runner_groups":%s}`, n, f.groups)
 		case r.Method == "GET" && r.URL.Path == "/repos/o/r1":
@@ -183,8 +189,7 @@ func TestTokenAndTransportErrors(t *testing.T) {
 
 func TestListPagesAndMalformed(t *testing.T) {
 	calls := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+	srv := capped(&calls, 6, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("page") {
 		case "1":
 			_, _ = io.WriteString(w, `{"total_count":2,"runner_groups":[{"id":1,"name":"a"}]}`)
@@ -193,7 +198,7 @@ func TestListPagesAndMalformed(t *testing.T) {
 		default:
 			_, _ = io.WriteString(w, `{`)
 		}
-	}))
+	})
 	defer srv.Close()
 	g, err := listGroups(newClient(timeout), srv.URL, "t", "o")
 	if err != nil || len(g) != 2 || calls != 2 {
@@ -204,9 +209,10 @@ func TestListPagesAndMalformed(t *testing.T) {
 	if _, err := listGroups(newClient(timeout), bad.URL, "t", "o"); err == nil {
 		t.Fatal("want decode error")
 	}
-	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	emptyCalls := 0
+	empty := capped(&emptyCalls, 4, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"total_count":9,"runner_groups":[]}`)
-	}))
+	})
 	defer empty.Close()
 	if g, err := listGroups(newClient(timeout), empty.URL, "t", "o"); err != nil || len(g) != 0 {
 		t.Fatalf("%v %v", g, err)
@@ -227,7 +233,8 @@ func TestRedirectRefusedAndHelpers(t *testing.T) {
 }
 
 func TestCreateDecodeError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	calls := 0
+	srv := capped(&calls, 30, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/repos/"):
 			_, _ = io.WriteString(w, `{"id":3}`)
@@ -237,7 +244,7 @@ func TestCreateDecodeError(t *testing.T) {
 		default:
 			_, _ = io.WriteString(w, `{"total_count":0,"runner_groups":[]}`)
 		}
-	}))
+	})
 	defer srv.Close()
 	old := readToken
 	readToken = func(string) (string, error) { return "t", nil }
