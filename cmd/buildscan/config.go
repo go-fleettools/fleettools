@@ -194,6 +194,34 @@ func runFilesOf(run string) []string {
 	return nil
 }
 
+// generatorRun reports whether a command is a `go run` that invokes a generator
+// rather than building the tree: it has its own module file (`-modfile`, which
+// is what brings the generator's dependencies in, so vetting its file against
+// the root go.mod cannot resolve them), or it names a file through a shell
+// variable (`${g}_amd64_gen.go`), which this tool cannot read.
+// ⛔ Reading such a step as a configuration reported go-simd/floats'
+// "generated assembly is current" lanes as configurations the tree does not
+// compile under, and refused every platform-specific push there. The step is
+// not judged.
+func generatorRun(run string) bool {
+	f := shellFields(run)
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] != "go" || f[i+1] != "run" {
+			continue
+		}
+		for _, a := range f[i+2:] {
+			if a == "-modfile" || strings.HasPrefix(a, "-modfile=") {
+				return true
+			}
+			if strings.HasSuffix(a, ".go") && strings.ContainsAny(a, "$`") {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
 // key identifies a configuration for deduplication, without its provenance:
 // twenty jobs compiling linux/amd64 are one configuration, named once.
 func (c config) key() string {
@@ -438,6 +466,9 @@ func configsOfJob(where, wfName string, wfEnv map[string]string, j job, m map[st
 		}
 		env := merge(base, subst(st.Env, m))
 		for _, run := range commandsOf(block) {
+			if generatorRun(run) {
+				continue
+			}
 			first := len(cfgs)
 			goos := firstOf(goosRE, run, env["GOOS"])
 			goarch := firstOf(goarchRE, run, env["GOARCH"])
