@@ -310,3 +310,24 @@ func TestConsoleSilence(t *testing.T) {
 		}
 	}
 }
+
+func TestBootRetryDue(t *testing.T) {
+	cases := []struct {
+		name     string
+		since    int
+		size     int64
+		resets   int
+		wantDone bool
+	}{
+		{"too early", bootRetryTicks - 1, 92 << 20, 0, false},
+		{"stuck at the UEFI shell", bootRetryTicks, 92 << 20, 0, true},
+		{"installing: disk grew", bootRetryTicks * 3, bootGrewBytes, 0, false},
+		{"after two resets", bootRetryTicks, 92 << 20, 2, true},
+		{"out of resets", bootRetryTicks * 9, 92 << 20, maxBootResets, false},
+	}
+	for _, c := range cases {
+		if got := bootRetryDue(c.since, c.size, c.resets); got != c.wantDone {
+			t.Errorf("%s: bootRetryDue = %v, want %v", c.name, got, c.wantDone)
+		}
+	}
+}

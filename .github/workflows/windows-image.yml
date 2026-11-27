@@ -37,7 +37,7 @@ env:
 
 jobs:
   build:
-    runs-on: [self-hosted, kvm, linux, bigdisk]
+    runs-on: go-fleettools-bigdisk
     timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7

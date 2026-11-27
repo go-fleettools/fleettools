@@ -188,6 +188,25 @@ func consoleSilence(ticks, first int, started bool) string {
 	return ""
 }
 
+// A guest that missed the CD's five-second "press any key" prompt falls to the
+// UEFI shell with a ~92 MiB disk and stays there (runs 45969309942 and
+// 46063104691; run 46031301930 caught the prompt and installed). The keys of
+// pressAnyKey only last keyFor, so when the disk is still under bootGrewBytes
+// bootRetryTicks (8 minutes) after the start or the last reset, the guest is
+// reset and the keys are sent again, at most maxBootResets times. Setup copies
+// far more than 512 MiB in that time, so a guest that is installing is left alone.
+const (
+	bootRetryTicks = 48
+	bootGrewBytes  = 512 << 20
+	maxBootResets  = 3
+)
+
+// bootRetryDue says whether the guest, sinceStart ticks after the start or its
+// last reset, with a disk of size bytes, has to be reset and sent the keys again.
+func bootRetryDue(sinceStart int, size int64, resets int) bool {
+	return resets < maxBootResets && sinceStart >= bootRetryTicks && size < bootGrewBytes
+}
+
 // shotDue says whether tick n (10 s each) takes a screenshot: every 20 s for
 // the first 500 s, where the CD prompt, Setup's start and its first
 // reboot happen, then every 5 minutes.
@@ -459,6 +478,7 @@ func runQemu(ctx context.Context, o kvmOpts, p kvmPaths, w io.Writer) error {
 	ticks, shots := 0, 0
 	var lastSize int64
 	lastTick, firstLine := 0, 0
+	lastReset, resets := 0, 0
 	for {
 		select {
 		case err := <-done:
@@ -485,6 +505,13 @@ func runQemu(ctx context.Context, o kvmOpts, p kvmPaths, w io.Writer) error {
 				snapshot(p, shots, w)
 			}
 			if size, ok := diskBytes(p.root); ok {
+				if p.monitor != "" && bootRetryDue(ticks-lastReset, size, resets) {
+					resets++
+					lastReset = ticks
+					fmt.Fprintf(w, "boot: the disk is %d MiB after %d minutes, the CD prompt was missed: reset %d of %d and keys again\n", size>>20, bootRetryTicks/6, resets, maxBootResets)
+					_ = monitorCommand(p.monitor, "system_reset", 300*time.Millisecond)
+					go pressAnyKey(ctx, p.monitor, keyFor)
+				}
 				if size != lastSize {
 					lastSize, lastTick = size, ticks
 				} else if ticks-lastTick >= stallTicks {
