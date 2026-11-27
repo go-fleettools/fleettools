@@ -105,6 +105,18 @@ func Retryable(msg string) bool { return Transient(msg) || Throttled(msg) }
 
 // GH runs gh with the shared retry policy and returns its stdout.
 func GH(args ...string) ([]byte, error) {
+	out, err := GHAnswer(args...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GHAnswer is GH that keeps what gh printed on stdout when the call fails for
+// good. `gh api graphql` exits non-zero whenever the answer carries an `errors`
+// entry, yet still prints the whole answer: a caller that can tell a partial
+// answer from a failed one needs those bytes. The error is the same as GH's.
+func GHAnswer(args ...string) ([]byte, error) {
 	if Guard != nil {
 		if err := Guard(args); err != nil {
 			return nil, err
@@ -126,7 +138,7 @@ func GH(args ...string) ([]byte, error) {
 			time.Sleep(Backoff(attempt))
 			continue
 		}
-		return nil, fmt.Errorf("%s", strings.TrimSpace(msg))
+		return out, fmt.Errorf("%s", strings.TrimSpace(msg))
 	}
 }
 
