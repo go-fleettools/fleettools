@@ -19,3 +19,7 @@
 !/LICENSE
 !/go.mod
 !/go.sum
+
+# mutsweep temp copies, left in any directory when a sweep is killed; two were
+# committed under cmd/orgedit.
+.*.atomicwrite-*
