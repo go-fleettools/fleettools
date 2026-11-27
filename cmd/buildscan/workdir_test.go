@@ -218,6 +218,10 @@ jobs:
 	if !cfgs[0].external || cfgs[0].dir != "." {
 		t.Errorf("the /tmp lane = %+v, want external at the root", cfgs[0])
 	}
+	plain, _ := configsOfWorkflow("ci.yml", []byte("jobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go build .\n"))
+	if len(plain) != 1 || plain[0].external {
+		t.Errorf("a step with no cd is external: %+v", plain)
+	}
 	if cfgs[1].external || cfgs[1].dir != "hwy/goat" {
 		t.Errorf("the -C lane = %+v, want in hwy/goat and not external", cfgs[1])
 	}

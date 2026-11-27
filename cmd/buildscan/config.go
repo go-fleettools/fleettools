@@ -503,7 +503,7 @@ func configsOfJob(where, wfName string, wfEnv map[string]string, j job, m map[st
 				cfgs[i].tests = tests
 				cfgs[i].pkgs = pkgs
 				cfgs[i].native = nativeOn(cfgs[i].goos, cfgs[i].goarch, host)
-				cfgs[i].external = cfgs[i].dir == "." && cdLeavesTree(substText(st.WorkingDirectory, m), substText(j.Defaults.Run.WorkingDirectory, m), run)
+				cfgs[i].external = cfgs[i].dir == "." && cdLeavesTree(run)
 			}
 		}
 	}
@@ -626,9 +626,6 @@ func workingDir(step, jobDefault, run string) string {
 	// before it, relative to wherever the step already is.
 	if m := goCRE.FindStringSubmatch(run); m != nil {
 		if d := clean(m[1]); d != "" {
-			if base == "." {
-				return d
-			}
 			return clean(filepath.Join(base, d))
 		}
 	}
@@ -639,11 +636,9 @@ func workingDir(step, jobDefault, run string) string {
 var goCRE = regexp.MustCompile(`\bgo\s+(?:test|build|vet|install|run)\s+-C[\s=]+["']?([^\s"']+)`)
 
 // cdLeavesTree reports whether the command's directory comes from a `cd` that
-// leaves the checkout and nothing in the step or the job pins one inside it.
-func cdLeavesTree(step, jobDefault, run string) bool {
-	if clean(step) != "" || clean(jobDefault) != "" {
-		return false
-	}
+// leaves the checkout. (The caller only asks when the directory fell back to
+// the root, so a step or job directory inside the tree has already answered.)
+func cdLeavesTree(run string) bool {
 	m := cdRE.FindStringSubmatch(run)
 	if m == nil {
 		return false
