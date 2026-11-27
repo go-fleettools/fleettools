@@ -181,8 +181,12 @@ func writeAnswerISO(path, edition string, w io.Writer) error {
 	return nil
 }
 
-// keyFor is how long pressAnyKey keeps sending Enter.
-const keyFor = 3 * time.Minute
+// keyFor is how long pressAnyKey keeps sending Enter. It must END before Setup
+// has a window: run 45897281319 sent Enter for 3 minutes, which reached Setup's
+// "Installing Windows 11" screen, pressed its focused Cancel button, and left
+// "Are you sure you want to quit?" open at 12% for the rest of the build. The
+// firmware reaches the CD prompt (which lasts 5 s) well within this.
+const keyFor = 45 * time.Second
 
 // snapshot writes one numbered screenshot and says how big the Windows disk
 // has grown, the cheapest sign that Setup is copying files.
