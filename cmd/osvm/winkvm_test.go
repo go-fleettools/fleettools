@@ -261,3 +261,31 @@ func TestPressAnyKey(t *testing.T) {
 		t.Fatal("a missing monitor socket was accepted")
 	}
 }
+
+func TestShotDue(t *testing.T) {
+	got := 0
+	for n := 1; n <= 50; n++ {
+		if shotDue(n) {
+			got++
+		}
+	}
+	if got != 25 || !shotDue(50) || shotDue(52) || shotDue(51) {
+		t.Errorf("first 500 s take %d screenshots, want 25 (every 20 s)", got)
+	}
+	if shotDue(61) || shotDue(91) || !shotDue(60) || !shotDue(90) || !shotDue(120) {
+		t.Errorf("after ten minutes screenshots are every 5 minutes (ticks 90, 120, ...)")
+	}
+}
+
+func TestDiskBytes(t *testing.T) {
+	if _, ok := diskBytes(filepath.Join(t.TempDir(), "nope")); ok {
+		t.Error("a missing disk reported a size")
+	}
+	f := filepath.Join(t.TempDir(), "d")
+	if err := os.WriteFile(f, make([]byte, 10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, ok := diskBytes(f); !ok || n != 10 {
+		t.Errorf("diskBytes = %d, %v", n, ok)
+	}
+}
