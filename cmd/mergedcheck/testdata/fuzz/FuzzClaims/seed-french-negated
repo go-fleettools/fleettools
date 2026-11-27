@@ -1,0 +1,2 @@
+go test fuzz v1
+string("La PR #12 n'est pas encore fusionnée ; « PR #13 fusionnée » reste cité. owner/repo#14 a été fusionné.")
