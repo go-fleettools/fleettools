@@ -590,6 +590,16 @@ func vetAll(f finding, dir string) []vetFailure {
 // either: the CI lines read are the ones run at the root.
 func vetModule(c config, modDir string, exempt map[string][]string, exclude []*regexp.Regexp) ([]byte, error) {
 	b, err := vetOnce(c, modDir, exempt, exclude)
+	if err != nil && noPackagesRE.Match(b) {
+		// ⛔ Only when EVERY file of the module carries a build constraint (a Hugo
+		// site's `//go:build tools` kit.go): the module is real, and a tag the files
+		// themselves name is what compiles it. Any other "no packages" stays a failure.
+		if tags := constrainedOnlyTags(modDir); len(tags) > 0 {
+			t := c
+			t.tags = mergeTags(c.tags, tags)
+			return vetOnce(t, modDir, exempt, exclude)
+		}
+	}
 	if err == nil || !cgoCrossBlocked(c, string(b)) {
 		return b, err
 	}
