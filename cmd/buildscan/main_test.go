@@ -433,6 +433,42 @@ jobs:
 	}
 }
 
+// A step whose working-directory is not in the tree (another repository checked
+// out at run time) is not a configuration of THIS tree: vetting the root for it
+// reported "no Go files" about a package the step never builds.
+func TestVetSkipsAWorkingDirectoryTheTreeDoesNotContain(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "go.mod", "module example.test\n\ngo 1.27\n")
+	write(t, dir, "cmd/x/main.go", "package main\n\nfunc main() {}\n")
+	write(t, dir, ".github/workflows/ci.yml", `
+jobs:
+  judge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: judge the floor
+        working-directory: judge
+        run: go run . --offline
+`)
+	f, err := scan(dir, "example/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := vetAll(f, dir); len(got) != 0 {
+		t.Fatalf("a directory that is not in the tree was vetted as the root: %+v", got)
+	}
+	// Control: the same step with the directory PRESENT is vetted (and fails,
+	// there being no Go file in it), so the skip above is the missing directory
+	// and not a vet that never runs.
+	write(t, dir, "judge/README", "x\n")
+	f, err = scan(dir, "example/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := vetAll(f, dir); len(got) == 0 {
+		t.Fatalf("control: a present directory with no Go files was not vetted; configs %v", f.configs)
+	}
+}
+
 // It reads its arguments: the lesson redscan#77 learned, where -h was a full
 // fleet sweep.
 func TestItReadsItsArguments(t *testing.T) {
