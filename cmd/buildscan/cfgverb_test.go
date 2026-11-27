@@ -168,6 +168,53 @@ func TestForeignCgoBuildFallsBackToTheHostPlatform(t *testing.T) {
 	}
 }
 
+// ⛔ A `-race` lane of another platform needs that platform's C toolchain (the
+// race runtime is C). Seen on go-widgets/tray from a Mac: "go: -race requires
+// cgo" and "relocation target __tsan_free not defined" failed a gate that had
+// nothing wrong to report.
+func TestForeignRaceLaneIsTheCToolchainNotTheTree(t *testing.T) {
+	foreign := "linux"
+	if runtime.GOOS == "linux" {
+		foreign = "darwin"
+	}
+	c := config{goos: foreign, goarch: runtime.GOARCH, native: true, cgo: cgoEither}
+	for _, out := range []string{
+		"go: -race requires cgo; enable cgo by setting CGO_ENABLED=1\n",
+		"runtime.(*mspan).setUserArenaChunkToFault: relocation target __tsan_free not defined\n",
+	} {
+		if !cgoCrossBlocked(c, out) {
+			t.Errorf("%q was taken for a verdict on the tree", out)
+		}
+	}
+	if cgoCrossBlocked(c, "./a.go:3:5: undefined: x\n") {
+		t.Error("a Go error was taken for the C toolchain")
+	}
+	c.goos, c.goarch = runtime.GOOS, runtime.GOARCH
+	if cgoCrossBlocked(c, "go: -race requires cgo\n") {
+		t.Error("a host-platform build was excused: its failure is real")
+	}
+}
+
+// ⛔ A `go test -race` lane is compiled with -race, not with a bare `race` tag
+// (which links the race runtime's references without the runtime and failed
+// every tree on every host). A foreign-platform lane falls back to the host.
+func TestRaceLaneIsVettedWithTheRaceFlag(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("linux is the foreign target of this fixture")
+	}
+	dir := newClone(t, false)
+	write(t, dir, ".github/workflows/ci.yml",
+		"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: go test -race ./...\n")
+	commit(t, dir, "a.go", "package a\n")
+	if !vetPasses(t, dir) {
+		t.Fatal("a clean tree failed its -race lane: the bare race tag was compiled")
+	}
+	commit(t, dir, "r_race.go", "//go:build race\n\npackage a\n\nvar R int = \"x\"\n")
+	if vetPasses(t, dir) {
+		t.Fatal("a type error in a race-only file went unseen")
+	}
+}
+
 func TestConfigurationsCarryTheirVerbAndNativeness(t *testing.T) {
 	src := "jobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n" +
 		"      - run: go build ./...\n" +
