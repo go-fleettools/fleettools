@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
@@ -58,6 +59,9 @@ one judged. The "renovate" key of package.json is NOT read. Files are parsed as
 strict JSON: JSON5 features make a file UNREAD, with the reason.
 
 Cost: one GraphQL query per 100 repositories of each organisation; no REST.
+When GitHub answers HTTP 502 or 504 (its GraphQL time limit), the same page is
+asked again with half as many repositories, down to one, and each halving is
+printed; the smaller size is kept for the rest of that organisation.
 
 Exit status: 0 no duplicate and everything read, 1 a duplicate found, 2 something
 could not be read (a failed query, an unparsable config, no organisation) --
@@ -106,16 +110,50 @@ func orgList(flagValue string, all func() ([]string, error)) ([]string, error) {
 	return out, nil
 }
 
-// fetchFunc runs the organisation query for one page and returns the raw JSON.
-type fetchFunc func(org, cursor string) ([]byte, error)
+// fetchFunc runs the organisation query for one page of at most first
+// repositories and returns the raw JSON.
+type fetchFunc func(org, cursor string, first int) ([]byte, error)
+
+// pageSize is the first page asked for: GraphQL's maximum.
+const pageSize = 100
+
+// gatewayGaveUp reports a GitHub front end that gave up on the query, which
+// for GraphQL is its ~10 s execution limit: openweft answered HTTP 502 four
+// times out of four over four days (2026-11-23 to 2026-11-27) to a page of
+// 100 repositories x 9 blob objects. The same cursor asked for fewer
+// repositories is a smaller query, not the same one again.
+func gatewayGaveUp(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "HTTP 502") || strings.Contains(msg, "HTTP 504")
+}
+
+// fetchShrinking asks for one page and, while the gateway gives up, asks for
+// the SAME cursor with half as many repositories. Nothing of a failed page was
+// read, so nothing is counted twice. The smaller size is kept for the pages
+// that follow. A page of one that still fails is the answer, returned as is.
+// Every halving is printed, so a slow organisation is visible as one.
+func fetchShrinking(fetch fetchFunc, org, cursor string, size *int, stdout io.Writer) ([]byte, error) {
+	// The condition is on the way BACK into the loop, not out of it: what is
+	// not a halving returns, so a broken condition ends the loop instead of
+	// spinning on a successful answer.
+	for {
+		raw, err := fetch(org, cursor, *size)
+		if err != nil && gatewayGaveUp(err) && *size > 1 {
+			*size /= 2
+			fmt.Fprintf(stdout, "%s  page size halved to %d after: %v\n", org, *size, err)
+			continue
+		}
+		return raw, err
+	}
+}
 
 const fileFragment = `fragment B on Blob { text isTruncated }`
 
 func buildQuery() string {
 	var b strings.Builder
-	b.WriteString(`query($org: String!, $cursor: String) { organization(login: $org) {
+	b.WriteString(`query($org: String!, $cursor: String, $first: Int!) { organization(login: $org) {
  cfg: repository(name: ".github") { object(expression: "HEAD:config.js") { ...B } }
- repositories(first: 100, after: $cursor) {
+ repositories(first: $first, after: $cursor) {
   pageInfo { hasNextPage endCursor }
   nodes { name isArchived isFork`)
 	for i, p := range candidates {
@@ -128,8 +166,9 @@ func buildQuery() string {
 // ghAnswer is the gh seam; a test replaces it.
 var ghAnswer = fleet.GHAnswer
 
-func fetchGraphQL(org, cursor string) ([]byte, error) {
-	args := []string{"api", "graphql", "-f", "query=" + buildQuery(), "-f", "org=" + org}
+func fetchGraphQL(org, cursor string, first int) ([]byte, error) {
+	// -F, not -f: $first is an Int!, and -f would send the string "100".
+	args := []string{"api", "graphql", "-f", "query=" + buildQuery(), "-f", "org=" + org, "-F", "first=" + strconv.Itoa(first)}
 	if cursor != "" {
 		args = append(args, "-f", "cursor="+cursor)
 	}
@@ -239,9 +278,10 @@ func scanOrg(org string, stdout io.Writer, t *tally, fetch fetchFunc) error {
 		cursor string
 		inh    Inherited
 		on     bool
+		size   = pageSize
 	)
 	for first := true; ; first = false {
-		raw, err := fetch(org, cursor)
+		raw, err := fetchShrinking(fetch, org, cursor, &size, stdout)
 		if err != nil {
 			return err
 		}

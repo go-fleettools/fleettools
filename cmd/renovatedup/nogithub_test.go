@@ -82,20 +82,22 @@ func TestFetchGraphQLKeepsTheAnswerGhPrintsWithItsFailure(t *testing.T) {
 	fail := errors.New("gh: Could not resolve")
 
 	ghAnswer = func(args ...string) ([]byte, error) { return []byte(`{"data":{}}`), fail }
-	if b, err := fetchGraphQL("acme", ""); err != nil || string(b) != `{"data":{}}` {
+	if b, err := fetchGraphQL("acme", "", 100); err != nil || string(b) != `{"data":{}}` {
 		t.Errorf("a JSON answer with a failing exit gave %q, %v", b, err)
 	}
 	ghAnswer = func(args ...string) ([]byte, error) { return []byte(`<html>`), fail }
-	if _, err := fetchGraphQL("acme", ""); err != fail {
+	if _, err := fetchGraphQL("acme", "", 100); err != fail {
 		t.Errorf("a non-JSON answer gave %v, want the failure", err)
 	}
 	ghAnswer = func(args ...string) ([]byte, error) { return nil, fail }
-	if _, err := fetchGraphQL("acme", ""); err != fail {
+	if _, err := fetchGraphQL("acme", "", 100); err != fail {
 		t.Errorf("no answer gave %v, want the failure", err)
 	}
 	var seen []string
 	ghAnswer = func(args ...string) ([]byte, error) { seen = args; return []byte(`{}`), nil }
-	if _, err := fetchGraphQL("acme", "CUR"); err != nil || !strings.Contains(strings.Join(seen, " "), "cursor=CUR") {
+	if _, err := fetchGraphQL("acme", "CUR", 25); err != nil ||
+		!strings.Contains(strings.Join(seen, " "), "cursor=CUR") ||
+		!strings.Contains(strings.Join(seen, " "), "-F first=25") {
 		t.Errorf("a clean answer: %v, args %v", err, seen)
 	}
 }
