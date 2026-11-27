@@ -121,19 +121,39 @@ func ScanGo(rel string, src []byte) (GoScan, error) {
 	for _, m := range awsExplicit {
 		explicitAWS = explicitAWS || bytes.Contains(src, []byte(m))
 	}
+	// companions holds every spelling of `<NAME>_FROM` the file contains: a
+	// string literal, or a const's name joined to the literal "_FROM".
+	companions := map[string]bool{}
+	constVals := map[string]string{}
+	var joined []string // consts joined to "_FROM", resolved once all consts are known
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.ValueSpec:
-			for _, v := range x.Values {
+			for i, v := range x.Values {
 				envConst(v)
+				if lit, ok := v.(*ast.BasicLit); ok && lit.Kind == token.STRING && i < len(x.Names) {
+					constVals[x.Names[i].Name], _ = strconv.Unquote(lit.Value)
+				}
 			}
 		case *ast.AssignStmt:
 			for _, v := range x.Rhs {
 				envConst(v)
 			}
+		case *ast.BinaryExpr:
+			// `envPassword + "_FROM"`
+			if id, ok := x.X.(*ast.Ident); ok && x.Op == token.ADD {
+				if lit, ok := x.Y.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					if suffix, _ := strconv.Unquote(lit.Value); suffix == "_FROM" {
+						joined = append(joined, id.Name)
+					}
+				}
+			}
 		case *ast.BasicLit:
 			// a number or a rune literal does not unquote to a URL.
 			s, _ := strconv.Unquote(x.Value)
+			if strings.HasSuffix(s, "_FROM") {
+				companions[s] = true
+			}
 			if scheme, pw, ok := URLSecret(s); ok {
 				line := fset.Position(x.Pos()).Line
 				if placeholder(pw) {
@@ -167,6 +187,22 @@ func ScanGo(rel string, src []byte) (GoScan, error) {
 		}
 		return true
 	})
+	// a name the file also reads by reference (`<NAME>_FROM`, through a
+	// secretsource resolver) is received by reference: the plain name is the
+	// fallback, not a plaintext input the gate should refuse.
+	for _, id := range joined {
+		if v, ok := constVals[id]; ok {
+			companions[v+"_FROM"] = true
+		}
+	}
+	kept := gs.Findings[:0]
+	for _, fd := range gs.Findings {
+		if (fd.Source == "env-const" || fd.Source == "env") && companions[fd.Name+"_FROM"] {
+			continue
+		}
+		kept = append(kept, fd)
+	}
+	gs.Findings = kept
 	return gs, nil
 }
 

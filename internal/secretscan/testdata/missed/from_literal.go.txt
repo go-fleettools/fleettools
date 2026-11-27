@@ -1,0 +1,18 @@
+package dcs
+
+// The same shape written with literals instead of consts.
+
+import (
+	"os"
+
+	"github.com/go-authn/secretsource"
+)
+
+func password() (string, error) {
+	if ref := os.Getenv("WEFT_DCS_PASSWORD_FROM"); ref != "" {
+		return secretsource.Resolve(ref)
+	}
+	return os.Getenv("WEFT_DCS_PASSWORD"), nil
+}
+
+func token() string { return os.Getenv("WEFT_DCS_TOKEN") }

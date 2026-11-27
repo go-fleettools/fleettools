@@ -1,0 +1,26 @@
+package dcs
+
+// The env name is held in a const and the secret is also read by reference
+// through a secretsource resolver: <NAME>_FROM is the companion.
+
+import (
+	"os"
+
+	"github.com/go-authn/secretsource"
+)
+
+const (
+	envPassword     = "WEFT_DCS_PASSWORD"
+	envPasswordFrom = "WEFT_DCS_PASSWORD_FROM"
+	envToken        = "WEFT_DCS_TOKEN"
+)
+
+func password() (string, error) {
+	if ref := os.Getenv(envPasswordFrom); ref != "" {
+		return secretsource.Resolve(ref)
+	}
+	return os.Getenv(envPassword), nil
+}
+
+// envToken has no companion: still a plaintext input.
+func token() string { return os.Getenv(envToken) }
