@@ -35,7 +35,7 @@ import (
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
 	"github.com/spf13/cobra"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 const longHelp = `Reads a checks file (kept in the deploy repository, for instance
