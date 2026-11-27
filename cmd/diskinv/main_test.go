@@ -220,10 +220,13 @@ func TestClonesLimitAndAGitFailureIsNotAZero(t *testing.T) {
 func TestRefusalsSayWhyAndCountOperands(t *testing.T) {
 	d := t.TempDir()
 	for _, sub := range []string{"top", "clones"} {
-		for _, args := range [][]string{{sub}, {sub, d, d}, {sub, "-n", "0", d}} {
-			out, errs, code := drive(t, args...)
-			if code != 2 || out != "" || !strings.Contains(errs, "diskinv "+sub) {
-				t.Errorf("%v: status %d, stdout %q, stderr %q", args, code, out, errs)
+		for _, c := range []struct {
+			args []string
+			want string
+		}{{[]string{sub}, "arg(s)"}, {[]string{sub, d, d}, "arg(s)"}, {[]string{sub, "-n", "0", d}, "diskinv " + sub}} {
+			out, errs, code := drive(t, c.args...)
+			if code != 2 || out != "" || !strings.Contains(errs, c.want) {
+				t.Errorf("%v: status %d, stdout %q, stderr %q", c.args, code, out, errs)
 			}
 		}
 		_, errs, code := drive(t, sub, "/nonexistent-diskinv")
@@ -265,9 +268,12 @@ func TestAScanOfAPathThatIsGoneIsRecordedNotZero(t *testing.T) {
 		t.Fatalf("bytes %d newest %v unreadable %d errs %v", b, n, s.unreadable, s.errs)
 	}
 	c := &clone{name: "gone"}
-	inspect(filepath.Join(t.TempDir(), "gone"), c)
-	if c.kind != "?" || len(c.errs) != 1 {
+	inspect(filepath.Join(t.TempDir(), "gone"), 0, c)
+	if c.kind != "file" || c.scanN != 1 || len(c.errs) != 1 || c.bytes != 0 {
 		t.Fatalf("%+v", c)
+	}
+	if got := linkedOf(filepath.Join(t.TempDir(), "no.git")); got != "linked of ?" {
+		t.Fatalf("linkedOf a missing file = %q", got)
 	}
 }
 

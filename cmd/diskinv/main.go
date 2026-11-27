@@ -65,11 +65,8 @@ func RootCmd() *cobra.Command {
 func topCmd() *cobra.Command {
 	var depth, n int
 	c := cli.New("top <dir> [--depth N] [-n 30]", "Largest entries by allocated bytes", longHelp)
-	c.Args = cobra.ArbitraryArgs
+	c.Args = cobra.ExactArgs(1)
 	c.RunE = func(cmd *cobra.Command, args []string) error {
-		if len(args) != 1 {
-			return cli.Unanswerable("diskinv top: exactly one directory is required")
-		}
 		if depth < 1 || n < 1 {
 			return cli.Unanswerable("diskinv top: --depth and -n must be at least 1")
 		}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,11 +60,8 @@ type clone struct {
 func clonesCmd() *cobra.Command {
 	var n int
 	c := cli.New("clones <dir> [-n 50]", "Size and unsaved work of each clone under a directory", longHelp)
-	c.Args = cobra.ArbitraryArgs
+	c.Args = cobra.ExactArgs(1)
 	c.RunE = func(cmd *cobra.Command, args []string) error {
-		if len(args) != 1 {
-			return cli.Unanswerable("diskinv clones: exactly one directory is required")
-		}
 		if n < 1 {
 			return cli.Unanswerable("diskinv clones: -n must be at least 1")
 		}
@@ -102,11 +100,11 @@ func runClones(out io.Writer, dir string, n int) error {
 		cs[i] = &clone{name: e.Name()}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(c *clone) {
+		go func(c *clone, typ fs.FileMode) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			inspect(filepath.Join(dir, c.name), c)
-		}(cs[i])
+			inspect(filepath.Join(dir, c.name), typ, c)
+		}(cs[i], e.Type())
 	}
 	wg.Wait()
 
@@ -160,26 +158,22 @@ func runClones(out io.Writer, dir string, n int) error {
 	return nil
 }
 
-// inspect fills c for the entry at path.
-func inspect(path string, c *clone) {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		c.kind, c.errs = "?", append(c.errs, err.Error())
-		return
-	}
+// inspect fills c for the entry at path, whose directory-entry type is typ.
+// The size comes from the same scan as `top`: a symlink is counted as the link
+// itself (its target is somebody else's bytes) and a path that cannot be
+// examined is an unreadable path in the report, never a zero.
+func inspect(path string, typ fs.FileMode, c *clone) {
 	s := newScan()
+	c.bytes, _ = s.run(path, 0, nil)
+	c.scanN = s.unreadable
+	c.errs = append(c.errs, s.errs...)
 	switch {
-	case fi.Mode()&os.ModeSymlink != 0:
-		// A symlink is the link itself: its target is somebody else's bytes.
+	case typ&fs.ModeSymlink != 0:
 		c.kind = "symlink"
-		c.bytes = statOf(fi).alloc
-	case !fi.IsDir():
-		c.kind = "file"
-		c.bytes = statOf(fi).alloc
-	default:
-		c.bytes, _ = s.run(path, 0, nil)
-		c.scanN = s.unreadable
+	case typ.IsDir():
 		c.kind = "dir"
+	default:
+		c.kind = "file"
 	}
 	c.branch, c.dirty, c.unpush, c.stash, c.wt, c.last = "-", "-", "-", "-", "-", "-"
 	if c.kind == "dir" {
@@ -189,12 +183,13 @@ func inspect(path string, c *clone) {
 
 // inspectGit asks git about a directory that may be a checkout.
 func inspectGit(path string, c *clone) {
-	gfi, _ := os.Lstat(filepath.Join(path, ".git"))
-	if gfi == nil {
+	gfi, err := os.Lstat(filepath.Join(path, ".git"))
+	isDir := err == nil && gfi.IsDir()
+	if err != nil {
 		return // not a git checkout: a plain directory
 	}
 	c.kind = "repo"
-	if !gfi.IsDir() {
+	if !isDir {
 		c.kind = "worktree"
 		c.wt = linkedOf(filepath.Join(path, ".git"))
 	}

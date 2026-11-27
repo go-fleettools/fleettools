@@ -52,12 +52,12 @@ func (s *scan) fail(path string, err error) {
 // unreadable and totals zero, so the caller's "unreadable" statement carries it.
 func (s *scan) run(root string, maxDepth int, rows *[]row) (int64, time.Time) {
 	fi, err := os.Lstat(root)
-	if err != nil {
-		s.fail(root, err)
-		return 0, time.Time{}
+	if err == nil {
+		s.rootDev = statOf(fi).dev
+		return s.walk(root, fi, 0, maxDepth, rows)
 	}
-	s.rootDev = statOf(fi).dev
-	return s.walk(root, fi, 0, maxDepth, rows)
+	s.fail(root, err)
+	return 0, time.Time{}
 }
 
 func (s *scan) walk(path string, fi fs.FileInfo, depth, maxDepth int, rows *[]row) (int64, time.Time) {
