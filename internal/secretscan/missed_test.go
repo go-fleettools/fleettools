@@ -123,8 +123,13 @@ func TestAPasswordInAURLIsFoundInGoTextAndUnits(t *testing.T) {
 	if inputs != 1 || samples != 1 {
 		t.Errorf("inputs %d samples %d, want 1 and 1", inputs, samples)
 	}
-	if strings.Contains(gs.Findings[0].Name, "s3cr3t") {
-		t.Error("the password is reported")
+	if len(gs.Findings) == 0 {
+		t.Fatal("no finding at all")
+	}
+	for _, f := range gs.Findings {
+		if strings.Contains(f.Name, "s3cr3t") {
+			t.Error("the password is reported")
+		}
 	}
 
 	unit := ScanText("a.service", []byte("[Service]\nEnvironment=\"DB=postgres://app:hunter9x@db/x\"\nEnvironment=\"DB=postgres://app:$PW@db/x\"\n"))
@@ -134,6 +139,31 @@ func TestAPasswordInAURLIsFoundInGoTextAndUnits(t *testing.T) {
 	sample := ScanText("c.yaml", []byte("dsn: mysql://root:changeme@h/db\nurl: mysql://root:{{ .Pw }}@h/db\n"))
 	if len(sample) != 1 || !sample[0].Placeholder || sample[0].Kind != "sample" {
 		t.Errorf("sample: %+v", sample)
+	}
+}
+
+// Each clause of URLSecret's condition is held by a row of its own: dropping
+// usable(), the `{` prefix, `%s` or `%v` turns exactly one row red.
+func TestURLSecretRefusesEachKindOfNonValue(t *testing.T) {
+	for _, c := range []struct {
+		in, scheme, pw string
+		ok             bool
+	}{
+		{"sftp://u:p4ssw0rd@h/x", "sftp", "p4ssw0rd", true},
+		{"redis://:pw1@h", "redis", "pw1", true},
+		{"a://u:$PW@h", "", "", false},                   // usable: interpolation
+		{"a://u:<pw>@h", "", "", false},                  // usable: placeholder shape
+		{"a://u:{x@h", "", "", false},                    // `{` prefix, not `{{`
+		{"a://u:ab%sc@h", "", "", false},                 // %s inside
+		{"a://u:ab%vc@h", "", "", false},                 // %v inside
+		{"a://u:%s@h", "", "", false},                    // usable: % prefix
+		{"a://u:$X@h b://v:real1@h", "b", "real1", true}, // skips a refused one, finds the next
+		{"no url here", "", "", false},
+	} {
+		scheme, pw, ok := URLSecret(c.in)
+		if scheme != c.scheme || pw != c.pw || ok != c.ok {
+			t.Errorf("URLSecret(%q) = %q, %q, %v; want %q, %q, %v", c.in, scheme, pw, ok, c.scheme, c.pw, c.ok)
+		}
 	}
 }
 
