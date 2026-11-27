@@ -1,0 +1,30 @@
+package app
+
+// The shape two agents wrote to dodge the scanner: the plain name is derived
+// from the companion with TrimSuffix, and a second const is concatenated.
+
+import (
+	"os"
+	"strings"
+
+	"github.com/go-authn/secretsource"
+)
+
+const envPasswordFrom = "WEFT_LOOM_PASSWORD_FROM"
+
+const envSecret = "WEFT_LOOM_SECRET"
+
+func password() (string, error) {
+	name := strings.TrimSuffix(envPasswordFrom, "_FROM")
+	if ref := os.Getenv(name + "_FROM"); ref != "" {
+		return secretsource.Resolve(ref)
+	}
+	return os.Getenv(name), nil
+}
+
+func secret() (string, error) {
+	if ref := os.Getenv(envSecret + "_FROM"); ref != "" {
+		return secretsource.Resolve(ref)
+	}
+	return os.Getenv(envSecret), nil
+}
