@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -39,14 +41,13 @@ func TestKVMValidate(t *testing.T) {
 }
 
 func TestQemuArgsLayout(t *testing.T) {
-	p := kvmPaths{root: "r.qcow2", boot: "b.img", answer: "a.iso", vars: "v.fd", code: "c.fd", console: "c.log", iso: "w.iso"}
+	p := kvmPaths{root: "r.qcow2", answer: "a.iso", vars: "v.fd", code: "c.fd", console: "c.log", iso: "w.iso"}
 	a := strings.Join(qemuArgs(goodKVM(), p), " ")
 	for _, want := range []string{
-		"accel=kvm", "-cpu host", "-m 6144", "-smp 4", "-serial file:c.log",
+		"accel=kvm", "-cpu host,-vmx", "-m 6144", "-smp 4", "-serial file:c.log",
 		"readonly=on,file=c.fd", "if=pflash,format=raw,file=v.fd",
 		"file=r.qcow2 -device ide-hd,drive=root,bus=ahci.0,bootindex=1",
-		"file=b.img -device ide-hd,drive=boot,bus=ahci.1,bootindex=2",
-		"file=w.iso -device ide-cd,drive=iso,bus=ahci.2", "file=a.iso -device ide-cd,drive=answer,bus=ahci.3",
+		"file=w.iso -device ide-cd,drive=iso,bus=ahci.1,bootindex=2", "file=a.iso -device ide-cd,drive=answer,bus=ahci.2",
 		"e1000e,netdev=n0",
 	} {
 		if !strings.Contains(a, want) {
@@ -56,14 +57,34 @@ func TestQemuArgsLayout(t *testing.T) {
 	if strings.Contains(a, "virtio") {
 		t.Errorf("a virtio CD without --virtio-iso: %s", a)
 	}
+	if n := strings.Count(a, "ide-hd"); n != 1 {
+		t.Errorf("%d fixed disks, want exactly the Windows disk: %s", n, a)
+	}
 	p.virtio = "v.iso"
-	if a := strings.Join(qemuArgs(goodKVM(), p), " "); !strings.Contains(a, "file=v.iso -device ide-cd,drive=virtio,bus=ahci.4") {
+	if a := strings.Join(qemuArgs(goodKVM(), p), " "); !strings.Contains(a, "file=v.iso -device ide-cd,drive=virtio,bus=ahci.3") {
 		t.Errorf("no virtio CD: %s", a)
 	}
 	o := goodKVM()
 	o.NoKVM = true
 	if a := strings.Join(qemuArgs(o, p), " "); !strings.Contains(a, "accel=tcg") || strings.Contains(a, "-cpu host") {
 		t.Errorf("--no-kvm: %s", a)
+	}
+}
+
+func TestQemuArgsMonitor(t *testing.T) {
+	monitor := func(a []string) string {
+		for i, x := range a {
+			if x == "-monitor" && i+1 < len(a) {
+				return a[i+1]
+			}
+		}
+		return "<absent>"
+	}
+	if got := monitor(qemuArgs(kvmOpts{CPUs: 1, MemoryMB: 4096}, kvmPaths{})); got != "none" {
+		t.Fatalf("no monitor wanted, got %q", got)
+	}
+	if got := monitor(qemuArgs(kvmOpts{CPUs: 1, MemoryMB: 4096}, kvmPaths{monitor: "/m/m.sock"})); got != "unix:/m/m.sock,server,nowait" {
+		t.Fatalf("monitor socket missing, got %q", got)
 	}
 }
 
@@ -177,5 +198,66 @@ func TestFirstExisting(t *testing.T) {
 	}
 	if _, err := firstExisting("", []string{"/nonexistent/x"}); err == nil || !slices.Contains(strings.Fields(err.Error()), "/nonexistent/x,") && !strings.Contains(err.Error(), "install ovmf") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestWriteAnswerISO(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "answer.iso")
+	var w bytes.Buffer
+	if err := writeAnswerISO(p, "Windows 11 Pro", &w); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(p); err != nil || fi.Size() == 0 {
+		t.Fatalf("no answer ISO: %v", err)
+	}
+	if err := writeAnswerISO(p, "Windows 11 Pro", &w); err == nil {
+		t.Fatal("an existing answer ISO was overwritten")
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatal("a refused write removed the existing file:", err)
+	}
+}
+
+// TestPressAnyKey serves a QEMU monitor on a unix socket and checks that Enter
+// is sent, then that a cancelled context stops the sender.
+func TestPressAnyKey(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "m.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Skip("no unix socket:", err)
+	}
+	defer l.Close()
+	got := make(chan string, 8)
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = c.Write([]byte("QEMU monitor\n"))
+			line, _ := bufio.NewReader(c).ReadString('\n')
+			got <- strings.TrimSpace(line)
+			c.Close()
+		}
+	}()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { pressAnyKey(ctx, sock, time.Minute); close(done) }()
+	select {
+	case line := <-got:
+		if line != "sendkey ret" {
+			t.Fatalf("sent %q", line)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no key was sent")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("pressAnyKey ignored the cancelled context")
+	}
+	if err := screenshot(filepath.Join(t.TempDir(), "none.sock"), "x.png"); err == nil {
+		t.Fatal("a missing monitor socket was accepted")
 	}
 }

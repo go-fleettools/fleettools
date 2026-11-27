@@ -107,6 +107,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -368,8 +369,9 @@ func scan(dir, name string) (finding, error) {
 	// are built once per module, not once per file.
 	byModule := map[string][]build.Context{}
 	for _, c := range cfgs {
-		m := moduleOf(c.dir, mods)
-		byModule[m] = append(byModule[m], contextsOf(c)...)
+		for _, m := range modulesOf(c.dir, mods) {
+			byModule[m] = append(byModule[m], contextsOf(c)...)
+		}
 	}
 	for _, rel := range files {
 		m := moduleOf(filepath.Dir(rel), mods)
@@ -425,6 +427,19 @@ func moduleOf(rel string, mods []string) string {
 		}
 	}
 	return best
+}
+
+// modulesOf is the module(s) a configuration compiles. Normally one (moduleOf).
+// ⛔ When the step runs at the repository root and the root has NO go.mod -- a
+// repository whose module is nested, jcmturner/gokrb5's v8/ -- "." names no
+// module at all (`go vet ./...` there says "directory prefix . does not contain
+// main module"), and the step reaches the modules below it: every one.
+func modulesOf(rel string, mods []string) []string {
+	m := moduleOf(rel, mods)
+	if m == "." && len(mods) > 0 && !slices.Contains(mods, ".") {
+		return mods
+	}
+	return []string{m}
 }
 
 // contextsOf builds the go/build contexts of one configuration: one, or TWO
@@ -546,22 +561,23 @@ func vetAll(f finding, dir string) []vetFailure {
 	var out []vetFailure
 	done := map[string]bool{}
 	for _, c := range f.configs {
-		m := moduleOf(c.dir, mods)
 		if done[c.key()] {
 			continue
 		}
 		done[c.key()] = true
-		var exempt map[string][]string
-		var exclude []*regexp.Regexp
-		if m == "." {
-			exempt = vetExemptions(dir)
-			exclude = vetExclusions(dir)
+		for _, m := range modulesOf(c.dir, mods) {
+			var exempt map[string][]string
+			var exclude []*regexp.Regexp
+			if m == "." {
+				exempt = vetExemptions(dir)
+				exclude = vetExclusions(dir)
+			}
+			b, err := vetModule(c, filepath.Join(dir, m), exempt, exclude)
+			if err == nil {
+				continue
+			}
+			out = append(out, vetFailure{cfg: c, module: m, err: firstError(string(b), err)})
 		}
-		b, err := vetModule(c, filepath.Join(dir, m), exempt, exclude)
-		if err == nil {
-			continue
-		}
-		out = append(out, vetFailure{cfg: c, module: m, err: firstError(string(b), err)})
 	}
 	return out
 }
@@ -587,6 +603,10 @@ func vetModule(c config, modDir string, exempt map[string][]string, exclude []*r
 		cmd.Dir = modDir
 		cmd.Env = env
 		return cmd.CombinedOutput()
+	}
+	if len(c.files) > 0 {
+		// `go run x.go` compiled these files and nothing else.
+		return run(append(base, c.files...)...)
 	}
 	if len(exempt) == 0 && len(exclude) == 0 {
 		return run(append(base, "./...")...)

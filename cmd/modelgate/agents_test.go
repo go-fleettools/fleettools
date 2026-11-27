@@ -102,7 +102,7 @@ func TestTypedAgentModel(t *testing.T) {
 		{"fork still ignores all", "Review PR 5", "fork", "", home, false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := agent(tc.desc, "", tc.subtype, tc.model)
+			p := agent(tc.desc, "bibliography: https://example.org/spec\nprior-art: a/b", tc.subtype, tc.model)
 			in, _ := json.Marshal(map[string]any{"tool_name": "Agent", "cwd": tc.cwd, "tool_input": p.ToolInput})
 			out, _, code := hook(t, string(in))
 			if code != 0 {

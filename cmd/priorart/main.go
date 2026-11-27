@@ -50,6 +50,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-fleettools/fleettools/internal/cli"
 	"github.com/go-fleettools/fleettools/internal/fleet"
@@ -59,6 +60,11 @@ import (
 // gh is the GitHub call (fleet.GH: shared retry policy and call budget),
 // replaced in tests.
 var gh = fleet.GH
+
+// orgPace waits between two organisation searches: GitHub's search API allows
+// 30 requests a minute, so a fleet-wide pass is spaced rather than refused.
+// Replaced in tests.
+var orgPace = func() { time.Sleep(2100 * time.Millisecond) }
 
 // repos lists an organisation's live repositories, replaced in tests.
 var repos = fleet.Repos
@@ -78,6 +84,7 @@ It reads three surfaces and exits 1 if any carries anything:
 
   priorart -repo go-tex/engine "running head"
   priorart -org go-tex "running head"        # tracker across the whole org
+  priorart -all-orgs "windows image"         # the tracker of EVERY org of the account
   priorart -deps "file manager"              # the modules we already import
   priorart -deps=../playground "file tree"   # another module's build list
 
@@ -106,6 +113,15 @@ search (tracker). With -org the tracker is ONE search call for the whole
 organisation; its branches are read only with -branches, one call per
 repository, and until then the output says they were not read.
 
+-all-orgs searches the tracker of EVERY organisation the authenticated account
+belongs to (GitHub's /user/orgs, the same list -deps uses; a committed list
+would drift from the real fleet), one search per organisation, spaced for
+GitHub's 30-a-minute search limit. Organisations with entries are listed one by
+one; clean ones in a single line. An organisation whose search failed is named
+as NOT READ, and a list of organisations that cannot be read, or is empty, is
+one surface not read: status 2, never "no organisation has it". Fleet repos
+named in a brief's "prior-art:" line (modelgate) can be checked this way.
+
 ⛔ A surface it could not read holds the gate SHUT (status 2). An answer not
 obtained is not a negative answer.
 
@@ -121,6 +137,7 @@ func RootCmd() *cobra.Command {
 	var (
 		repoFlags []string
 		org       string
+		allOrgs   bool
 		branches  bool
 		report    bool
 		limit     int
@@ -134,13 +151,18 @@ func RootCmd() *cobra.Command {
 		if cli.HelpRequested(cmd) {
 			return nil
 		}
-		err := run(cmd.OutOrStdout(), args[0], repoFlags, org, branches, report, limit, deps, depsAll)
-		record(cmd.ErrOrStderr(), args[0], repoFlags, org, report, err)
+		err := run(cmd.OutOrStdout(), args[0], repoFlags, org, allOrgs, branches, report, limit, deps, depsAll)
+		ledgerOrg := org
+		if allOrgs {
+			ledgerOrg = "*"
+		}
+		record(cmd.ErrOrStderr(), args[0], repoFlags, ledgerOrg, report, err)
 		return err
 	}
 	f := cmd.Flags()
 	f.StringArrayVar(&repoFlags, "repo", nil, "repository to read, owner/name (repeatable)")
 	f.StringVar(&org, "org", "", "read the tracker of a whole organisation in one call")
+	f.BoolVar(&allOrgs, "all-orgs", false, "read the tracker of EVERY organisation this account belongs to (GitHub's /user/orgs), one search each, reported per organisation")
 	f.BoolVar(&branches, "branches", false, "with -org, also read every repository's branches (one call each)")
 	f.BoolVar(&report, "report", false, "print the findings and exit 0 even so")
 	// ⛔ A string with NoOptDefVal, not a bool: `-deps` alone means the module
@@ -155,14 +177,14 @@ func RootCmd() *cobra.Command {
 	return cmd
 }
 
-func run(w io.Writer, subject string, repoFlags []string, org string, withBranches, report bool, limit int, deps string, depsAll bool) error {
+func run(w io.Writer, subject string, repoFlags []string, org string, allOrgs, withBranches, report bool, limit int, deps string, depsAll bool) error {
 	terms := Terms(subject)
 	if len(terms) == 0 {
 		return cli.Unanswerable("subject %q holds no word to search for", subject)
 	}
 	fmt.Fprintf(w, "subject %q → terms %s\n", subject, strings.Join(terms, ", "))
 
-	rs, err := resolve(repoFlags, org, withBranches, deps)
+	rs, err := resolve(repoFlags, org, allOrgs, withBranches, deps)
 	if err != nil {
 		return cli.Wrap(err)
 	}
@@ -177,8 +199,41 @@ func run(w io.Writer, subject string, repoFlags []string, org string, withBranch
 	if org != "" {
 		scopes = append(scopes, "org:"+org)
 	}
+	// ⛔ -all-orgs: one search per organisation of the account, REPORTED per
+	// organisation. A list that cannot be read, or that is empty, is a surface
+	// not read (status 2), never "no organisation has it".
+	orgScope := map[string]bool{}
+	if allOrgs {
+		names, err := ourOrgs()
+		switch {
+		case err != nil:
+			unread++
+			fmt.Fprintf(w, "\n⛔ the list of this account's organisations was NOT READ, so no organisation was searched: %v\n", err)
+		case len(names) == 0:
+			unread++
+			fmt.Fprintln(w, "\n⛔ the account reports NO organisation: nothing was searched, which is not an absence of prior art")
+		default:
+			sort.Strings(names)
+			for _, n := range names {
+				scopes = append(scopes, "org:"+n)
+				orgScope["org:"+n] = true
+			}
+		}
+	}
+	var cleanOrgs []string
+	searched := 0
 	for _, scope := range scopes {
+		if orgScope[scope] {
+			if searched > 0 {
+				orgPace()
+			}
+			searched++
+		}
 		items, total, err := Tracker(scope, terms)
+		if err == nil && len(items) == 0 && orgScope[scope] {
+			cleanOrgs = append(cleanOrgs, strings.TrimPrefix(scope, "org:"))
+			continue
+		}
 		switch {
 		case err != nil:
 			unread++
@@ -214,6 +269,10 @@ func run(w io.Writer, subject string, repoFlags []string, org string, withBranch
 		default:
 			fmt.Fprintf(w, "   %s tracker: clean (open and closed)\n", scope)
 		}
+	}
+
+	if len(cleanOrgs) > 0 {
+		fmt.Fprintf(w, "   %d organisation tracker(s) clean (open and closed): %s\n", len(cleanOrgs), strings.Join(cleanOrgs, ", "))
 	}
 
 	for _, repo := range rs.branches {
@@ -327,7 +386,7 @@ func run(w io.Writer, subject string, repoFlags []string, org string, withBranch
 	case unread > 0:
 		return cli.Unanswerable("%d surface(s) could not be read; that is not an absence of prior art", unread)
 	default:
-		n := len(rs.tracker) + len(rs.branches)
+		n := len(rs.tracker) + len(rs.branches) + len(orgScope)
 		if org != "" {
 			n++
 		}
@@ -354,7 +413,7 @@ type targets struct {
 	deps string
 }
 
-func resolve(repoFlags []string, org string, withBranches bool, deps string) (targets, error) {
+func resolve(repoFlags []string, org string, allOrgs, withBranches bool, deps string) (targets, error) {
 	var t targets
 	t.deps = deps
 	for _, r := range repoFlags {
@@ -388,8 +447,8 @@ func resolve(repoFlags []string, org string, withBranches bool, deps string) (ta
 			}
 		}
 	}
-	if len(t.tracker) == 0 && len(t.branches) == 0 && org == "" && deps == "" {
-		return t, cli.Unanswerable("no surface: pass -repo owner/name, -org name or -deps")
+	if len(t.tracker) == 0 && len(t.branches) == 0 && org == "" && !allOrgs && deps == "" {
+		return t, cli.Unanswerable("no surface: pass -repo owner/name, -org name, -all-orgs or -deps")
 	}
 	sort.Strings(t.branches)
 	sort.Strings(t.unreadBranches)

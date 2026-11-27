@@ -76,6 +76,32 @@ func TestProvisionScriptPrintsTheMarker(t *testing.T) {
 	}
 }
 
+func TestUnattendCreatesTheBuildAccount(t *testing.T) {
+	doc := unattendXML("Windows 11 Pro", "pw")
+	for _, want := range []string{"<LocalAccounts>", "<Name>" + buildUser + "</Name>", "<Group>Administrators</Group>", "<Username>" + buildUser + "</Username>"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("answer file lacks %q", want)
+		}
+	}
+	if !strings.Contains(provisionScript, "net user "+buildUser+" /active:no") {
+		t.Error("the provisioning script leaves the build account active")
+	}
+}
+
+func TestProvisionScriptFollowsCloudbase(t *testing.T) {
+	for _, want := range []string{"SetSetupComplete.cmd", "0e7fa42e0cbc0ce7657f85730b0c6cc7afc4087a3639df0ff51a721a0be19bd5", "CloudbaseInitSetup_1_1_8_x64.msi"} {
+		if !strings.Contains(provisionScript, want) {
+			t.Errorf("winprovision.ps1 lacks %q", want)
+		}
+	}
+	if strings.Contains(provisionScript, "_Stable_") {
+		t.Error("the cloudbase-init MSI must be pinned, not the moving stable URL")
+	}
+	if i, j := strings.Index(provisionScript, "SetSetupComplete.cmd"), strings.Index(provisionScript, "sysprep.exe"); i < 0 || j < 0 || i > j {
+		t.Error("SetSetupComplete.cmd must run before sysprep")
+	}
+}
+
 func TestBuilderBlockDevices(t *testing.T) {
 	bd := builderBlockDevices("root", "boot", "iso", "ans")
 	if len(bd) != 4 {

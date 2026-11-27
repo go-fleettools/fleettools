@@ -256,7 +256,12 @@ func hookMode(out, errOut io.Writer, stdin io.Reader) int {
 		fmt.Fprintf(errOut, "modelgate: could not decode the hook payload (%v); allowing (a refusal is not a verdict)\n", err)
 		return 0
 	}
-	v := decide(p, clock())
+	v, waivers := decideAll(p, clock())
+	for _, w := range waivers {
+		if err := appendLedger(clock(), w, p.ToolInput.Prompt); err != nil {
+			fmt.Fprintf(errOut, "modelgate: could not record the %s waiver (%v); allowing\n", w.key, err)
+		}
+	}
 	switch {
 	case v.deny:
 		writeDecision(out, "deny", v.reason)
@@ -308,6 +313,14 @@ EXPECTS fable (opus, sonnet and haiku are refused there).
 REFUSED: the model is missing (and no agent definition gives one; the environment
 default is sonnet, which hides the choice), or its family is not the class's. Each refusal names the class, the
 matched word and the expected model.
+
+BIBLIOGRAPHY GATE: an Agent call with subagent_type implementer (or untyped /
+general-purpose with an implement-class task) is also refused unless its prompt
+has a line "bibliography: <URL or existing file of a source opened>" and a line
+"prior-art: <owner/repo of the fleet repositories read>"; either may be
+"<key>: none — <reason>", the reason being required and appended to
+os.UserConfigDir()/modelgate/bibliography-waivers.jsonl. Other agent types are
+exempt.
 
 ALLOWED: a task in no class (any explicit model), subagent_type "fork" (it
 ignores the model), a line "model-waiver: <reason>" in the prompt (the reason is
