@@ -3,8 +3,8 @@ module example.com/tagged
 go 1.22
 
 require (
-	github.com/go-widgets/painter v0.17.1
-	github.com/go-widgets/toolkit v0.395.3
+	github.com/go-widgets/painter v0.22.0
+	github.com/go-widgets/toolkit v0.409.0
 )
 
 replace (
