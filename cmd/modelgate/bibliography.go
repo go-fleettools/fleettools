@@ -179,6 +179,13 @@ func decideAll(p payload, now time.Time) (verdict, []waiver) {
 		return v, nil
 	}
 	bv, waivers := bibliographyVerdict(p)
+	if iv := installVerdict(p); iv.deny {
+		if bv.deny {
+			bv.reason += "\n" + iv.reason
+			return bv, nil
+		}
+		return iv, nil
+	}
 	if bv.reason != "" && v.reason != "" {
 		bv.reason = v.reason + "; " + bv.reason
 	}
