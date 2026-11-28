@@ -10,13 +10,11 @@ $ProgressPreference = 'SilentlyContinue'
 function Say($m) {
     Add-Content -Path C:\osvm-provision.log -Value $m
     Write-Host $m
-    # \\.\COM1 written directly (the first-logon command does the same); the
-    # SerialPort class is the fallback when the device path is refused
-    try {
-        $f = [IO.File]::OpenWrite('\\.\COM1'); $b = [Text.Encoding]::ASCII.GetBytes("OSVM: $m`r`n"); $f.Write($b, 0, $b.Length); $f.Close()
-    } catch {
-        try { $p = New-Object System.IO.Ports.SerialPort 'COM1', 115200; $p.Open(); $p.WriteLine("OSVM: $m"); $p.Close() } catch { }
-    }
+    # cmd /c echo ...>\\.\COM1: the form that reached the host from the specialize
+    # pass of run 46121232483 (the first-logon command writes the same way);
+    # shell metacharacters are blanked so a message cannot inject a command
+    $c = $m -replace '[&|<>^%"]', ' '
+    try { cmd.exe /c "echo OSVM: $c>\\.\COM1" | Out-Null } catch { }
 }
 
 function Fetch($url, $out) {

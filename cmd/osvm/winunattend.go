@@ -19,16 +19,29 @@ const provisionName = "osvm-provision.ps1"
 // firstLogonCommand is what Windows runs at the first logon (Microsoft's
 // FirstLogonCommands reference: it runs after logon, before the desktop, as
 // the elevated administrator, and a command's window is the command's own).
-// It opens a visible console (-WindowStyle Normal), writes every step straight
-// to COM1 (\\.\COM1, without the SerialPort class) so the host sees whether the
-// command ran at all, which drives it scanned and whether the script was found,
-// and reports a script that ended or threw. Written in XML-escaped form.
+// It opens a visible console (-WindowStyle Normal) and writes every step to
+// COM1 through `cmd /c echo ...>\\.\COM1`, the form that reached the host from
+// the specialize pass in run 46121232483 (PowerShell's own COM1 write is not
+// used: it was never shown to work). A first command (firstLogonMarker) does
+// the same before PowerShell starts, so a PowerShell that fails to launch is
+// told apart from a first-logon pass that never ran. Written XML-escaped.
 const firstLogonCommand = `powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -Command "` +
-	`function Com($m) { Write-Host $m; try { $f = [IO.File]::OpenWrite('\\.\COM1'); $b = [Text.Encoding]::ASCII.GetBytes('OSVM: ' + $m + [char]13 + [char]10); $f.Write($b, 0, $b.Length); $f.Close() } catch { } }; ` +
+	`function Com($m) { Write-Host $m; $m = $m -replace '[&amp;|&lt;&gt;^%]', ' '; try { cmd.exe /c ('echo OSVM: ' + $m + '&gt;\\.\COM1') | Out-Null } catch { } }; ` +
 	`Com 'firstlogon command started'; $found = $false; ` +
 	`foreach ($d in Get-PSDrive -PSProvider FileSystem) { Com ('drive ' + $d.Root); $p = Join-Path $d.Root '` + provisionName + `'; ` +
 	`if (Test-Path $p) { $found = $true; Com ('running ' + $p); try { &amp; $p } catch { Com ('FAILED: provisioning script threw: ' + $_) }; break } }; ` +
 	`if (-not $found) { Com ('FAILED: ` + provisionName + ` is on no drive') } else { Com 'provisioning script returned' }"`
+
+// firstLogonMarker is the first FirstLogonCommands entry: one cmd.exe line on
+// COM1, no PowerShell involved.
+const firstLogonMarker = `cmd.exe /c echo OSVM: firstlogon pass&gt;\\.\COM1`
+
+// setupCompleteWriter runs in the specialize pass and writes a SetupComplete.cmd
+// that puts "OSVM: setupcomplete" on COM1: Windows runs that file when OOBE has
+// finished, so the line says whether OOBE got there. (The provisioning script
+// later replaces the file with cloudbase-init's.) The redirect comes first so no
+// space ends up in the device name; ^&gt; keeps the redirect for the file's text.
+const setupCompleteWriter = `cmd.exe /c md %WINDIR%\Setup\Scripts &amp; &gt;%WINDIR%\Setup\Scripts\SetupComplete.cmd echo echo OSVM: setupcomplete^&gt;\\.\COM1`
 
 // labConfigBypass are the Windows 11 Setup hardware checks a CI builder does
 // not need to pass: Setup itself is told so in WinPE, before it looks.
@@ -130,6 +143,7 @@ func unattendXML(edition, password string) string {
       <RunSynchronous>
         <RunSynchronousCommand wcm:action="add"><Order>1</Order><Path>reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE /v BypassNRO /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>
         <RunSynchronousCommand wcm:action="add"><Order>2</Order><Path>cmd.exe /c echo OSVM: specialize pass&gt;\\.\COM1</Path></RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add"><Order>3</Order><Path>` + setupCompleteWriter + `</Path></RunSynchronousCommand>
       </RunSynchronous>
     </component>
   </settings>
@@ -168,7 +182,8 @@ func unattendXML(edition, password string) string {
 	b.WriteString(`</Value><PlainText>true</PlainText></Password>
       </AutoLogon>
       <FirstLogonCommands>
-        <SynchronousCommand wcm:action="add"><Order>1</Order><Description>osvm provisioning</Description><CommandLine>` + firstLogonCommand + `</CommandLine></SynchronousCommand>
+        <SynchronousCommand wcm:action="add"><Order>1</Order><Description>osvm first-logon marker</Description><CommandLine>` + firstLogonMarker + `</CommandLine></SynchronousCommand>
+        <SynchronousCommand wcm:action="add"><Order>2</Order><Description>osvm provisioning</Description><CommandLine>` + firstLogonCommand + `</CommandLine></SynchronousCommand>
       </FirstLogonCommands>
     </component>
   </settings>

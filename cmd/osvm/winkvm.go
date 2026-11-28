@@ -164,11 +164,11 @@ const stallTicks = 150
 // disk-size stall never fired. The answer file writes "OSVM: specialize pass"
 // (long before the desktop) and the first-logon command "OSVM: firstlogon ...":
 // once any line is there, the script must say "provision start" within
-// provisionTicks (25 min, the time a desktop gets after specialize and the
-// first logon); with no line at all the guest has no working console by
+// provisionTicks (60 min: run 46121232483 was still working 25 min after
+// specialize; the build's --timeout 100m stays the outer bound); with no line at all the guest has no working console by
 // noConsoleTicks (80 min, Setup took 55 in the longest run).
 const (
-	provisionTicks = 150
+	provisionTicks = 360
 	noConsoleTicks = 480
 	provisionLine  = "provision start"
 )

@@ -154,7 +154,34 @@ func TestUnattendXMLReportsOnCOM1(t *testing.T) {
 			t.Errorf("answer file lacks %q", want)
 		}
 	}
-	if !strings.Contains(provisionScript, `\\.\COM1`) {
-		t.Error("the provisioning script does not write COM1 directly")
+	if !strings.Contains(provisionScript, `cmd.exe /c "echo OSVM: $c>\\.\COM1"`) {
+		t.Error("the provisioning script does not write COM1 through cmd echo")
+	}
+	// no PowerShell write to COM1 anywhere: it was never shown to work
+	for name, s := range map[string]string{"answer file": doc, "script": provisionScript} {
+		if strings.Contains(s, "OpenWrite") || strings.Contains(s, "SerialPort 'COM1'") {
+			t.Errorf("%s writes COM1 from PowerShell", name)
+		}
+	}
+}
+
+// The three markers, in the order a healthy guest shows them: specialize,
+// SetupComplete (OOBE finished), first-logon pass (before PowerShell starts).
+func TestUnattendXMLMarkers(t *testing.T) {
+	doc := unattendXML("Windows 11 Pro", "pw")
+	order := []string{"OSVM: specialize pass", "SetupComplete.cmd echo echo OSVM: setupcomplete^&gt;\\\\.\\COM1", "cmd.exe /c echo OSVM: firstlogon pass&gt;\\\\.\\COM1", "osvm provisioning"}
+	last := -1
+	for _, w := range order {
+		i := strings.Index(doc, w)
+		if i < 0 {
+			t.Fatalf("answer file lacks %q", w)
+		}
+		if i < last {
+			t.Errorf("%q is out of order", w)
+		}
+		last = i
+	}
+	if strings.Contains(doc, "pass>\\") {
+		t.Error("an unescaped > in the answer file")
 	}
 }
