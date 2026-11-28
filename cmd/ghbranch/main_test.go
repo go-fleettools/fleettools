@@ -25,6 +25,17 @@ type server struct {
 	auth     []string
 	methods  []string
 	stay     bool // a deleted branch still answers 200
+	// override answers a request whose path starts with the key (and, for a
+	// key that begins with "DELETE ", whose method is DELETE) with the status
+	// and body given, before anything else looks at it.
+	override map[string]reply
+	// afterDelete is the status a branch read answers once a delete was sent.
+	afterDelete int
+}
+
+type reply struct {
+	status int
+	body   string
 }
 
 func newServer(t *testing.T) *server {
@@ -35,11 +46,28 @@ func newServer(t *testing.T) *server {
 		s.auth = append(s.auth, r.Header.Get("Authorization"))
 		s.methods = append(s.methods, r.Method)
 		p := r.URL.EscapedPath()
+		for k, v := range s.override {
+			key := k
+			if m, rest, ok := strings.Cut(k, " "); ok && m == r.Method {
+				key = rest
+			} else if ok {
+				continue
+			}
+			if exact, ok := strings.CutSuffix(key, "$"); (ok && p == exact) || (!ok && strings.HasPrefix(p, key)) {
+				w.WriteHeader(v.status)
+				_, _ = w.Write([]byte(v.body))
+				return
+			}
+		}
 		switch {
 		case p == "/repos/o/r":
 			_ = json.NewEncoder(w).Encode(map[string]any{"full_name": "o/r", "default_branch": "main"})
 		case strings.HasPrefix(p, "/repos/o/r/branches/"):
 			name := strings.TrimPrefix(p, "/repos/o/r/branches/")
+			if len(s.deleted) > 0 && s.afterDelete != 0 {
+				w.WriteHeader(s.afterDelete)
+				return
+			}
 			b, ok := s.branches[name]
 			if !ok {
 				http.NotFound(w, r)
