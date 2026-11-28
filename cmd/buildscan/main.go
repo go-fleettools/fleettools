@@ -566,6 +566,18 @@ func vetAll(f finding, dir string) []vetFailure {
 			continue
 		}
 		done[c.key()] = true
+		// ⛔ A step that runs in a directory this tree does not contain -- a
+		// reusable workflow's `working-directory: judge`, where `judge` is ANOTHER
+		// repository checked out at run time -- compiles that other repository,
+		// not this one. moduleOf maps the missing directory to "." and the root
+		// was then vetted under a verdict about code it never builds ("no Go
+		// files in <root>"), which made every push of platform-specific files
+		// here need a waiver.
+		if c.dir != "" && c.dir != "." {
+			if fi, err := os.Stat(filepath.Join(dir, c.dir)); err != nil || !fi.IsDir() {
+				continue
+			}
+		}
 		for _, m := range modulesOf(c.dir, mods) {
 			var exempt map[string][]string
 			var exclude []*regexp.Regexp
@@ -590,6 +602,16 @@ func vetAll(f finding, dir string) []vetFailure {
 // either: the CI lines read are the ones run at the root.
 func vetModule(c config, modDir string, exempt map[string][]string, exclude []*regexp.Regexp) ([]byte, error) {
 	b, err := vetOnce(c, modDir, exempt, exclude)
+	if err != nil && noPackagesRE.Match(b) {
+		// ⛔ Only when EVERY file of the module carries a build constraint (a Hugo
+		// site's `//go:build tools` kit.go): the module is real, and a tag the files
+		// themselves name is what compiles it. Any other "no packages" stays a failure.
+		if tags := constrainedOnlyTags(modDir); len(tags) > 0 {
+			t := c
+			t.tags = mergeTags(c.tags, tags)
+			return vetOnce(t, modDir, exempt, exclude)
+		}
+	}
 	if err == nil || !cgoCrossBlocked(c, string(b)) {
 		return b, err
 	}
@@ -604,8 +626,11 @@ func vetModule(c config, modDir string, exempt map[string][]string, exclude []*r
 }
 
 // cToolchainRE matches the lines a C compiler or the cgo tool print when they
-// cannot compile for the target.
-var cToolchainRE = regexp.MustCompile(`(?m)\.(?:c|S|s|h|cc|cpp|m):\d+(?::\d+)?: (?:fatal )?error|^(?:gcc|clang|cc): error|^cgo: |C compiler`)
+// cannot compile for the target. ⛔ `-race` is one of them: the race runtime is
+// C (ThreadSanitizer), so a `-race` lane of another platform fails with
+// "-race requires cgo" or, once linked, "relocation target __tsan_free not
+// defined" -- the foreign C toolchain again, not the tree.
+var cToolchainRE = regexp.MustCompile(`(?m)\.(?:c|S|s|h|cc|cpp|m):\d+(?::\d+)?: (?:fatal )?error|^(?:gcc|clang|cc): error|^cgo: |C compiler|-race requires cgo|relocation target __tsan`)
 
 // cgoCrossBlocked reports whether a failed compile of c was the C toolchain of a
 // foreign target failing, rather than the Go code.
@@ -643,8 +668,21 @@ func vetOnce(c config, modDir string, exempt map[string][]string, exclude []*reg
 	if len(pkgs) == 0 {
 		pkgs = []string{"./..."}
 	}
-	if len(c.tags) > 0 {
-		base = append(base, "-tags="+strings.Join(c.tags, ","))
+	// ⛔ The `race` tag is how a `-race` lane is KNOWN here (config.go); compiled as
+	// a bare tag it pulls in the race runtime's files without the runtime itself
+	// ("relocation target __tsan_free not defined") on every host. The lane ran
+	// `-race`, so compile with the flag: it needs cgo, and a foreign target without
+	// its C toolchain is then excused by cgoCrossBlocked like any other cgo build.
+	tags := make([]string, 0, len(c.tags))
+	for _, tg := range c.tags {
+		if tg == "race" {
+			base = append(base, "-race")
+			continue
+		}
+		tags = append(tags, tg)
+	}
+	if len(tags) > 0 {
+		base = append(base, "-tags="+strings.Join(tags, ","))
 	}
 	run := func(args ...string) ([]byte, error) {
 		cmd := exec.Command("go", args...)

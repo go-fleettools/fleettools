@@ -696,6 +696,30 @@ func TestVetRecordsAPassForANestedModuleWithAGoRunLane(t *testing.T) {
 	}
 }
 
+// ⛔ go-simd/floats: the lanes that check the generated assembly is current run
+// `go run -modfile="$RUNNER_TEMP/gen.mod" ${g}_amd64_gen.go`. They are generator
+// invocations, not builds of the tree, and were reported as configurations the
+// tree does not compile under.
+func TestGeneratorRunIsNotAConfiguration(t *testing.T) {
+	for in, want := range map[string]bool{
+		`GOFLAGS=-mod=mod go run -modfile="$RUNNER_TEMP/gen.mod" ${g}_amd64_gen.go`: true,
+		"go run -modfile=gen.mod gen.go":                                            true,
+		"go run ${g}_gen.go":                                                        true,
+		"go run -tags=examples examples/example.go":                                 false,
+		"go run ./cmd/x":                                                            false,
+		"go test ./...":                                                             false,
+	} {
+		if got := generatorRun(in); got != want {
+			t.Errorf("generatorRun(%q) = %v, want %v", in, got, want)
+		}
+	}
+	src := "jobs:\n  gen:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n" +
+		"          for g in a b; do\n            go run -modfile=\"$RUNNER_TEMP/gen.mod\" ${g}_amd64_gen.go\n          done\n          go run -modfile=\"$RUNNER_TEMP/gen.mod\" allpass_arm64_gen.go\n"
+	if cfgs, _ := configsOfWorkflow("ci.yml", []byte(src)); len(cfgs) != 0 {
+		t.Fatalf("%+v, want no configuration from a generator lane", cfgs)
+	}
+}
+
 func TestRunFilesOf(t *testing.T) {
 	for in, want := range map[string]string{
 		`go run -tags="examples" examples/example.go`: "examples/example.go",
