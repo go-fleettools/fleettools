@@ -191,6 +191,9 @@ func decide(p payload, now time.Time) verdict {
 		return verdict{}
 	}
 	if m := waiverRE.FindStringSubmatch(in.Prompt); m != nil {
+		if r := quotaRefusal(m[1]); r != "" {
+			return verdict{deny: true, reason: r}
+		}
 		return verdict{reason: fmt.Sprintf("modelgate: model waived at %s: %s",
 			now.Format("2006-01-02 15:04 MST"), m[1])}
 	}
@@ -331,6 +334,13 @@ install" is no request) is refused unless it names BOTH
 counts). The refusal quotes those two lines. Why: an agent that installed into
 a private GOBIN and checked that copy reported "installed" while the PATH
 binary was older (2026-11-28, twice).
+
+QUOTA WAIVERS: a model-waiver whose reason cites a limit, quota, 429, "resets" or
+"unavailable" (limite, quota, indisponible in French) is refused unless the same
+line carries "probe: <HH:MM> <result>" - the time and outcome of resuming the
+stopped agent with SendMessage. A 429 is a past state. The text is trusted, not
+the transcript: the hook's transcript_path is the parent's, which never holds a
+sub-agent's 429.
 
 ALLOWED: a task in no class (any explicit model), subagent_type "fork" (it
 ignores the model), a line "model-waiver: <reason>" in the prompt (the reason is
