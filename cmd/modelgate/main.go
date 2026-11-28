@@ -322,6 +322,16 @@ has a line "bibliography: <URL or existing file of a source opened>" and a line
 os.UserConfigDir()/modelgate/bibliography-waivers.jsonl. Other agent types are
 exempt.
 
+INSTALL-PATH GATE: a brief (subagent_type implementer, claude, general-purpose
+or untyped, whatever the task class) that asks for a binary to be installed
+("go install", "install it", "the installed binary"; a line saying "do not
+install" is no request) is refused unless it names BOTH
+"GOBIN=~/.local/bin go install <module>/cmd/<cmd>@<tag>" and
+"go version -m ~/.local/bin/<cmd>" (an absolute path ending in /.local/bin
+counts). The refusal quotes those two lines. Why: an agent that installed into
+a private GOBIN and checked that copy reported "installed" while the PATH
+binary was older (2026-11-28, twice).
+
 ALLOWED: a task in no class (any explicit model), subagent_type "fork" (it
 ignores the model), a line "model-waiver: <reason>" in the prompt (the reason is
 required and is echoed as a stamped notice), another tool than Agent, and a
