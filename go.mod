@@ -19,7 +19,7 @@ retract v0.1.0 // tracked 8.4 MB of compiled executables; use v0.1.1 or later
 require (
 	github.com/diskfs/go-diskfs v1.9.4
 	github.com/go-compressions/xz v0.3.1
-	github.com/go-gitsafe/gitsafe v0.59.0
+	github.com/go-gitsafe/gitsafe v0.70.0
 	github.com/go-kramdown/kramdown v0.3.1
 	github.com/go-ooxml/ooxml v0.8.0
 	github.com/go-ooxml/opc v0.2.1
