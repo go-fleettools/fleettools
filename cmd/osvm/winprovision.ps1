@@ -9,7 +9,12 @@ $ProgressPreference = 'SilentlyContinue'
 
 function Say($m) {
     Add-Content -Path C:\osvm-provision.log -Value $m
-    try { $p = New-Object System.IO.Ports.SerialPort 'COM1', 115200; $p.Open(); $p.WriteLine("OSVM: $m"); $p.Close() } catch { }
+    Write-Host $m
+    # cmd /c echo ...>\\.\COM1: the form that reached the host from the specialize
+    # pass of run 46121232483 (the first-logon command writes the same way);
+    # shell metacharacters are blanked so a message cannot inject a command
+    $c = $m -replace '[&|<>^%"]', ' '
+    try { cmd.exe /c "echo OSVM: $c>\\.\COM1" | Out-Null } catch { }
 }
 
 function Fetch($url, $out) {

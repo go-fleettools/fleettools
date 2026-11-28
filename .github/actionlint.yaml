@@ -5,3 +5,5 @@ self-hosted-runner:
     - amd64
     - openstack
     - bigdisk
+    # a scale set is addressed by its name alone
+    - go-fleettools-bigdisk

@@ -289,3 +289,45 @@ func TestDiskBytes(t *testing.T) {
 		t.Errorf("diskBytes = %d, %v", n, ok)
 	}
 }
+
+func TestConsoleSilence(t *testing.T) {
+	cases := []struct {
+		name           string
+		ticks, first   int
+		started, fails bool
+	}{
+		{"fresh", 10, 0, false, false},
+		{"no console at all for 80 minutes", noConsoleTicks, 0, false, true},
+		{"script started", noConsoleTicks * 2, 0, true, false},
+		{"line seen, script not yet due", 100 + provisionTicks - 1, 100, false, false},
+		{"line seen, no script 25 minutes later", 100 + provisionTicks, 100, false, true},
+		{"script started in time", 100 + provisionTicks*3, 100, true, false},
+	}
+	for _, c := range cases {
+		got := consoleSilence(c.ticks, c.first, c.started)
+		if (got != "") != c.fails {
+			t.Errorf("%s: consoleSilence = %q, fails = %v", c.name, got, c.fails)
+		}
+	}
+}
+
+func TestBootRetryDue(t *testing.T) {
+	cases := []struct {
+		name     string
+		since    int
+		size     int64
+		resets   int
+		wantDone bool
+	}{
+		{"too early", bootRetryTicks - 1, 92 << 20, 0, false},
+		{"stuck at the UEFI shell", bootRetryTicks, 92 << 20, 0, true},
+		{"installing: disk grew", bootRetryTicks * 3, bootGrewBytes, 0, false},
+		{"after two resets", bootRetryTicks, 92 << 20, 2, true},
+		{"out of resets", bootRetryTicks * 9, 92 << 20, maxBootResets, false},
+	}
+	for _, c := range cases {
+		if got := bootRetryDue(c.since, c.size, c.resets); got != c.wantDone {
+			t.Errorf("%s: bootRetryDue = %v, want %v", c.name, got, c.wantDone)
+		}
+	}
+}

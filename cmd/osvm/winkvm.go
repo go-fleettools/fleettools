@@ -159,6 +159,54 @@ func pressAnyKey(ctx context.Context, sock string, keyFor time.Duration) {
 // updates off) grow it too, so 25 minutes of nothing is a dead guest.
 const stallTicks = 150
 
+// Console silence bounds, in 10 s ticks. Run 46031301930 sat 40 minutes at a
+// black desktop with not one "OSVM:" line while the disk grew a few MiB, so the
+// disk-size stall never fired. The answer file writes "OSVM: specialize pass"
+// (long before the desktop) and the first-logon command "OSVM: firstlogon ...":
+// once any line is there, the script must say "provision start" within
+// provisionTicks (60 min: run 46121232483 was still working 25 min after
+// specialize; the build's --timeout 100m stays the outer bound); with no line at all the guest has no working console by
+// noConsoleTicks (80 min, Setup took 55 in the longest run).
+const (
+	provisionTicks = 360
+	noConsoleTicks = 480
+	provisionLine  = "provision start"
+)
+
+// consoleSilence returns why the build must fail, or "" while it may go on:
+// ticks is the current tick, first the tick of the first "OSVM:" line (0 =
+// none yet) and started whether the provisioning script said it started.
+func consoleSilence(ticks, first int, started bool) string {
+	switch {
+	case started:
+		return ""
+	case first == 0 && ticks >= noConsoleTicks:
+		return fmt.Sprintf("no \"OSVM:\" line on the guest console after %d minutes: the answer file's commands do not run or COM1 does not reach the host", noConsoleTicks/6)
+	case first != 0 && ticks-first >= provisionTicks:
+		return fmt.Sprintf("no %q line %d minutes after the first \"OSVM:\" line: the first-logon command did not start the provisioning script", provisionLine, provisionTicks/6)
+	}
+	return ""
+}
+
+// A guest that missed the CD's five-second "press any key" prompt falls to the
+// UEFI shell with a ~92 MiB disk and stays there (runs 45969309942 and
+// 46063104691; run 46031301930 caught the prompt and installed). The keys of
+// pressAnyKey only last keyFor, so when the disk is still under bootGrewBytes
+// bootRetryTicks (8 minutes) after the start or the last reset, the guest is
+// reset and the keys are sent again, at most maxBootResets times. Setup copies
+// far more than 512 MiB in that time, so a guest that is installing is left alone.
+const (
+	bootRetryTicks = 48
+	bootGrewBytes  = 512 << 20
+	maxBootResets  = 3
+)
+
+// bootRetryDue says whether the guest, sinceStart ticks after the start or its
+// last reset, with a disk of size bytes, has to be reset and sent the keys again.
+func bootRetryDue(sinceStart int, size int64, resets int) bool {
+	return resets < maxBootResets && sinceStart >= bootRetryTicks && size < bootGrewBytes
+}
+
 // shotDue says whether tick n (10 s each) takes a screenshot: every 20 s for
 // the first 500 s, where the CD prompt, Setup's start and its first
 // reboot happen, then every 5 minutes.
@@ -429,7 +477,8 @@ func runQemu(ctx context.Context, o kvmOpts, p kvmPaths, w io.Writer) error {
 	}
 	ticks, shots := 0, 0
 	var lastSize int64
-	lastTick := 0
+	lastTick, firstLine := 0, 0
+	lastReset, resets := 0, 0
 	for {
 		select {
 		case err := <-done:
@@ -456,6 +505,13 @@ func runQemu(ctx context.Context, o kvmOpts, p kvmPaths, w io.Writer) error {
 				snapshot(p, shots, w)
 			}
 			if size, ok := diskBytes(p.root); ok {
+				if p.monitor != "" && bootRetryDue(ticks-lastReset, size, resets) {
+					resets++
+					lastReset = ticks
+					fmt.Fprintf(w, "boot: the disk is %d MiB after %d minutes, the CD prompt was missed: reset %d of %d and keys again\n", size>>20, bootRetryTicks/6, resets, maxBootResets)
+					_ = monitorCommand(p.monitor, "system_reset", 300*time.Millisecond)
+					go pressAnyKey(ctx, p.monitor, keyFor)
+				}
 				if size != lastSize {
 					lastSize, lastTick = size, ticks
 				} else if ticks-lastTick >= stallTicks {
@@ -471,6 +527,21 @@ func runQemu(ctx context.Context, o kvmOpts, p kvmPaths, w io.Writer) error {
 				_ = cmd.Process.Kill()
 				<-done
 				return fmt.Errorf("the guest reported a failure: %s", fail)
+			}
+			started := false
+			for line := range seen {
+				if strings.Contains(line, provisionLine) {
+					started = true
+				}
+			}
+			if len(seen) > 0 && firstLine == 0 {
+				firstLine = ticks
+			}
+			if why := consoleSilence(ticks, firstLine, started); why != "" {
+				snapshot(p, 996, w)
+				_ = cmd.Process.Kill()
+				<-done
+				return errors.New(why)
 			}
 		}
 	}
