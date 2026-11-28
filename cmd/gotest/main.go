@@ -171,6 +171,7 @@ func gotest(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(stdout, loadgate.Banner(load, why))
 		args = withoutUnderLoad(args) // `go test` has never heard of it
 	}
+	fuzzWanted := fuzzRequested(args)
 
 	pattern, hasRun := runPattern(args)
 	if !hasRun {
@@ -206,32 +207,30 @@ func gotest(cmd *cobra.Command, args []string) error {
 	// is the same defect and a clearer sentence, and `go test` already prints
 	// "[no tests to run]" for it while exiting 0.
 	//
-	// ⛔⛔ UNLESS BENCHMARKS WERE ASKED FOR, and this exception is not a softening
+	// ⛔⛔ UNLESS BENCHMARKS OR FUZZING WERE ASKED FOR, and this exception is not a softening
 	// of the rule — it is the rule applied to what was actually selected.
-	// `-run '^$' -bench X` is the DOCUMENTED way to run benchmarks without the
-	// tests: the empty test selection is the point of the command, not an
-	// accident, and `go test` itself prints "[no tests to run]" and exits 0.
+	// `-run '^$' -bench X` and `-run '^$' -fuzz Y` are the DOCUMENTED ways to run
+	// benchmarks or fuzz targets without the tests: the empty test selection is the point
+	// of the command, not an accident, and `go test` itself prints "[no tests to run]" and exits 0.
 	//
 	// Found by running this very command through itself: every `gotest -run '^$'
-	// -bench …` exited 1 saying the selection was empty. Left alone, routing
-	// benchmarks through this wrapper — which is what the load gate above does —
-	// would make the wrapper hostile to the one kind of run it now exists to
-	// guard, and everyone would go back around it.
+	// -bench …` and `gotest -run '^$' -fuzz …` exited 1 saying the selection was empty.
+	// Left alone, routing benchmarks or fuzz runs through this wrapper would make
+	// the wrapper hostile to the runs it exists to guard, and everyone would go back around it.
 	//
-	// ⚠ The check still applies to the benchmark's OWN pattern in spirit, but this
-	// command cannot see which benchmarks ran: `go test -bench` prints their names
+	// ⚠ The check still applies to the benchmark's or fuzz's OWN pattern in spirit, but this
+	// command cannot see which benchmarks or fuzz targets ran: `go test` prints their names
 	// in a format ranNames does not read. Saying so here rather than pretending
 	// the verdict covers them.
 	//
 	// ⛔ THE WHOLE PATTERN VERDICT IS SKIPPED, not just the "nothing ran" half,
 	// and for the same reason: `^$` is an alternative that matches nothing BY
 	// DESIGN, so the per-alternative check fires on it too. This command cannot
-	// tell a deliberately empty selection from a typo once -bench is present, and
+	// tell a deliberately empty selection from a typo once -bench or -fuzz is present, and
 	// the cost of being wrong is asymmetric — a false refusal here drives every
-	// benchmark back to bare `go test`, which is ungated, and the load gate above
-	// is then worth nothing. Stated rather than hidden: in a -bench run, gotest
-	// gates the load and checks no pattern.
-	if benchesWanted {
+	// benchmark or fuzz run back to bare `go test`, which is ungated. Stated rather than
+	// hidden: in a -bench or -fuzz run, gotest checks no pattern.
+	if benchesWanted || fuzzWanted {
 		return cli.FromStatus(status)
 	}
 	// ⛔⛔ A RUN THAT NEVER GOT TO SELECTING IS NOT AN EMPTY SELECTION, and the
@@ -351,6 +350,32 @@ func benchRequested(args []string) (why string, ok bool) {
 		}
 	}
 	return why, ok
+}
+
+// fuzzRequested reports whether these arguments ask for a fuzz run.
+//
+// ⚠ `-fuzz` must be matched as a WHOLE flag. `-fuzztime` and `-fuzzminimizetime`
+// both begin with it and neither asks for a fuzz target on its own — a prefix match
+// would treat a run that only sets how long fuzzing runs as asking for a target.
+//
+// ⛔ And an EMPTY -fuzz is not a fuzz run: `go test -fuzz=` selects none,
+// exactly as `-run=` does.
+func fuzzRequested(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-fuzz" || a == "--fuzz" || a == "-test.fuzz" || a == "--test.fuzz":
+			if i+1 < len(args) && args[i+1] != "" {
+				return true
+			}
+		case strings.HasPrefix(a, "-fuzz="), strings.HasPrefix(a, "--fuzz="),
+			strings.HasPrefix(a, "-test.fuzz="), strings.HasPrefix(a, "--test.fuzz="):
+			if _, v, _ := strings.Cut(a, "="); v != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // withoutUnderLoad strips this wrapper's own flag before `go test` sees it.
